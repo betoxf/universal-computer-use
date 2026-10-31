@@ -34,11 +34,15 @@ class Proxy:
         self.log = Path(self.home.name) / "fake.log"
         self.alert_file = Path(self.home.name) / "alerts.txt"
         self.alert_file.touch()
+        self.window_log = Path(self.home.name) / "windows.log"
+        self.window_reports = Path(self.home.name) / "window-reports.txt"
+        self.window_reports.touch()
         tools = Path(self.home.name) / "tools"
         tools.mkdir()
         (tools / "log").write_text(FAKE_LOG_COMMAND)
         (tools / "log").chmod(0o755)
         env = {**os.environ, "HOME": self.home.name, "FAKE_LOG": str(self.log), "FAKE_ALERTS": str(self.alert_file),
+               "FAKE_WINDOW_LOG": str(self.window_log), "FAKE_WINDOW_REPORTS": str(self.window_reports),
                "PATH": f"{tools}:{os.environ['PATH']}"}
         command = [] if from_plugin else ["--", sys.executable, "-I", str(FAKE)]
         folder = Path(self.home.name) / "My Project"

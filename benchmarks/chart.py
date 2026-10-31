@@ -146,7 +146,7 @@ def tokens(results):
     cross_x, cross_y = x(crossing), y(ucu_setup + crossing * ucu_task)
     body.append(f'<circle cx="{cross_x:.1f}" cy="{cross_y:.1f}" r="12" fill="{COLORS["ink"]}" fill-opacity="0.18"/>')
     body.append(f'<circle cx="{cross_x:.1f}" cy="{cross_y:.1f}" r="6" fill="{COLORS["ink"]}"/>')
-    body.append(text(cross_x + 24, cross_y - 26, f"UCU costs less from task {first}", "ink", 20, 600, "end"))
+    body.append(text(cross_x - 12, cross_y + 44, f"UCU costs less from task {first}", "ink", 20, 600))
     footer = "One setup, then the same task each time. Tokens are estimated as characters / 4."
     return card("Total tokens in a session", HEIGHT, "".join(body), footer, "dots")
 

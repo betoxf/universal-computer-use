@@ -6,6 +6,7 @@ The `js` tool understands these `code` values: "crash" exits without answering, 
 "elicit:<app>") asks the client to approve Calculator (or <app>) and returns the answer, and
 "alert:<app>", "alert-late:<app>" and "other-sound:<app>" write a sound to $FAKE_ALERTS for the fake
 `log` command: an alert during the call, an alert just after it, or a sound that isn't an alert.
+"no-windows" and "refuse" return the engine's errors for a window it can't find and an app it may not use.
 Any other call returns its `_meta`.
 The first `js` result of each process starts with a long documentation block, like cua_repl's.
 """
@@ -23,7 +24,7 @@ TOOLS = [{"name": name, "inputSchema": {"type": "object"}} for name in ("js", "j
 def log(event, **fields):
     if LOG:
         with open(LOG, "a") as handle:
-            handle.write(json.dumps({"event": event, "pid": os.getpid(), **fields}) + "\n")
+            handle.write(json.dumps({"event": event, "pid": os.getpid(), "at": time.time(), **fields}) + "\n")
 
 
 def send(message):
@@ -68,6 +69,10 @@ def main():
                 answer = json.loads(sys.stdin.readline())
                 log("recv", message=answer)
                 texts(request_id, json.dumps(answer.get("result")))
+                continue
+            if name == "js" and code in ("no-windows", "refuse"):
+                texts(request_id, "Computer Use server error -10005: noWindowsAvailable" if code == "no-windows"
+                      else 'Computer Use was not approved to use "Terminal"')
                 continue
             kind, _, app = str(code).partition(":")
             if name == "js" and kind == "alert-late":
