@@ -43,16 +43,19 @@ class BenchmarkTest(unittest.TestCase):
     def test_draws_valid_charts_from_the_committed_results(self):
         chart = load("chart")
         results = json.loads((ROOT / "benchmarks/results.json").read_text())
-        for title, subtitle, rows in chart.charts(results).values():
-            self.assertLessEqual(len(rows), 3)
-            svg = chart.draw(title, subtitle, rows, "Footer", "dark")
+        for svg in chart.charts(results).values():
             xml.dom.minidom.parseString(svg)
-            for _, _, bars in rows:
-                self.assertEqual(sorted({bar[0] for bar in bars}), ["Codex engine", "agent-desktop", "ucu"])
+            self.assertLessEqual(svg.count("data-group="), 3)
+        for _, marks in chart.speed_groups(results):
+            self.assertEqual(sorted(mark[0] for mark in marks), ["agent-desktop", "ucu"])
+            for _, low, middle, high in marks:
+                self.assertLessEqual(low, middle)
+                self.assertLessEqual(middle, high)
 
     def test_formats_values(self):
         chart = load("chart")
         self.assertEqual((chart.ms(61.3), chart.ms(1488), chart.count(2264.7)), ("61 ms", "1.5 s", "2,265"))
+        self.assertEqual((chart.times(2.66), chart.times(26.4)), ("2.7×", "26×"))
 
 
 if __name__ == "__main__":

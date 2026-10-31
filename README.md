@@ -28,10 +28,7 @@
 </div>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-actions-dark.svg">
-    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 48 ms, clicks in 26 ms and takes a screenshot in 44 ms, against 103 ms, 48 ms and 288 ms for agent-desktop." width="860">
-  </picture>
+  <img src="assets/benchmarks/headline.svg" alt="2.2 times faster window reads, 48 ms against 103 ms for agent-desktop. 4.1 times fewer tokens per task, 518 against 2,110 for agent-desktop. 19 times less idle memory, 19 MB against 363 MB for the Codex engine." width="860">
 </p>
 
 ## Why UCU
@@ -58,27 +55,19 @@ with your agents, stops the engine when idle, shortens what the model has to rea
 hidden launches, the window tools and the notes about error sounds and new windows.
 
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) from Vercel Labs is a separate, open-source tool
-with its own engine. These are the numbers for all three on the same Mac and the same tasks:
+with its own engine. The charts compare UCU with agent-desktop, and the table adds the engine alone. All of it comes from the same Mac
+and the same tasks:
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-jobs-dark.svg">
-    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.0 s against 462 ms for agent-desktop, and reads a large window in 1.5 s against 3.0 s, or 164 ms for agent-desktop's outline. agent-desktop starts faster, 256 ms against 774 ms." width="860">
-  </picture>
+  <img src="assets/benchmarks/speed-actions.svg" alt="Candle chart of single actions. UCU reads a small window in 48 ms, clicks in 26 ms and takes a screenshot in 44 ms, against 103 ms, 48 ms and 288 ms for agent-desktop." width="860">
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
-    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 518 tokens with UCU and 2,110 with agent-desktop. Reading a small window takes 390 against 1,100, and a large window 1,651 against 2,542, or 1,112 for agent-desktop's outline." width="860">
-  </picture>
+  <img src="assets/benchmarks/speed-jobs.svg" alt="Candle chart of longer jobs. agent-desktop finishes the task in 462 ms against 1.0 s for UCU, and starts in 256 ms against 774 ms. UCU reads a large window in 1.5 s against 3.0 s. Large window reads vary the most." width="860">
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/overhead-dark.svg">
-    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 4,091 tokens with UCU and 2,882 with agent-desktop. Idle memory is 19 MB for UCU, 363 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
-  </picture>
+  <img src="assets/benchmarks/tokens.svg" alt="Line chart of total tokens over a session. UCU starts higher, at 4,091 tokens against 2,882 for agent-desktop, then costs 518 tokens per task against 2,110. UCU costs less from the first task on. After 8 tasks, UCU is at 8,239 tokens and agent-desktop at 19,759." width="860">
 </p>
 
 **Where UCU wins**
@@ -134,6 +123,8 @@ python3 -I benchmarks/chart.py
 - The clock covers the tool only, not the model's thinking time. agent-desktop runs through its CLI, as an agent
   would use it, with `-i --compact` and `batch`, the options its docs recommend to save tokens.
 - Tokens are estimated as characters / 4, and count what the model reads and writes. Screenshots aren't counted.
+- In the speed charts, each box holds the middle half of the samples, and each group has its own scale. The token
+  chart counts one setup, then the same task each time. Chart backgrounds are generated art and carry no data.
 - Setup counts tool definitions, the usage rules and the first-use docs for UCU and the engine, and the two
   `skills get` guides for agent-desktop. Tool definitions go with every request, usually from a cache.
 - UCU's setup is smaller because it leaves the browser part out of the docs and the tool list until a call needs it,
