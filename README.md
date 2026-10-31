@@ -28,10 +28,7 @@
 </div>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-actions-dark.svg">
-    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 55 ms, clicks in 57 ms and takes a screenshot in 52 ms, against 145 ms, 84 ms and 295 ms for agent-desktop." width="860">
-  </picture>
+  <img src="assets/benchmarks/headline.svg" alt="2.7 times faster window reads, 55 ms against 145 ms for agent-desktop. 3.8 times fewer tokens per task, 552 against 2,109 for agent-desktop. 26 times less idle memory, 24 MB against 638 MB for the Codex engine." width="860">
 </p>
 
 ## Why UCU
@@ -51,32 +48,24 @@
 ## How it compares
 
 UCU runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. The
-gap between those two bars is noise, not a speedup. What UCU adds is everything around the engine: it works
+gap between those two is noise, not a speedup. What UCU adds is everything around the engine: it works
 with your agents, stops the engine when idle, and adds the deny list, the log, the window tools and the
 error-sound notes.
 
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) from Vercel Labs is a separate, open-source tool
-with its own engine. These are the numbers for all three on the same Mac and the same tasks:
+with its own engine. The charts compare UCU with agent-desktop, and the table adds the engine alone. All of it comes from the same Mac
+and the same tasks:
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-jobs-dark.svg">
-    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.4 s against 780 ms for agent-desktop, and reads a large window in 2.1 s against 3.0 s, or 169 ms for agent-desktop's outline. agent-desktop starts faster, 315 ms against 654 ms." width="860">
-  </picture>
+  <img src="assets/benchmarks/speed-actions.svg" alt="Candle chart of single actions. UCU reads a small window in 55 ms, clicks in 57 ms and takes a screenshot in 52 ms, against 145 ms, 84 ms and 295 ms for agent-desktop." width="860">
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
-    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 552 tokens with UCU and 2,109 with agent-desktop. Reading a small window takes 390 against 1,099, and a large window 1,651 against 2,177, or 1,112 for agent-desktop's outline." width="860">
-  </picture>
+  <img src="assets/benchmarks/speed-jobs.svg" alt="Candle chart of longer jobs. agent-desktop finishes the task in 780 ms against 1.4 s for UCU, and starts in 315 ms against 654 ms. UCU reads a large window in 2.1 s against 3.0 s. Large window reads vary the most." width="860">
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/overhead-dark.svg">
-    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 6,992 tokens with UCU and 2,882 with agent-desktop. Idle memory is 24 MB for UCU, 638 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
-  </picture>
+  <img src="assets/benchmarks/tokens.svg" alt="Line chart of total tokens over a session. UCU starts higher, at 6,992 tokens against 2,882 for agent-desktop, then costs 552 tokens per task against 2,109. UCU costs less from task 3 on. After 8 tasks, UCU is at 11,408 tokens and agent-desktop at 19,751." width="860">
 </p>
 
 **Where UCU wins**
@@ -130,6 +119,8 @@ python3 -I benchmarks/chart.py
 - The clock covers the tool only, not the model's thinking time. agent-desktop runs through its CLI, as an agent
   would use it, with `-i --compact` and `batch`, the options its docs recommend to save tokens.
 - Tokens are estimated as characters / 4, and count what the model reads and writes. Screenshots aren't counted.
+- In the speed charts, each box holds the middle half of the samples, and each group has its own scale. The token
+  chart counts one setup, then the same task each time. Chart backgrounds are generated art and carry no data.
 - Setup counts tool definitions, the usage rules and the first-use docs for UCU and the engine, and the two
   `skills get` guides for agent-desktop. Tool definitions go with every request, usually from a cache.
 - Idle memory leaves out the Computer Use service itself, which UCU and the engine share. UCU stops the

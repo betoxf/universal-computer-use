@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""Draw the README's bar charts from benchmarks/results.json, in light and dark.
+"""Draw the README's charts from benchmarks/results.json.
 
     python3 -I benchmarks/chart.py
 
-Each row has its own scale, because the rows are measured in different units, so compare the bars
-within a row. A bar is never drawn shorter than MIN_BAR, so a tiny value stays visible and clickable.
+Every number and shape comes from the results. The only generated art is the dark background in
+assets/benchmarks/plate-*.jpg, which carries no data. Each image has at most three groups.
 """
+import base64
 import json
 from html import escape
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-THEMES = {
-    "light": {"surface": "#fcfcfb", "border": "#e4e3df", "ink": "#0b0b0b", "soft": "#52514e", "muted": "#74736e",
-              "ucu": "#0b0b0b", "Codex engine": "#2a78d6", "agent-desktop": "#b4b3ab"},
-    "dark": {"surface": "#1a1a19", "border": "#383835", "ink": "#f0efec", "soft": "#c3c2b7", "muted": "#9a998f",
-             "ucu": "#f0efec", "Codex engine": "#3987e5", "agent-desktop": "#77766f"},
-}
+COLORS = {"ink": "#f5f4f1", "muted": "#a3a29a", "rule": "#ffffff", "ucu": "#f0efec", "agent-desktop": "#8d8c85"}
+NAMES = {"ucu": "UCU", "agent-desktop": "agent-desktop"}
+BASE = "#03050a"
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-WIDTH, LEFT, BAR_MAX, BAR_HEIGHT, BAR_GAP, ROW_GAP = 860, 236, 440, 14, 3, 22
-MIN_BAR = 6
+WIDTH, PLATE_HEIGHT, HEIGHT, CANDLE, CANDLE_GAP, MIN_BODY = 1000, 570, 474, 84, 20, 6
 
 
 def ms(value):
@@ -30,113 +27,167 @@ def count(value):
     return f"{value:,.0f}"
 
 
-def rows_speed(results):
-    m = results["medians"]
-    tools = ["ucu", "Codex engine", "agent-desktop"]
-
-    def row(label, note, metric, extra=()):
-        return label, note, [(tool, tool, m[tool][metric], ms(m[tool][metric])) for tool in tools] + list(extra)
-
-    skeleton = m["agent-desktop skeleton"]["read dense app (ms)"]
-    return [
-        row("Read a small window", "Calculator", "read small app (ms)"),
-        row("Click a button", "Calculator", "click (ms)"),
-        row("Take a screenshot", "Calculator", "screenshot (ms)"),
-        row("Finish a task", "12 + 34 = in Calculator", "task (ms)"),
-        row("Read a large window", "Font Book", "read dense app (ms)",
-            [("agent-desktop", "agent-desktop, outline only", skeleton, ms(skeleton))]),
-        row("Start from nothing", "first read after launch", "cold start (ms)"),
-    ]
+def times(value):
+    return f"{value:.1f}×" if value < 10 else f"{value:.0f}×"
 
 
-def rows_tokens(results):
-    m, setup, sizes = results["medians"], results["setup chars"], results["sizes"]
-    tools = ["ucu", "Codex engine", "agent-desktop"]
-    task = {tool: m[tool]["task tokens read"] + m[tool]["task tokens written"] for tool in tools}
-    small = {tool: sizes[tool]["read small app (chars)"] / 4 for tool in tools}
-    dense = {tool: m[tool]["read dense app (chars)"] / 4 for tool in tools}
-    session = {tool: sum(setup[tool].values()) / 4 for tool in tools}
-    memory = results["idle memory (MB)"]
-    outline = m["agent-desktop skeleton"]["read dense app (chars)"] / 4
-    return [
-        ("Finish a task", "12 + 34 = in Calculator", [(t, t, task[t], f"{count(task[t])} tokens") for t in tools]),
-        ("Read a small window", "Calculator", [(t, t, small[t], f"{count(small[t])} tokens") for t in tools]),
-        ("Read a large window", "Font Book", [(t, t, dense[t], f"{count(dense[t])} tokens") for t in tools]
-         + [("agent-desktop", "agent-desktop, outline only", outline, f"{count(outline)} tokens")]),
-        ("Set up a session", "tool definitions, rules, docs",
-         [(t, t, session[t], f"{count(session[t])} tokens") for t in tools]),
-        ("Memory while idle", "after the turn ends", [(t, t, memory[t], f"{count(memory[t])} MB") for t in tools]),
-    ]
+def text(x, y, content, fill="ink", size=15, weight=400, anchor="start", extra=""):
+    return (f'<text x="{x:.1f}" y="{y:.1f}" fill="{COLORS[fill]}" font-size="{size}" font-weight="{weight}" '
+            f'text-anchor="{anchor}" {extra}>{escape(content)}</text>')
 
 
-def text(x, y, content, fill, size=13, weight=400, anchor="start"):
-    return (f'<text x="{x}" y="{y}" fill="{fill}" font-size="{size}" font-weight="{weight}" '
-            f'text-anchor="{anchor}">{escape(content)}</text>')
-
-
-def bar(x, y, width, fill):
-    """A bar anchored square to its baseline, with a 4px round on its data end."""
-    r = min(4, width / 2)
-    return (f'<path d="M{x} {y}h{width - r:.1f}a{r} {r} 0 0 1 {r} {r}v{BAR_HEIGHT - 2 * r}a{r} {r} 0 0 1 -{r} {r}'
-            f'h-{width - r:.1f}z" fill="{fill}"/>')
-
-
-def draw(title, subtitle, rows, footer, theme):
-    colors = THEMES[theme]
-    y, body = 124, []
-    for label, note, bars in rows:
-        top = max(value for _, _, value, _ in bars)
-        block = len(bars) * BAR_HEIGHT + (len(bars) - 1) * BAR_GAP
-        body.append(text(28, y + block / 2 - 2, label, colors["ink"], 15, 600))
-        body.append(text(28, y + block / 2 + 15, note, colors["muted"], 12))
-        for index, (tool, name, value, shown) in enumerate(bars):
-            bar_y = y + index * (BAR_HEIGHT + BAR_GAP)
-            width = max(MIN_BAR, value / top * BAR_MAX)
-            body.append(bar(LEFT, bar_y, width, colors[tool]))
-            caption = shown if name == tool else f"{shown} ({name.split(', ')[1]})"
-            body.append(text(LEFT + width + 8, bar_y + 11.5, caption, colors["soft"], 12))
-        y += block + ROW_GAP
-    legend, x = [], 28
-    for tool, width in (("ucu", 62), ("Codex engine", 124), ("agent-desktop", 130)):
-        legend.append(f'<rect x="{x}" y="77" width="12" height="12" rx="3" fill="{colors[tool]}"/>')
-        legend.append(text(x + 18, 88, "UCU" if tool == "ucu" else tool, colors["soft"], 13))
+def legend():
+    parts, x = [], 762
+    for tool, width in (("ucu", 72), ("agent-desktop", 0)):
+        parts.append(f'<rect x="{x}" y="46" width="14" height="14" rx="4" fill="{COLORS[tool]}"/>')
+        parts.append(text(x + 22, 58, NAMES[tool], "muted", 16))
         x += width
-    height = y + 34
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" width="{WIDTH}" height="{height}" font-family="{FONT}" role="img" aria-label="{escape(title)}">
-<title>{escape(title)}</title>
-<rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="14" fill="{colors['surface']}" stroke="{colors['border']}"/>
-{text(28, 42, title, colors['ink'], 24, 700)}
-{text(28, 63, subtitle, colors['muted'], 13)}
-{''.join(legend)}
-{''.join(body)}
-{text(28, height - 16, footer, colors['muted'], 11)}
+    return "".join(parts)
+
+
+def card(title, height, body, footer, plate, shift=0):
+    """A rounded dark card. The art moves by shift, so its brightest part stays clear of the text."""
+    image = base64.b64encode((ROOT / f"assets/benchmarks/plate-{plate}.jpg").read_bytes()).decode()
+    heading = text(44, 64, title, "ink", 32, 700) if title else ""
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" width="{WIDTH}" height="{height}" font-family="{FONT}" role="img" aria-label="{escape(title or footer)}">
+<title>{escape(title or footer)}</title>
+<defs>
+<clipPath id="card"><rect width="{WIDTH}" height="{height}" rx="24"/></clipPath>
+<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+<linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{BASE}"/><stop offset="1" stop-color="{BASE}" stop-opacity="0"/></linearGradient>
+</defs>
+<g clip-path="url(#card)">
+<rect width="{WIDTH}" height="{height}" fill="{BASE}"/>
+<image href="data:image/jpeg;base64,{image}" y="{shift}" width="{WIDTH}" height="{PLATE_HEIGHT}" preserveAspectRatio="xMidYMin slice"/>
+<rect y="{shift}" width="{WIDTH}" height="170" fill="url(#fade)"/>
+{heading}
+{body}
+{text(44, height - 24, footer, "muted", 14)}
+</g>
+<rect x="0.75" y="0.75" width="{WIDTH - 1.5}" height="{height - 1.5}" rx="23.5" fill="none" stroke="{COLORS['rule']}" stroke-opacity="0.14" stroke-width="1.5"/>
 </svg>
 """
 
 
+def candle(x, mark, y):
+    """The middle half of the samples as a box, with the median as a bright line, like a stock candle."""
+    tool, low, middle, high = mark
+    color, top = COLORS[tool], y(high)
+    height = max(MIN_BODY, y(low) - top)
+    line = f'x1="{x - 6}" x2="{x + CANDLE + 6}" y1="{y(middle):.1f}" y2="{y(middle):.1f}"'
+    return (f'<rect x="{x}" y="{top:.1f}" width="{CANDLE}" height="{height:.1f}" rx="6" fill="{color}" fill-opacity="0.24" '
+            f'stroke="{color}" stroke-opacity="0.75" stroke-width="1.5"/>'
+            f'<line {line} stroke="{color}" stroke-width="8" stroke-opacity="0.55" filter="url(#glow)"/>'
+            f'<line {line} stroke="{color}" stroke-width="3.5" stroke-linecap="round"/>'
+            + text(x + CANDLE / 2, top - 13, ms(middle), "ink", 20, 600, "middle"))
+
+
+def candles(title, groups, footer, plate, shift=0):
+    left, right, upper, lower = 44, 956, 138, 372
+    body = [legend(), f'<line x1="{left}" x2="{right}" y1="{lower}" y2="{lower}" stroke="{COLORS["rule"]}" stroke-opacity="0.24"/>']
+    width = (right - left) / len(groups)
+    for index, (label, marks) in enumerate(groups):
+        center, top = left + width * (index + 0.5), max(mark[3] for mark in marks)
+        y = lambda value: lower - value / top * (lower - upper)
+        x = center - (len(marks) * CANDLE + (len(marks) - 1) * CANDLE_GAP) / 2
+        body.append(f'<g data-group="{escape(label)}">')
+        for mark in marks:
+            body.append(candle(x, mark, y))
+            x += CANDLE + CANDLE_GAP
+        body.append(text(center, lower + 34, label, "ink", 20, 600, "middle"))
+        body.append("</g>")
+    return card(title, HEIGHT, "".join(body), footer, plate, shift)
+
+
+def speed_groups(results):
+    medians, spread = results["medians"], results["spread"]
+
+    def group(label, metric):
+        return label, [(tool, spread[tool][metric][0], medians[tool][metric], spread[tool][metric][1]) for tool in NAMES]
+
+    return [
+        group("Read a small window", "read small app (ms)"),
+        group("Click a button", "click (ms)"),
+        group("Take a screenshot", "screenshot (ms)"),
+        group("Finish a task", "task (ms)"),
+        group("Read a large window", "read dense app (ms)"),
+        group("Start from nothing", "cold start (ms)"),
+    ]
+
+
+def token_costs(results):
+    """Each tool's tokens to set up a session and to finish one task."""
+    medians, setup = results["medians"], results["setup chars"]
+    return {tool: (sum(setup[tool].values()) / 4, medians[tool]["task tokens read"] + medians[tool]["task tokens written"])
+            for tool in NAMES}
+
+
+def tokens(results):
+    costs = token_costs(results)
+    left, right, upper, lower, last, top = 44, 780, 110, 372, 8, 21000
+    x = lambda task: left + task / last * (right - left)
+    y = lambda value: lower - value / top * (lower - upper)
+    total = lambda tool, task: costs[tool][0] + task * costs[tool][1]
+    (ucu_setup, ucu_task), (desktop_setup, desktop_task) = costs["ucu"], costs["agent-desktop"]
+    crossing = (ucu_setup - desktop_setup) / (desktop_task - ucu_task)
+    first = int(crossing) + 1
+    body = [f'<line x1="{left}" x2="{right}" y1="{lower}" y2="{lower}" stroke="{COLORS["rule"]}" stroke-opacity="0.24"/>']
+    for task, label in ((0, "Setup"), (2, "2 tasks"), (4, "4 tasks"), (6, "6 tasks"), (8, "8 tasks")):
+        body.append(text(x(task), lower + 30, label, "muted", 16, 400, "start" if task == 0 else "middle"))
+    points = {tool: " ".join(f"{x(task):.1f},{y(total(tool, task)):.1f}" for task in range(last + 1)) for tool in NAMES}
+    body.append(f'<polyline points="{points["ucu"]}" fill="none" stroke="{COLORS["ucu"]}" stroke-width="8" '
+                f'stroke-opacity="0.45" filter="url(#glow)"/>')
+    for tool, stroke in (("agent-desktop", 3), ("ucu", 4)):
+        body.append(f'<polyline points="{points[tool]}" fill="none" stroke="{COLORS[tool]}" stroke-width="{stroke}" '
+                    f'stroke-linejoin="round" stroke-linecap="round"/>')
+        body.append(f'<circle cx="{x(last):.1f}" cy="{y(total(tool, last)):.1f}" r="6" fill="{COLORS[tool]}"/>')
+        body.append(text(x(last) + 18, y(total(tool, last)) + 2, count(total(tool, last)), "ink", 20, 600))
+        body.append(text(x(last) + 18, y(total(tool, last)) + 22, NAMES[tool], "muted", 15))
+    cross_x, cross_y = x(crossing), y(ucu_setup + crossing * ucu_task)
+    body.append(f'<circle cx="{cross_x:.1f}" cy="{cross_y:.1f}" r="12" fill="{COLORS["ink"]}" fill-opacity="0.18"/>')
+    body.append(f'<circle cx="{cross_x:.1f}" cy="{cross_y:.1f}" r="6" fill="{COLORS["ink"]}"/>')
+    body.append(text(cross_x + 24, cross_y - 26, f"UCU costs less from task {first}", "ink", 20, 600, "end"))
+    footer = "One setup, then the same task each time. Tokens are estimated as characters / 4."
+    return card("Total tokens in a session", HEIGHT, "".join(body), footer, "dots")
+
+
+def headline(results, footer):
+    medians, memory = results["medians"], results["idle memory (MB)"]
+    read = "read small app (ms)"
+    costs = token_costs(results)
+    tiles = [
+        ("faster window reads", medians["ucu"][read], medians["agent-desktop"][read], ms, "agent-desktop"),
+        ("fewer tokens per task", costs["ucu"][1], costs["agent-desktop"][1], count, "agent-desktop"),
+        ("less idle memory", memory["ucu"], memory["Codex engine"], lambda value: f"{value:.0f} MB", "the Codex engine"),
+    ]
+    body = []
+    for index, (label, ours, theirs, shown, against) in enumerate(tiles):
+        x = 44 + index * 312
+        body.append(f'<g data-group="{escape(label)}">')
+        body.append(text(x, 136, times(theirs / ours), "ink", 104, 700, "start", 'letter-spacing="-3"'))
+        body.append(text(x, 182, label, "ink", 22, 600))
+        body.append(text(x, 212, f"{shown(ours)} vs {shown(theirs)} for {against}", "muted", 16))
+        body.append("</g>")
+    return card("", 284, "".join(body), footer, "arc", -20)
+
+
 def charts(results):
-    """One image per idea, with at most three rows, so a reader can follow each one."""
-    speed, tokens = rows_speed(results), rows_tokens(results)
-    faster = "Shorter is faster. UCU runs the Codex engine, so those two differ only by noise."
-    better = "Shorter is better. Tokens are estimated as characters / 4."
+    chip = results["versions"]["chip"]
+    speed = speed_groups(results)
+    footer = f"Medians on an {chip}. Boxes show the middle half of the samples. Each group has its own scale."
     return {
-        "speed-actions": ("Speed: single actions", faster, speed[:3]),
-        "speed-jobs": ("Speed: longer jobs", faster, speed[3:]),
-        "tokens": ("Tokens per job", better, tokens[:3]),
-        "overhead": ("Setup and idle memory", better, tokens[3:]),
+        "headline": headline(results, f"Medians on an {chip}."),
+        "speed-actions": candles("Speed: single actions", speed[:3], footer, "arc", 130),
+        "speed-jobs": candles("Speed: longer jobs", speed[3:], footer, "dots"),
+        "tokens": tokens(results),
     }
 
 
 def main():
     results = json.loads((ROOT / "benchmarks/results.json").read_text())
-    versions = results["versions"]
-    footer = (f"Medians on an {versions['chip']}, macOS {versions['macOS']}. agent-desktop {versions['agent-desktop']}, "
-              f"Codex plugin {versions['codex plugin']}. Each row has its own scale. Reproduce: benchmarks/run.py")
     folder = ROOT / "assets/benchmarks"
-    folder.mkdir(parents=True, exist_ok=True)
-    for name, (title, subtitle, rows) in charts(results).items():
-        for theme in THEMES:
-            (folder / f"{name}-{theme}.svg").write_text(draw(title, subtitle, rows, footer, theme))
+    for name, svg in charts(results).items():
+        (folder / f"{name}.svg").write_text(svg)
 
 
 if __name__ == "__main__":
