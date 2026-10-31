@@ -1,9 +1,10 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/brand/ucu-logo-dark.svg">
-    <img src="assets/brand/ucu-logo-light.svg" alt="ucu: Universal Computer Use" width="440">
+    <img src="assets/brand/ucu-logo-light.svg" alt="UCU: Universal Computer Use" width="220">
   </picture>
 
+  <h3>Universal Computer Use</h3>
   <p><strong>Let your AI agents use your Mac's apps in the background, without touching your mouse.</strong></p>
   <p>Fast, light on tokens, and ready for Claude Code, opencode and any MCP client. An unofficial bridge to the Computer Use engine in the ChatGPT desktop app.</p>
 
@@ -16,7 +17,7 @@
   </p>
 
   <p>
-    <a href="#why-ucu">Why ucu</a> ·
+    <a href="#why-ucu">Why UCU</a> ·
     <a href="#how-it-compares">How it compares</a> ·
     <a href="#install">Install</a> ·
     <a href="#choosing-which-apps-agents-can-use">Choosing apps</a> ·
@@ -28,12 +29,12 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-dark.svg">
-    <img src="assets/benchmarks/speed-light.svg" alt="Bar chart of speed. ucu reads a small window in 61 ms, clicks in 66 ms and takes a screenshot in 59 ms, against 166 ms, 182 ms and 290 ms for agent-desktop. agent-desktop starts faster, 344 ms against 655 ms." width="860">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-actions-dark.svg">
+    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 61 ms, clicks in 66 ms and takes a screenshot in 59 ms, against 166 ms, 182 ms and 290 ms for agent-desktop." width="860">
   </picture>
 </p>
 
-## Why ucu
+## Why UCU
 
 | Capability | What it gives you |
 | --- | --- |
@@ -44,12 +45,12 @@
 | Shows who did what | Every approval is logged with the agent and folder that caused it. |
 | Light when idle | It stops the engine between uses: 24 MB instead of 639 MB. |
 | Picks the right window | `list_windows` and `focus_window` choose which window of an app to act on. |
-| Stays up to date | A Codex update needs nothing from you: `ucu` finds the newest engine each time it starts it. |
+| Stays up to date | A Codex update needs nothing from you: UCU finds the newest engine each time it starts it. |
 
 ## How it compares
 
-`ucu` runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. The
-gap between those two bars is noise, not a speedup. What `ucu` adds is everything around the engine: it works
+UCU runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. The
+gap between those two bars is noise, not a speedup. What UCU adds is everything around the engine: it works
 with your agents, stops the engine when idle, and adds the deny list, the log and the window tools.
 
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) from Vercel Labs is a separate, open-source tool
@@ -57,12 +58,26 @@ with its own engine. These are the numbers for all three on the same Mac and the
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
-    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens and memory. A task takes 588 tokens with ucu and 2,265 with agent-desktop. Setting up a session takes 6,956 tokens with ucu and 2,882 with agent-desktop. Idle memory is 24 MB for ucu, 639 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-jobs-dark.svg">
+    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.1 s against 1.5 s for agent-desktop, and reads a large window in 2.0 s against 3.1 s, or 180 ms for agent-desktop's outline. agent-desktop starts faster, 344 ms against 655 ms." width="860">
   </picture>
 </p>
 
-**Where `ucu` wins**
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
+    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 588 tokens with UCU and 2,265 with agent-desktop. Reading a small window takes 421 against 1,130, and a large window 1,647 against 2,216, or 1,112 for agent-desktop's outline." width="860">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/overhead-dark.svg">
+    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 6,956 tokens with UCU and 2,882 with agent-desktop. Idle memory is 24 MB for UCU, 639 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
+  </picture>
+</p>
+
+**Where UCU wins**
 
 - Reads a window 2.7 times faster, clicks 2.8 times faster and takes screenshots 4.9 times faster than agent-desktop.
 - Uses 3.8 times fewer tokens on the task, and needs 2 model round trips, the same as agent-desktop with `batch`.
@@ -73,12 +88,12 @@ with its own engine. These are the numbers for all three on the same Mac and the
 **Where agent-desktop wins**
 
 - Starts about twice as fast: 344 ms against 655 ms.
-- Costs less to set up: 2,882 tokens against 6,956, so `ucu` only pulls ahead on total tokens from the third task on.
-- Gives a quick outline of a large window in 180 ms, then lets the agent drill in. `ucu` reads the whole window.
+- Costs less to set up: 2,882 tokens against 6,956, so UCU only pulls ahead on total tokens from the third task on.
+- Gives a quick outline of a large window in 180 ms, then lets the agent drill in. UCU reads the whole window.
 - Is fully open source, runs on Windows and Linux too, and uses slightly less memory when idle (15 MB against 24 MB).
 - Reports if each action was delivered and if a retry is safe, and rejects stale element references.
 
-| Test (median) | `ucu` | Codex engine alone | agent-desktop |
+| Test (median) | UCU | Codex engine alone | agent-desktop |
 | --- | ---: | ---: | ---: |
 | Read a small window | 61 ms | 88 ms | 166 ms |
 | Click a button | 66 ms | 66 ms | 182 ms |
@@ -106,13 +121,13 @@ python3 -I benchmarks/chart.py
 - The small window is Calculator and the large one is Font Book. The task is pressing `12 + 34 =` and reading the
   answer, starting from seeing the buttons.
 - The tools take turns sample by sample, for 3 rounds. Each number is a median of up to 30 samples. Large windows
-  vary the most: for `ucu`, the middle half of those reads took between 0.4 s and 2.2 s.
+  vary the most: for UCU, the middle half of those reads took between 0.4 s and 2.2 s.
 - The clock covers the tool only, not the model's thinking time. agent-desktop runs through its CLI, as an agent
   would use it, with `-i --compact` and `batch`, the options its docs recommend to save tokens.
 - Tokens are estimated as characters / 4, and count what the model reads and writes. Screenshots aren't counted.
-- Setup counts tool definitions, the usage rules and the first-use docs for `ucu` and the engine, and the two
+- Setup counts tool definitions, the usage rules and the first-use docs for UCU and the engine, and the two
   `skills get` guides for agent-desktop. Tool definitions go with every request, usually from a cache.
-- Idle memory leaves out the Computer Use service itself, which `ucu` and the engine share. `ucu` stops the
+- Idle memory leaves out the Computer Use service itself, which UCU and the engine share. UCU stops the
   engine 2 minutes after a turn ends.
 
 </details>
@@ -121,8 +136,8 @@ python3 -I benchmarks/chart.py
 
 - **This is an unofficial project.** It is not made by, affiliated with, or endorsed by OpenAI or Anthropic.
 - **It relies on private parts of the ChatGPT app.** OpenAI doesn't offer them as a public interface, so an
-  update can break `ucu` at any time.
-- **OpenAI's terms still apply to you.** `ucu` runs the engine outside Codex and answers its approval prompt
+  update can break UCU at any time.
+- **OpenAI's terms still apply to you.** UCU runs the engine outside Codex and answers its approval prompt
   for you. Read [OpenAI's Terms of Use](https://openai.com/policies/row-terms-of-use/) and decide whether
   that fits your account. You use it at your own risk.
 - **Agents get real access.** Anything an app can do, an agent can do through it. Deny the apps you want to
@@ -145,7 +160,7 @@ cd universal-computer-use
 ./ucu doctor
 ```
 
-`ucu` runs from this folder, so keep it. Start a new Claude Code session to pick it up; open sessions need a
+UCU runs from this folder, so keep it. Start a new Claude Code session to pick it up; open sessions need a
 restart. If `doctor` reports a problem, it says what to do next. Picking app windows needs Accessibility
 permission for the app that runs Claude Code, such as Terminal: **System Settings > Privacy & Security >
 Accessibility**.
@@ -155,13 +170,13 @@ Accessibility**.
 - builds `~/.local/bin/ucu-window`
 - writes the approval policy, unless you already have one
 - registers the `ucu` server in `~/.claude.json`
-- adds a `Stop` hook to `~/.claude/settings.json`, so `ucu` knows when Claude's turn ends
+- adds a `Stop` hook to `~/.claude/settings.json`, so UCU knows when Claude's turn ends
 - registers `ucu` in `~/.config/opencode/opencode.json`, if opencode is set up
 
-If `ucu` doesn't start, install changes nothing. To run the server with a particular Python, use
+If UCU doesn't start, install changes nothing. To run the server with a particular Python, use
 `./ucu install --python /path/to/python3`.
 
-To make Claude Code prefer `ucu` over its built-in computer use, add this to your `~/.claude/CLAUDE.md`:
+To make Claude Code prefer UCU over its built-in computer use, add this to your `~/.claude/CLAUDE.md`:
 
 ```markdown
 To operate native Mac apps, use the `ucu` MCP server instead of the built-in computer-use tools.

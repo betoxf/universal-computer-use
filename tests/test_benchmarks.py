@@ -41,8 +41,9 @@ class BenchmarkTest(unittest.TestCase):
     def test_draws_valid_charts_from_the_committed_results(self):
         chart = load("chart")
         results = json.loads((ROOT / "benchmarks/results.json").read_text())
-        for rows in (chart.rows_speed(results), chart.rows_tokens(results)):
-            svg = chart.draw("Title", "Subtitle", rows, "Footer", "dark")
+        for title, subtitle, rows in chart.charts(results).values():
+            self.assertLessEqual(len(rows), 3)
+            svg = chart.draw(title, subtitle, rows, "Footer", "dark")
             xml.dom.minidom.parseString(svg)
             for _, _, bars in rows:
                 self.assertEqual(sorted({bar[0] for bar in bars}), ["Codex engine", "agent-desktop", "ucu"])

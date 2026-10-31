@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 THEMES = {
     "light": {"surface": "#fcfcfb", "border": "#e4e3df", "ink": "#0b0b0b", "soft": "#52514e", "muted": "#74736e",
-              "ucu": "#2a78d6", "Codex engine": "#eb6834", "agent-desktop": "#1baf7a"},
+              "ucu": "#0b0b0b", "Codex engine": "#2a78d6", "agent-desktop": "#b4b3ab"},
     "dark": {"surface": "#1a1a19", "border": "#383835", "ink": "#f0efec", "soft": "#c3c2b7", "muted": "#9a998f",
-             "ucu": "#3987e5", "Codex engine": "#d95926", "agent-desktop": "#199e70"},
+             "ucu": "#f0efec", "Codex engine": "#3987e5", "agent-desktop": "#77766f"},
 }
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
 WIDTH, LEFT, BAR_MAX, BAR_HEIGHT, BAR_GAP, ROW_GAP = 860, 236, 440, 14, 3, 22
@@ -99,7 +99,7 @@ def draw(title, subtitle, rows, footer, theme):
     legend, x = [], 28
     for tool, width in (("ucu", 62), ("Codex engine", 124), ("agent-desktop", 130)):
         legend.append(f'<rect x="{x}" y="77" width="12" height="12" rx="3" fill="{colors[tool]}"/>')
-        legend.append(text(x + 18, 88, tool, colors["soft"], 13))
+        legend.append(text(x + 18, 88, "UCU" if tool == "ucu" else tool, colors["soft"], 13))
         x += width
     height = y + 34
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" width="{WIDTH}" height="{height}" font-family="{FONT}" role="img" aria-label="{escape(title)}">
@@ -114,20 +114,27 @@ def draw(title, subtitle, rows, footer, theme):
 """
 
 
+def charts(results):
+    """One image per idea, with at most three rows, so a reader can follow each one."""
+    speed, tokens = rows_speed(results), rows_tokens(results)
+    faster = "Shorter is faster. UCU runs the Codex engine, so those two differ only by noise."
+    better = "Shorter is better. Tokens are estimated as characters / 4."
+    return {
+        "speed-actions": ("Speed: single actions", faster, speed[:3]),
+        "speed-jobs": ("Speed: longer jobs", faster, speed[3:]),
+        "tokens": ("Tokens per job", better, tokens[:3]),
+        "overhead": ("Setup and idle memory", better, tokens[3:]),
+    }
+
+
 def main():
     results = json.loads((ROOT / "benchmarks/results.json").read_text())
     versions = results["versions"]
     footer = (f"Medians on an {versions['chip']}, macOS {versions['macOS']}. agent-desktop {versions['agent-desktop']}, "
               f"Codex plugin {versions['codex plugin']}. Each row has its own scale. Reproduce: benchmarks/run.py")
-    charts = {
-        "speed": ("Speed", "Shorter is faster. ucu runs the Codex engine, so those two differ only by noise.",
-                  rows_speed(results)),
-        "tokens": ("Tokens and memory", "Shorter is better. Tokens are estimated as characters / 4.",
-                   rows_tokens(results)),
-    }
     folder = ROOT / "assets/benchmarks"
     folder.mkdir(parents=True, exist_ok=True)
-    for name, (title, subtitle, rows) in charts.items():
+    for name, (title, subtitle, rows) in charts(results).items():
         for theme in THEMES:
             (folder / f"{name}-{theme}.svg").write_text(draw(title, subtitle, rows, footer, theme))
 
