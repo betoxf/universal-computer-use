@@ -1,0 +1,209 @@
+{
+  "versions": {
+    "codex plugin": "26.1027.30824",
+    "agent-desktop": "1.0.2",
+    "macOS": "27.2",
+    "chip": "Apple M3 Max",
+    "rounds": 3
+  },
+  "medians": {
+    "Codex engine": {
+      "read small app (ms)": 88.5,
+      "screenshot (ms)": 68.9,
+      "read dense app (ms)": 1780.7,
+      "read dense app (chars)": 6587,
+      "click (ms)": 65.8,
+      "task (ms)": 1161.4,
+      "task tokens read": 532.2,
+      "task tokens written": 56.2,
+      "cold start (ms)": 636.7
+    },
+    "ucu": {
+      "read small app (ms)": 61.3,
+      "screenshot (ms)": 59.1,
+      "read dense app (ms)": 1986.3,
+      "read dense app (chars)": 6587,
+      "click (ms)": 65.7,
+      "task (ms)": 1088.0,
+      "task tokens read": 532.2,
+      "task tokens written": 56.2,
+      "cold start (ms)": 655.0
+    },
+    "agent-desktop": {
+      "read small app (ms)": 165.7,
+      "screenshot (ms)": 289.5,
+      "read dense app (ms)": 3053.9,
+      "read dense app (chars)": 8862,
+      "click (ms)": 182.1,
+      "task (ms)": 1490.0,
+      "task tokens read": 2110.2,
+      "task tokens written": 154.5,
+      "cold start (ms)": 343.5
+    },
+    "agent-desktop skeleton": {
+      "read dense app (ms)": 179.6,
+      "read dense app (chars)": 4447
+    }
+  },
+  "spread": {
+    "Codex engine": {
+      "read small app (ms)": [
+        83.7,
+        94.4
+      ],
+      "screenshot (ms)": [
+        65.1,
+        74.0
+      ],
+      "read dense app (ms)": [
+        413.9,
+        2202.2
+      ],
+      "click (ms)": [
+        63.3,
+        69.7
+      ],
+      "task (ms)": [
+        1104.5,
+        1347.6
+      ],
+      "cold start (ms)": [
+        632.2,
+        643.6
+      ]
+    },
+    "ucu": {
+      "read small app (ms)": [
+        59.1,
+        66.6
+      ],
+      "screenshot (ms)": [
+        56.9,
+        61.8
+      ],
+      "read dense app (ms)": [
+        375.6,
+        2173.5
+      ],
+      "click (ms)": [
+        61.4,
+        68.9
+      ],
+      "task (ms)": [
+        1063.6,
+        1164.6
+      ],
+      "cold start (ms)": [
+        650.4,
+        665.5
+      ]
+    },
+    "agent-desktop": {
+      "read small app (ms)": [
+        151.3,
+        171.2
+      ],
+      "screenshot (ms)": [
+        281.8,
+        302.4
+      ],
+      "read dense app (ms)": [
+        975.8,
+        3059.4
+      ],
+      "click (ms)": [
+        170.0,
+        189.2
+      ],
+      "task (ms)": [
+        1297.6,
+        1618.7
+      ],
+      "cold start (ms)": [
+        316.7,
+        352.4
+      ]
+    },
+    "agent-desktop skeleton": {
+      "read dense app (ms)": [
+        109.2,
+        235.6
+      ]
+    }
+  },
+  "samples": {
+    "Codex engine": {
+      "read small app (ms)": 30,
+      "screenshot (ms)": 30,
+      "read dense app (ms)": 15,
+      "read dense app (chars)": 15,
+      "click (ms)": 30,
+      "task (ms)": 9,
+      "task tokens read": 9,
+      "task tokens written": 9,
+      "cold start (ms)": 6
+    },
+    "ucu": {
+      "read small app (ms)": 30,
+      "screenshot (ms)": 30,
+      "read dense app (ms)": 15,
+      "read dense app (chars)": 15,
+      "click (ms)": 30,
+      "task (ms)": 9,
+      "task tokens read": 9,
+      "task tokens written": 9,
+      "cold start (ms)": 6
+    },
+    "agent-desktop": {
+      "read small app (ms)": 30,
+      "screenshot (ms)": 30,
+      "read dense app (ms)": 15,
+      "read dense app (chars)": 15,
+      "click (ms)": 30,
+      "task (ms)": 9,
+      "task tokens read": 9,
+      "task tokens written": 9,
+      "cold start (ms)": 6
+    },
+    "agent-desktop skeleton": {
+      "read dense app (ms)": 15,
+      "read dense app (chars)": 15
+    }
+  },
+  "sizes": {
+    "Codex engine": {
+      "read small app (chars)": 1685,
+      "task model round trips": 2
+    },
+    "ucu": {
+      "read small app (chars)": 1685,
+      "task model round trips": 2
+    },
+    "agent-desktop": {
+      "read small app (chars)": 4520,
+      "task model round trips": 2
+    }
+  },
+  "setup chars": {
+    "Codex engine": {
+      "tool definitions": 5451,
+      "instructions": 61,
+      "first-use docs": 19915
+    },
+    "ucu": {
+      "tool definitions": 6675,
+      "instructions": 1234,
+      "first-use docs": 19915
+    },
+    "agent-desktop": {
+      "tool definitions": 0,
+      "instructions": 0,
+      "first-use docs": 11526
+    }
+  },
+  "idle memory (MB)": {
+    "Codex engine": 638.8,
+    "agent-desktop": 15.0,
+    "ucu": 23.8
+  }
+}

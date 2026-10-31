@@ -26,7 +26,7 @@ chat. It passes every message through unchanged, except that it
 * stops cua_repl, with its JavaScript kernel and sandbox processes, once the chat
   has not used it for --stop-grace seconds after a turn ended (default 120), or
   for --stop-idle seconds in any case (default 900). Between uses the chat then
-  holds only this proxy (~11 MB) instead of 40-280 MB;
+  holds only this proxy (about 24 MB) instead of several hundred MB;
 * starts cua_repl again on the chat's next request (~0.3 s), replaying Claude's
   `initialize` handshake. Earlier JavaScript variables such as `app` are gone
   after a restart and must be fetched again;
