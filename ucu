@@ -342,9 +342,9 @@ def doctor():
     except (OSError, ValueError, AttributeError) as error:
         check(False, f"{proxy.POLICY} is valid", f"{error}; until it is, every app is asked")
     if proxy.WINDOW_HELPER.exists():
-        result = subprocess.run([str(proxy.WINDOW_HELPER), "list", "Finder"], capture_output=True, text=True)
+        result = subprocess.run([str(proxy.WINDOW_HELPER), "list"], capture_output=True, text=True)
         check(result.returncode == 0, "ucu-window can read app windows (Accessibility permission)",
-              result.stderr.strip())
+              result.stderr.strip() + " (a usage message means it is out of date: run `ucu install`)")
     else:
         check(False, f"{proxy.WINDOW_HELPER} is built", "run `ucu install` (needs swiftc)")
     if OPENCODE_CONFIG.exists():

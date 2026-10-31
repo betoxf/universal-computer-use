@@ -5,7 +5,7 @@
   </picture>
 
   <h3>Universal Computer Use</h3>
-  <p><strong>Let your AI agents use your Mac's apps in the background, without touching your mouse.</strong></p>
+  <p><strong>Let your AI agents use your Mac's apps in the background, without touching your mouse or getting in your way.</strong></p>
   <p>Fast, light on tokens, and ready for Claude Code, opencode and any MCP client. An unofficial bridge to the Computer Use engine in the ChatGPT desktop app.</p>
 
   <p>
@@ -30,7 +30,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-actions-dark.svg">
-    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 55 ms, clicks in 57 ms and takes a screenshot in 52 ms, against 145 ms, 84 ms and 295 ms for agent-desktop." width="860">
+    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 48 ms, clicks in 26 ms and takes a screenshot in 44 ms, against 103 ms, 48 ms and 288 ms for agent-desktop." width="860">
   </picture>
 </p>
 
@@ -39,21 +39,23 @@
 | Capability | What it gives you |
 | --- | --- |
 | Works in the background | Agents click, type and read other apps without moving your pointer or taking focus. |
+| Stays out of your way | A closed app opens hidden, so nothing appears on your screen, and if an app jumps to the front during an agent's action, your app is put back. |
+| Sees every window | Agents are told when an app opens a new window, a sheet or a system dialog, with its text and buttons, and `list_windows` lists every open window. |
 | Reaches apps without an accessibility tree | Agents can click by screen position in a background window. Some remote-desktop and canvas apps ignore background input. |
 | Light on tokens | A task costs about a quarter of the tokens of agent-desktop, and the model gets compact text and diffs. |
 | You choose the apps | Every app is approved except the ones you deny, with one command. |
 | Shows who did what | Every approval is logged with the agent and folder that caused it. |
-| Light when idle | It stops the engine between uses: 24 MB instead of 638 MB. |
-| Picks the right window | `list_windows` and `focus_window` choose which window of an app to act on. |
+| Light when idle | It stops the engine between uses: 19 MB instead of 363 MB. |
+| Picks the right window | `focus_window` chooses which window of an app to act on, without moving it. |
 | Hears errors | When an app plays the macOS alert sound, the agent is told, at no cost in speed. The engine alone reports success. |
 | Stays up to date | A Codex update needs nothing from you: UCU finds the newest engine each time it starts it. |
 
 ## How it compares
 
-UCU runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. The
-gap between those two bars is noise, not a speedup. What UCU adds is everything around the engine: it works
-with your agents, stops the engine when idle, and adds the deny list, the log, the window tools and the
-error-sound notes.
+UCU runs OpenAI's Computer Use engine, so its speed matches the engine on its own. The gap between those two bars
+is noise, not a speedup. What UCU adds is everything around the engine: it works
+with your agents, stops the engine when idle, shortens what the model has to read, and adds the deny list, the log,
+hidden launches, the window tools and the notes about error sounds and new windows.
 
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) from Vercel Labs is a separate, open-source tool
 with its own engine. These are the numbers for all three on the same Mac and the same tasks:
@@ -61,56 +63,58 @@ with its own engine. These are the numbers for all three on the same Mac and the
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-jobs-dark.svg">
-    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.4 s against 780 ms for agent-desktop, and reads a large window in 2.1 s against 3.0 s, or 169 ms for agent-desktop's outline. agent-desktop starts faster, 315 ms against 654 ms." width="860">
+    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.0 s against 462 ms for agent-desktop, and reads a large window in 1.5 s against 3.0 s, or 164 ms for agent-desktop's outline. agent-desktop starts faster, 256 ms against 774 ms." width="860">
   </picture>
 </p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
-    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 552 tokens with UCU and 2,109 with agent-desktop. Reading a small window takes 390 against 1,099, and a large window 1,651 against 2,177, or 1,112 for agent-desktop's outline." width="860">
+    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 518 tokens with UCU and 2,110 with agent-desktop. Reading a small window takes 390 against 1,100, and a large window 1,651 against 2,542, or 1,112 for agent-desktop's outline." width="860">
   </picture>
 </p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/overhead-dark.svg">
-    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 6,992 tokens with UCU and 2,882 with agent-desktop. Idle memory is 24 MB for UCU, 638 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
+    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 4,091 tokens with UCU and 2,882 with agent-desktop. Idle memory is 19 MB for UCU, 363 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
   </picture>
 </p>
 
 **Where UCU wins**
 
-- Reads a small window 2.7 times faster, clicks 1.5 times faster and takes screenshots 5.7 times faster than agent-desktop.
-- Uses 3.8 times fewer tokens on the task, with 2 model round trips, the same as agent-desktop with `batch`.
+- Reads a small window 2.2 times faster, clicks 1.9 times faster and takes screenshots 6.5 times faster than agent-desktop.
+- Uses 4 times fewer tokens on the task, with 2 model round trips, the same as agent-desktop with `batch`, and pulls
+  ahead on total tokens from the first task.
 - Can click by position in a background window. agent-desktop needs `--headed` for that, which moves your real
   pointer and takes focus.
-- Tells the agent when an app plays its error sound.
+- Tells the agent when an app plays its error sound or opens another window.
+- Opens closed apps hidden. Agents can read them, take screenshots and click their elements without showing them.
 - Has a per-app deny list and an approval log, and works as an MCP server.
 
 **Where agent-desktop wins**
 
-- Finishes the task faster: 780 ms against 1.4 s. A single click is close, but a run of six presses takes the engine
-  longer.
-- Starts about twice as fast: 315 ms against 654 ms.
-- Costs less to set up: 2,882 tokens against 6,992, so UCU only pulls ahead on total tokens from the third task on.
-- Gives a quick outline of a large window in 169 ms, then lets the agent drill in. UCU reads the whole window.
-- Is fully open source, runs on Windows and Linux too, and uses slightly less memory when idle (15 MB against 24 MB).
+- Finishes the task faster: 462 ms against 1.0 s. A single click is faster with UCU, but the engine waits about 450 ms
+  before it reads a window after an action.
+- Starts three times as fast: 256 ms against 774 ms.
+- Costs less to set up: 2,882 tokens against 4,091.
+- Gives a quick outline of a large window in 164 ms, then lets the agent drill in. UCU reads the whole window.
+- Is fully open source, runs on Windows and Linux too, and uses slightly less memory when idle (15 MB against 19 MB).
 - Reports if each action was delivered and if a retry is safe, and rejects stale element references.
 
 | Test (median) | UCU | Codex engine alone | agent-desktop |
 | --- | ---: | ---: | ---: |
-| Read a small window | 55 ms | 82 ms | 145 ms |
-| Click a button | 57 ms | 52 ms | 84 ms |
-| Take a screenshot | 52 ms | 59 ms | 295 ms |
-| Finish a task | 1.4 s | 1.4 s | 780 ms |
-| Read a large window | 2.1 s | 1.9 s | 3.0 s (outline only: 169 ms) |
-| Start from nothing | 654 ms | 632 ms | 315 ms |
-| Tokens for the task | 552 | 552 | 2,109 |
-| Tokens to read a small window | 390 | 390 | 1,099 |
-| Tokens to read a large window | 1,651 | 1,651 | 2,177 (outline only: 1,112) |
-| Tokens to set up a session | 6,992 | 6,357 | 2,882 |
-| Memory while idle | 24 MB | 638 MB | 15 MB |
+| Read a small window | 48 ms | 77 ms | 103 ms |
+| Click a button | 26 ms | 30 ms | 48 ms |
+| Take a screenshot | 44 ms | 49 ms | 288 ms |
+| Finish a task | 1.0 s | 1.0 s | 462 ms |
+| Read a large window | 1.5 s | 1.6 s | 3.0 s (outline only: 164 ms) |
+| Start from nothing | 774 ms | 622 ms | 256 ms |
+| Tokens for the task | 518 | 552 | 2,110 |
+| Tokens to read a small window | 390 | 390 | 1,100 |
+| Tokens to read a large window | 1,651 | 1,651 | 2,542 (outline only: 1,112) |
+| Tokens to set up a session | 4,091 | 6,366 | 2,882 |
+| Memory while idle | 19 MB | 363 MB | 15 MB |
 
 <details>
 <summary>How this was measured</summary>
@@ -132,6 +136,10 @@ python3 -I benchmarks/chart.py
 - Tokens are estimated as characters / 4, and count what the model reads and writes. Screenshots aren't counted.
 - Setup counts tool definitions, the usage rules and the first-use docs for UCU and the engine, and the two
   `skills get` guides for agent-desktop. Tool definitions go with every request, usually from a cache.
+- UCU's setup is smaller because it leaves the browser part out of the docs and the tool list until a call needs it,
+  drops two tools agents don't use, and replaces the engine's confirmations policy with a short summary. The summary
+  only applies to the policy version it was written from. If an update changes that policy, the full text goes through.
+  It also shortens the sentences the engine repeats on each state, which is the small saving on the task.
 - Idle memory leaves out the Computer Use service itself, which UCU and the engine share. UCU stops the
   engine 2 minutes after a turn ends.
 
@@ -218,11 +226,12 @@ Each decision goes to `~/Library/Logs/ucu/approve.log`, with the client and fold
 
 ## Tools
 
-- `js`, `js_reset`, `js_add_node_module_dir`: the engine's own tools.
-- `list_windows {app}`: an app's windows, which one is the main window, and whether each is minimized or
-  full screen. `cua.getApp(app)` always acts on the main window.
+- `js`, `js_reset`: the engine's own tools.
+- `list_windows {app?}`: the windows of an app, or of every app without `app`, which one is the main window, and
+  whether each is a dialog, minimized or full screen. `cua.getApp(app)` always acts on the main window.
 - `focus_window {app, title, unfullscreen?, activate?}`: makes the window whose title contains `title` the
-  main window, so the next `cua.getApp(app)` acts on it.
+  main window, so the next `cua.getApp(app)` acts on it. The window stays where it is. With `activate: true`, the app
+  also comes to the front, for when you should see it.
 
 In a `js` call, wait for a window to react instead of sleeping:
 
@@ -242,7 +251,30 @@ Nothing waits for a sound, so this adds no time to a call. The note comes with t
 action in that call, and with the next result if not. It needs no permission, hears no audio, and only reports apps
 that chat is driving.
 
+New windows work the same way. While a call runs, and for a moment after, UCU compares the windows of the apps that
+chat drives and looks for system dialogs such as password prompts:
+
+```
+[ucu: Safari opened a dialog titled "Sign in". Its text: "Enter your password". Buttons: "Cancel", "OK". To act on it, call focus_window with its title, then cua.getApp.]
+```
+
 The server sends the usage rules in its MCP `instructions`, so clients get them without their own config.
+
+### Staying out of your way
+
+When an agent calls `cua.getApp` on a closed app, UCU opens it hidden first. Its Dock icon shows it is running, and
+nothing appears on screen unless you click that icon or the agent calls `focus_window` with `activate: true`. Apps
+that show themselves anyway, such as Blender, are hidden as soon as their window appears, behind your front app. A
+denied app stays closed.
+
+The agent reads a hidden app, takes screenshots of it and clicks its elements as usual. Two things need a window on
+screen: input by coordinates, and a few actions that an app refuses while hidden, such as opening its settings. For
+those, UCU shows the app behind your windows, without taking focus. Agents that open an app with the `open` command
+skip all of this, so the usage rules tell them not to.
+
+If an app comes to the front during an agent's call or just after it, and it is an app that chat drives or one that
+just started, UCU puts your app back and tells the agent. If you pressed a key or clicked just before, it does nothing,
+because you may have switched apps yourself.
 
 ## Other MCP clients
 
@@ -281,8 +313,8 @@ everything.
 | Path | What it does |
 | --- | --- |
 | `ucu` | The `install`, `uninstall`, `doctor`, `deny`, `allow` and `denied` commands. |
-| `scripts/ucu-proxy.py` | The MCP server: a stdio proxy that runs the engine as the newest usable Codex plugin defines it, answers app approvals from the policy, adds the window tools and usage rules, ends turns, stops and restarts the engine when idle, and leaves out repeated documentation. |
-| `native/ucu-window.swift` | `ucu-window list/focus`, behind the `list_windows` and `focus_window` tools. |
+| `scripts/ucu-proxy.py` | The MCP server: a stdio proxy that runs the engine as the newest usable Codex plugin defines it, answers app approvals from the policy, adds the window tools and usage rules, ends turns, stops and restarts the engine when idle, and shortens what the model reads. |
+| `native/ucu-window.swift` | `ucu-window list/focus`, behind the `list_windows` and `focus_window` tools, and `ucu-window watch`, which opens apps hidden and reports new windows while the engine runs. |
 | `js/wait.mjs` | `waitForChange()`, which waits for a window to change and settle. |
 
 ## Tests

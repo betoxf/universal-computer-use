@@ -1,17 +1,19 @@
-// ucu-window: pick which window of a macOS app ucu will act on.
+// ucu-window: windows and quiet launches for ucu.
 //
 // ucu (Sky computer use) binds `cua.getApp("App")` to the app's main window and has no
 // window selector on macOS. This helper uses the Accessibility API to list an app's windows
 // and to make one of them the main window (optionally leaving full screen first), so the next
 // `cua.getApp(...)` targets it.
 //
-//   ucu-window list <app>
+//   ucu-window list [app]
 //   ucu-window focus <app> <title substring> [--unfullscreen] [--activate]
 //   ucu-window unfullscreen <app> <title substring>
+//   ucu-window watch
 //
-// <app> is a display name or bundle id of a running app. `focus` un-minimizes and raises the
-// window and makes it the app's main window; it brings the app to the front only with
-// --activate. Needs Accessibility permission for the process that runs it (Claude Code).
+// <app> is a display name or bundle id of a running app; `list` without one covers every app.
+// `focus` un-minimizes the window and makes it the app's main window; it shows the app and brings
+// it to the front only with --activate. `watch` is what the proxy runs next to cua_repl: see Watcher.
+// Needs Accessibility permission for the process that runs it (Claude Code).
 // Build: `ucu install` (swiftc -O native/ucu-window.swift -o ~/.local/bin/ucu-window)
 import AppKit
 import ApplicationServices
@@ -34,29 +36,70 @@ func frame(_ window: AXUIElement) -> String {
     return "\(Int(origin.x)),\(Int(origin.y)) \(Int(size.width))x\(Int(size.height))"
 }
 
-func runningApp(_ query: String) -> NSRunningApplication {
+// The same as app_key in ucu-proxy.py: case and invisible marks (WhatsApp's name starts with one) don't count.
+func key(_ name: String) -> String {
+    let visible = name.unicodeScalars.filter { $0.properties.generalCategory != .format }
+    return String(String.UnicodeScalarView(visible)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+}
+
+func matching(_ query: String) -> NSRunningApplication? {
+    let wanted = key(query)
     let apps = NSWorkspace.shared.runningApplications.filter {
-        $0.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
-            || $0.localizedName?.caseInsensitiveCompare(query) == .orderedSame
+        key($0.bundleIdentifier ?? "") == wanted || key($0.localizedName ?? "") == wanted
+            || key($0.bundleURL?.path ?? "") == wanted
     }
-    guard let app = apps.first(where: { $0.activationPolicy == .regular }) ?? apps.first else {
-        fail("No running app named or with bundle id \"\(query)\".")
-    }
+    return apps.first(where: { $0.activationPolicy == .regular }) ?? apps.first
+}
+
+func runningApp(_ query: String) -> NSRunningApplication {
+    guard let app = matching(query) else { fail("No running app named or with bundle id \"\(query)\".") }
     return app
 }
 
-func windows(of app: NSRunningApplication) -> (AXUIElement, [AXUIElement]) {
+func requireTrust() {
     guard AXIsProcessTrusted() else {
         fail("Accessibility permission is missing for the process running this helper "
             + "(System Settings > Privacy & Security > Accessibility).", 3)
     }
-    let element = AXUIElementCreateApplication(app.processIdentifier)
+}
+
+func appElement(_ pid: pid_t) -> AXUIElement {
+    let element = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(element, 1)  // a busy app must not hold up the others
+    return element
+}
+
+func windows(of app: NSRunningApplication) -> (AXUIElement, [AXUIElement]) {
+    requireTrust()
+    let element = appElement(app.processIdentifier)
     let list: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
     return (element, list)
 }
 
 func title(_ window: AXUIElement) -> String { attribute(window, kAXTitleAttribute) ?? "" }
 func flag(_ window: AXUIElement, _ name: String) -> Bool { (attribute(window, name) as Bool?) ?? false }
+
+// A hidden app reports all its windows as dialogs, so that says nothing there.
+func kind(of window: AXUIElement, in app: NSRunningApplication) -> String? {
+    switch attribute(window, kAXSubroleAttribute) as String? {
+    case _ where app.isHidden: return nil
+    case kAXDialogSubrole, kAXSystemDialogSubrole: return "dialog"
+    case kAXFloatingWindowSubrole, kAXSystemFloatingWindowSubrole: return "panel"
+    default: return nil
+    }
+}
+
+func printWindows(of app: NSRunningApplication, element: AXUIElement, list: [AXUIElement]) {
+    let main: AXUIElement? = attribute(element, kAXMainWindowAttribute)
+    let notes = (app.isActive ? ", active" : "") + (app.isHidden ? ", hidden" : "")
+    print("\(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?"), pid \(app.processIdentifier)\(notes))")
+    for (index, window) in list.enumerated() {
+        let marks = [main.map { CFEqual($0, window) } ?? false ? "main" : nil, kind(of: window, in: app),
+                     flag(window, kAXMinimizedAttribute) ? "minimized" : nil,
+                     flag(window, "AXFullScreen") ? "fullscreen" : nil, frame(window)]
+        print("[\(index)] \"\(title(window))\" " + marks.compactMap { $0 }.joined(separator: " "))
+    }
+}
 
 func find(_ query: String, in list: [AXUIElement]) -> AXUIElement {
     let matches = list.filter { title($0).localizedCaseInsensitiveContains(query) }
@@ -74,22 +117,322 @@ func leaveFullScreen(_ window: AXUIElement) {
     usleep(300_000)
 }
 
-let args = Array(CommandLine.arguments.dropFirst())
-guard let command = args.first, args.count >= 2 else {
-    fail("usage: ucu-window list <app> | focus <app> <title> [--unfullscreen] [--activate] | unfullscreen <app> <title>")
+func emit(_ message: [String: Any]) {
+    guard var line = try? JSONSerialization.data(withJSONObject: message) else { return }
+    line.append(10)
+    line.withUnsafeBytes { _ = fwrite($0.baseAddress, 1, $0.count, stdout) }
+    fflush(stdout)
 }
+
+func applicationURL(_ query: String) -> URL? {
+    if query.hasPrefix("/") { return FileManager.default.fileExists(atPath: query) ? URL(fileURLWithPath: query) : nil }
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) { return url }
+    return NSWorkspace.shared.fullPath(forApplication: query).map(URL.init(fileURLWithPath:))
+}
+
+// What a person would read first in a window: its text and its buttons, within a budget, because a web page
+// can hold thousands of elements.
+func contents(of window: AXUIElement) -> (text: String, buttons: [String]) {
+    let controls: Set<String> = [kAXCloseButtonSubrole, kAXMinimizeButtonSubrole, kAXZoomButtonSubrole,
+                                 kAXFullScreenButtonSubrole]
+    var texts = [String](), buttons = [String](), queue = [window], visited = 0, length = 0
+    while visited < queue.count, visited < 300, length < 300 {
+        let element = queue[visited]
+        visited += 1
+        let role: String = attribute(element, kAXRoleAttribute) ?? ""
+        if role == kAXStaticTextRole, let value: String = attribute(element, kAXValueAttribute), !value.isEmpty,
+           !texts.contains(value) {
+            texts.append(value)
+            length += value.count
+        } else if role == kAXButtonRole, let name: String = attribute(element, kAXTitleAttribute), !name.isEmpty,
+                  !controls.contains(attribute(element, kAXSubroleAttribute) ?? ""), !buttons.contains(name) {
+            buttons.append(name)  // those without a title are toolbar icons, not answers to a question
+        }
+        queue += attribute(element, kAXChildrenAttribute) as [AXUIElement]? ?? []
+    }
+    return (texts.joined(separator: " "), Array(buttons.prefix(6)))
+}
+
+// Runs next to cua_repl for as long as its stdin stays open, so it can't outlive the proxy. Commands come as one
+// JSON object per line on stdin; replies and reports go out the same way on stdout.
+//
+//   {"id": 1, "open": "Blender", "deny": ["Terminal"]}  open a closed app hidden, unless it is denied
+//   {"id": 2, "show": ["Blender"]}                      show hidden apps, behind the user's windows
+//   {"watch": ["safari"]}                               report these apps' new windows from now on
+//   {"busy": true}                                      an agent's call began (false: it ended)
+//   {"allow": "Blender"}                                let this app come to the front
+//
+// Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
+// action started or drives came to the front by itself and the user's app was put back.
+final class Watcher {
+    static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
+                                            "AuthenticationServicesAgent", "coreautha"]
+    static let quietTail = 1.5, windowSettle = 0.3, hideGuard = 3.0, noWindowLimit = 6.0, openLimit = 45.0
+    static let inputWindow = 1.5, longestCall = 300.0
+
+    var watched = Set<String>()
+    var driven = [NSRunningApplication]()  // the watched apps that were running when the last call began
+    var seenWindows = [pid_t: [AXUIElement]]()
+    var seenDialogs = Set<Int>()
+    var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
+    var keptHidden = Set<pid_t>()
+    var busySince = Date.distantFuture
+    var busyUntil = Date.distantPast
+    var front = NSWorkspace.shared.frontmostApplication
+    var allowed: pid_t?
+
+    func run() -> Never {
+        signal(SIGPIPE, SIG_IGN)
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)  // a stuck app must not hold up the run loop
+        let center = NSWorkspace.shared.notificationCenter
+        func on(_ name: Notification.Name, _ action: @escaping (NSRunningApplication) -> Void) {
+            center.addObserver(forName: name, object: nil, queue: .main) { note in
+                if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { action(app) }
+            }
+        }
+        on(NSWorkspace.didActivateApplicationNotification) { [self] in activated($0) }
+        on(NSWorkspace.didTerminateApplicationNotification) { [self] in seenWindows[$0.processIdentifier] = nil }
+        scanDialogs(reporting: false)
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
+            if Date() < busyUntil { scan() }
+        }
+        Thread.detachNewThread { [self] in
+            while let line = readLine() {
+                guard let data = line.data(using: .utf8),
+                      let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+                DispatchQueue.main.async { self.handle(command) }
+            }
+            exit(0)
+        }
+        RunLoop.main.run()
+        exit(0)
+    }
+
+    func handle(_ command: [String: Any]) {
+        if let names = command["watch"] as? [String] {
+            watched.formUnion(names.map(key))
+            driven = watched.compactMap(running)
+        }
+        if let name = command["allow"] as? String, let app = running(name) {
+            allowed = app.processIdentifier
+            keptHidden.remove(app.processIdentifier)
+        }
+        if let busy = command["busy"] as? Bool {
+            busyUntil = Date() + (busy ? Self.longestCall : Self.quietTail)  // no end comes if cua_repl crashes
+            if busy {
+                busySince = Date()
+                front = NSWorkspace.shared.frontmostApplication
+                driven = watched.compactMap(running)
+                scan()
+            }
+        }
+        if let name = command["open"] as? String {
+            open(name, deny: command["deny"] as? [String] ?? [], id: command["id"] ?? NSNull())
+        }
+        if let names = command["show"] as? [String] { show(names, id: command["id"]) }
+    }
+
+    func running(_ query: String) -> NSRunningApplication? {
+        if let app = known[key(query)], !app.isTerminated { return app }
+        known[key(query)] = matching(query)
+        return known[key(query)]
+    }
+
+    // MARK: quiet launches
+
+    func open(_ query: String, deny: [String], id: Any) {
+        var app = running(query)
+        guard let url = app?.bundleURL ?? applicationURL(query) else {
+            emit(["id": id, "state": app == nil ? "unknown" : "running"])  // cua_repl may still find it
+            return
+        }
+        let bundle = Bundle(url: url), info = bundle?.infoDictionary
+        let names = [query, url.deletingPathExtension().lastPathComponent, FileManager.default.displayName(atPath: url.path),
+                     bundle?.bundleIdentifier, info?["CFBundleName"] as? String, info?["CFBundleDisplayName"] as? String]
+        guard Set(names.compactMap { $0 }.map(key)).isDisjoint(with: deny.map(key)) else {
+            emit(["id": id, "state": "denied"])
+            return
+        }
+        // The name asked for may not be the one it runs under: "Visual Studio Code" runs as "Code".
+        if app == nil, let identifier = bundle?.bundleIdentifier {
+            app = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).first
+            known[key(query)] = app
+        }
+        if let app {
+            emit(["id": id, "state": "running", "hidden": app.isHidden])
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.hides = true
+        configuration.addsToRecentItems = false
+        configuration.promptsUserIfNeeded = false
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
+            DispatchQueue.main.async { [self] in keepHidden(app, id: id) }
+        }
+    }
+
+    // Some apps ignore `hides` or show themselves once their window is up (Blender), and cua_repl needs that
+    // window, so this hides the app until it has one, and for a moment after in case it shows itself again.
+    func keepHidden(_ launched: NSRunningApplication?, id: Any?) {
+        func reply(_ state: String) { if let id { emit(["id": id, "state": state]) } }
+        guard let app = launched else {
+            reply("failed")
+            return
+        }
+        let pid = app.processIdentifier, started = Date(), element = appElement(pid), trusted = AXIsProcessTrusted()
+        var finished: Date?, replied: Date?
+        keptHidden.insert(pid)
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] timer in
+            if app.isTerminated || !keptHidden.contains(pid) || (app.isActive && Self.userIsActive())
+                || (replied.map { -$0.timeIntervalSinceNow > Self.hideGuard } ?? false) {
+                if replied == nil { reply("opened") }
+                keptHidden.remove(pid)
+                timer.invalidate()
+                return
+            }
+            if !app.isHidden { app.hide() }
+            if finished == nil, app.isFinishedLaunching { finished = Date() }
+            guard replied == nil else { return }
+            let list: [AXUIElement] = trusted ? attribute(element, kAXWindowsAttribute) ?? [] : []
+            let waited = finished.map { -$0.timeIntervalSinceNow > Self.noWindowLimit } ?? false
+            if (app.isHidden && !list.isEmpty) || (!trusted && finished != nil) || waited
+                || -started.timeIntervalSinceNow > Self.openLimit {
+                reply("opened")
+                replied = Date()
+            }
+        }
+    }
+
+    func show(_ names: [String], id: Any?) {
+        let apps = names.compactMap(running)
+        for app in apps {
+            keptHidden.remove(app.processIdentifier)
+            if app.isHidden { app.unhide() }
+        }
+        let started = Date()
+        Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
+            if apps.allSatisfy({ !$0.isHidden && Self.isOnScreen($0) }) || -started.timeIntervalSinceNow > 2 {
+                timer.invalidate()
+                if let id { emit(["id": id]) }
+            }
+        }
+    }
+
+    static func isOnScreen(_ app: NSRunningApplication) -> Bool {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return list.contains { ($0[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier) }
+    }
+
+    // MARK: new windows
+
+    func scan() {
+        scanDialogs(reporting: true)
+        driven.forEach(scanWindows)
+    }
+
+    // Windows are compared because an app only announces one once it is on screen, which never happens while the
+    // app is hidden. Those already open the first time an app is seen aren't new.
+    func scanWindows(of app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard let list: [AXUIElement] = attribute(appElement(pid), kAXWindowsAttribute) else { return }
+        let current = list + list.flatMap { attribute($0, "AXSheets") as [AXUIElement]? ?? [] }
+        defer { seenWindows[pid] = current }
+        guard let before = seenWindows[pid] else { return }
+        for window in current where !before.contains(where: { CFEqual($0, window) }) { appeared(window, in: app) }
+    }
+
+    // The window is read a moment later, once it has its content. Menus and tooltips have closed by then.
+    func appeared(_ window: AXUIElement, in app: NSRunningApplication) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.windowSettle) { [self] in
+            guard let role: String = attribute(window, kAXRoleAttribute) else { return }
+            let subrole: String = attribute(window, kAXSubroleAttribute) ?? ""
+            guard role == kAXSheetRole || (role == kAXWindowRole && subrole != kAXUnknownSubrole) else { return }
+            let main: AXUIElement? = attribute(appElement(app.processIdentifier), kAXMainWindowAttribute)
+            let name = role == kAXSheetRole ? "sheet" : kind(of: window, in: app) ?? "window"
+            report(window, owner: app.localizedName ?? "?", kind: name, main: main.map { CFEqual($0, window) } ?? false)
+        }
+    }
+
+    func report(_ window: AXUIElement?, owner: String, kind: String, main: Bool = false) {
+        var event: [String: Any] = ["event": "window", "app": owner, "kind": kind, "main": main]
+        if let window {
+            let found = contents(of: window)
+            event["title"] = title(window)
+            event["text"] = found.text == title(window) ? "" : found.text
+            event["buttons"] = found.buttons
+        }
+        emit(event)
+    }
+
+    // Password and permission prompts come from system processes, not from the app that caused them, and those
+    // processes can't be observed in advance. Their AX windows can still be read once they are on screen.
+    func scanDialogs(reporting: Bool) {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        var told = Set<String>()
+        for window in list {
+            guard let owner = window[kCGWindowOwnerName as String] as? String, Self.dialogOwners.contains(owner),
+                  let id = window[kCGWindowNumber as String] as? Int, seenDialogs.insert(id).inserted,
+                  reporting, told.insert(owner).inserted,
+                  let pid = window[kCGWindowOwnerPID as String] as? Int else { continue }
+            let found: [AXUIElement] = attribute(appElement(pid_t(pid)), kAXWindowsAttribute) ?? []
+            report(found.first, owner: owner, kind: "system dialog")
+        }
+    }
+
+    // MARK: focus
+
+    // The HID state only counts real input, not the events cua_repl sends to an app. Any click, key or swipe just
+    // before may be the user switching apps themselves, and undoing that would be worse than leaving a stray app up.
+    static func userIsActive(within seconds: Double = inputWindow) -> Bool {
+        let swipe = CGEventType(rawValue: 29)!  // a trackpad gesture, which can change Spaces; it has no name here
+        let types: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .flagsChanged,
+                                    .scrollWheel, swipe]
+        return types.contains {
+            CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) < seconds
+        }
+    }
+
+    func activated(_ app: NSRunningApplication) {
+        let previous = front, pid = app.processIdentifier, launched = app.launchDate ?? .distantPast
+        let isNew = launched > busySince
+        // An app takes seconds to start, so a new one counts as the user's if they did anything since just before it.
+        let sinceInput = isNew ? -launched.timeIntervalSinceNow + Self.inputWindow : Self.inputWindow
+        front = app
+        guard Date() < busyUntil, let previous, previous.processIdentifier != pid, !previous.isTerminated,
+              pid != allowed, isNew || driven.contains(app), !Self.userIsActive(within: sinceInput) else { return }
+        front = previous
+        AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
+                                     kCFBooleanTrue)
+        if isNew { keepHidden(app, id: nil) }
+        emit(["event": "focus", "app": app.localizedName ?? "?", "back": previous.localizedName ?? "?"])
+    }
+}
+
+let watcher = Watcher()
+let args = Array(CommandLine.arguments.dropFirst())
+guard let command = args.first else {
+    fail("usage: ucu-window list [app] | focus <app> <title> [--unfullscreen] [--activate] | "
+        + "unfullscreen <app> <title> | watch")
+}
+if command == "watch" { watcher.run() }
+if command == "list", args.count == 1 {
+    requireTrust()
+    for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+        let (element, list) = windows(of: app)
+        if !list.isEmpty { printWindows(of: app, element: element, list: list) }
+    }
+    exit(0)
+}
+guard args.count >= 2 else { fail("usage: ucu-window \(command) <app>") }
 let app = runningApp(args[1])
-let (appElement, list) = windows(of: app)
+let (element, list) = windows(of: app)
 
 switch command {
 case "list":
-    let main: AXUIElement? = attribute(appElement, kAXMainWindowAttribute)
-    print("\(app.localizedName ?? "?") (\(app.bundleIdentifier ?? "?"), pid \(app.processIdentifier), active=\(app.isActive))")
-    for (index, window) in list.enumerated() {
-        let isMain = main.map { CFEqual($0, window) } ?? false
-        print("[\(index)] \"\(title(window))\" main=\(isMain) minimized=\(flag(window, kAXMinimizedAttribute)) "
-            + "fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))")
-    }
+    printWindows(of: app, element: element, list: list)
 case "focus", "unfullscreen":
     guard args.count >= 3 else { fail("usage: ucu-window \(command) <app> <title substring>") }
     let window = find(args[2], in: list)
@@ -98,12 +441,15 @@ case "focus", "unfullscreen":
         if flag(window, kAXMinimizedAttribute) {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        if args.contains("--activate") { app.activate() }
+        if args.contains("--activate") {
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            app.unhide()
+            app.activate()
+        }
         usleep(200_000)
     }
-    let main: AXUIElement? = attribute(appElement, kAXMainWindowAttribute)
+    let main: AXUIElement? = attribute(element, kAXMainWindowAttribute)
     let isMain = main.map { CFEqual($0, window) } ?? false
     print("\"\(title(window))\" main=\(isMain) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))")
     exit(command == "focus" && !isMain ? 4 : 0)
