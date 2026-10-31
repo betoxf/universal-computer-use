@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 THEMES = {
     "light": {"surface": "#fcfcfb", "border": "#e4e3df", "ink": "#0b0b0b", "soft": "#52514e", "muted": "#74736e",
-              "ucu": "#2a78d6", "Codex engine": "#eb6834", "agent-desktop": "#1baf7a"},
+              "ucu": "#0b0b0b", "Codex engine": "#2a78d6", "agent-desktop": "#b4b3ab"},
     "dark": {"surface": "#1a1a19", "border": "#383835", "ink": "#f0efec", "soft": "#c3c2b7", "muted": "#9a998f",
-             "ucu": "#3987e5", "Codex engine": "#d95926", "agent-desktop": "#199e70"},
+             "ucu": "#f0efec", "Codex engine": "#3987e5", "agent-desktop": "#77766f"},
 }
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
 WIDTH, LEFT, BAR_MAX, BAR_HEIGHT, BAR_GAP, ROW_GAP = 860, 236, 440, 14, 3, 22
