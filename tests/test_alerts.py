@@ -43,12 +43,7 @@ class AlertTest(unittest.TestCase):
         self.watcher.heard = [(5.0, "‎WhatsApp")]
         self.assertEqual(len(self.watcher.take(started=1, late_until=0, apps={"whatsapp"})), 1)
 
-    def test_notices_which_calls_act_on_an_app(self):
-        acting = ("await app.click(8);", 'await app.pressKey("z");', 'await calc.typeText("x");', "await app.scroll(1, 'down');")
-        for code in acting:
-            self.assertTrue(self.proxy.ACTION_CALL.search(code), code)
-        for code in ("await app.getAXState();", 'let app = await cua.getApp("Calculator");', "await app.getScreenshot();"):
-            self.assertFalse(self.proxy.ACTION_CALL.search(code), code)
+    def test_notices_which_apps_a_call_binds(self):
         self.assertEqual(self.proxy.APP_CALL.findall('let a = await cua.getApp("Windows App");'), ["Windows App"])
 
     def test_turns_itself_off_without_a_log_command(self):

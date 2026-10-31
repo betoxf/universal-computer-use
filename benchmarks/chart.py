@@ -99,7 +99,7 @@ def draw(title, subtitle, rows, footer, theme):
     legend, x = [], 28
     for tool, width in (("ucu", 62), ("Codex engine", 124), ("agent-desktop", 130)):
         legend.append(f'<rect x="{x}" y="77" width="12" height="12" rx="3" fill="{colors[tool]}"/>')
-        legend.append(text(x + 18, 88, tool, colors["soft"], 13))
+        legend.append(text(x + 18, 88, "UCU" if tool == "ucu" else tool, colors["soft"], 13))
         x += width
     height = y + 34
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" width="{WIDTH}" height="{height}" font-family="{FONT}" role="img" aria-label="{escape(title)}">
@@ -114,20 +114,27 @@ def draw(title, subtitle, rows, footer, theme):
 """
 
 
+def charts(results):
+    """One image per idea, with at most three rows, so a reader can follow each one."""
+    speed, tokens = rows_speed(results), rows_tokens(results)
+    faster = "Shorter is faster. UCU runs the Codex engine, so those two differ only by noise."
+    better = "Shorter is better. Tokens are estimated as characters / 4."
+    return {
+        "speed-actions": ("Speed: single actions", faster, speed[:3]),
+        "speed-jobs": ("Speed: longer jobs", faster, speed[3:]),
+        "tokens": ("Tokens per job", better, tokens[:3]),
+        "overhead": ("Setup and idle memory", better, tokens[3:]),
+    }
+
+
 def main():
     results = json.loads((ROOT / "benchmarks/results.json").read_text())
     versions = results["versions"]
     footer = (f"Medians on an {versions['chip']}, macOS {versions['macOS']}. agent-desktop {versions['agent-desktop']}, "
               f"Codex plugin {versions['codex plugin']}. Each row has its own scale. Reproduce: benchmarks/run.py")
-    charts = {
-        "speed": ("Speed", "Shorter is faster. ucu runs the Codex engine: it waits 20 ms after an action to catch error sounds, and other gaps are noise.",
-                  rows_speed(results)),
-        "tokens": ("Tokens and memory", "Shorter is better. Tokens are estimated as characters / 4.",
-                   rows_tokens(results)),
-    }
     folder = ROOT / "assets/benchmarks"
     folder.mkdir(parents=True, exist_ok=True)
-    for name, (title, subtitle, rows) in charts.items():
+    for name, (title, subtitle, rows) in charts(results).items():
         for theme in THEMES:
             (folder / f"{name}-{theme}.svg").write_text(draw(title, subtitle, rows, footer, theme))
 

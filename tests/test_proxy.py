@@ -253,8 +253,8 @@ class ProxyTest(unittest.TestCase):
         proxy.call("js", 'let app = await cua.getApp("Calculator");')
         time.sleep(0.3)  # the fake log's start
         self.assertEqual(self.notes(proxy.call("js", "alert:Calculator")), [
-            "[ucu: Calculator played an alert sound, which usually means it rejected an input. "
-            "Check the app before going on.]"])
+            "[ucu: Calculator played an alert sound during your last actions, which usually means it rejected "
+            "an input. Check the app before going on.]"])
         self.assertEqual(self.notes(proxy.call("js")), [])  # told once
 
     def test_tells_the_agent_about_a_sound_too_late_for_the_last_result(self):

@@ -47,8 +47,11 @@ chat. It passes every message through unchanged, except that it
   native/ucu-window.swift. They answer without starting cua_repl;
 * tells the agent when an app it drives plays the macOS alert sound. Humans hear
   that an input was rejected, but the engine still reports success, so the proxy
-  watches the system sound server's log while cua_repl runs and adds a note to the
-  `js` result. It needs no permission and hears no audio;
+  watches the system sound server's log while cua_repl runs and adds a note to a
+  `js` result. Nothing waits for a sound: it reaches the log 2-13 ms after the call
+  that caused it returns, so it comes with that result if a read followed the
+  action in the same call, and with the next result if not. It needs no permission
+  and hears no audio;
 * adds ucu's usage rules to the `instructions` in cua_repl's `initialize` reply,
   so they reach every client and not only those with the rules in their own config;
 * answers a request left unanswered by a cua_repl that exited on its own with an
@@ -123,10 +126,9 @@ APPROVAL_PROMPT = re.compile(r'^Allow Computer Use to use "(.+)"\?$')
 ALERT_COMMAND = ["log", "stream", "--style", "compact", "--level", "default", "--predicate",
                  'process == "systemsoundserverd" AND eventMessage CONTAINS "Incoming Request"']
 ALERT_LINE = re.compile(r"actionID 4096, inClientPID \d+\((.+?)\)")  # 4096 is the user's alert sound
-ALERT_WAIT = 0.02  # seconds after an action; its sound reaches the log 2-13 ms after the call returns
 ALERT_LATE = 1  # seconds after a call in which a sound still belongs to it
-ALERT_NOTE = "[ucu: {} played an alert sound, which usually means it rejected an input. Check the app before going on.]"
-ACTION_CALL = re.compile(r"\.(?:click|drag|scroll|pressKey|typeText|paste|setValue|selectText|performSecondaryAction)\(")
+ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
+              "Check the app before going on.]")
 APP_CALL = re.compile(r"""getApp\(\s*["'`]([^"'`]+)""")
 WINDOW_HELPER = Path.home() / ".local/bin/ucu-window"
 APP_PROPERTY = {"type": "string", "description": 'Name or bundle id of a running app, e.g. "Windows App".'}
@@ -337,7 +339,7 @@ class Proxy:
         self.client_requests = set()  # Claude -> server requests still waiting for a reply
         self.server_requests = set()  # server -> Claude requests (elicitation etc.) still waiting
         self.own_requests = set()     # requests this proxy sent; their replies are dropped
-        self.js_calls = {}            # Claude's pending `js` calls, as (start time, whether they act on an app)
+        self.js_calls = {}            # Claude's pending `js` calls and when they started
         self.list_calls = set()       # Claude's pending `tools/list` requests, whose results get the window tools
         self.docs_seen = set()        # hashes of documentation blocks this chat has already received
         self.ids = itertools.count(1)
@@ -516,7 +518,7 @@ class Proxy:
                                 self.docs_seen.clear()  # Claude asked for a fresh start: show the docs again
                             if params.get("name") == "js":
                                 code = str((params.get("arguments") or {}).get("code", ""))
-                                self.js_calls[key] = (time.monotonic(), bool(ACTION_CALL.search(code)))
+                                self.js_calls[key] = time.monotonic()
                                 self.used_apps.update(app_key(name) for name in APP_CALL.findall(code))
                                 if BROWSER_CALL.search(code):
                                     self.turn_used_browser = True
@@ -571,10 +573,8 @@ class Proxy:
         result["tools"] = result["tools"] + WINDOW_TOOLS
         return encode(message)
 
-    def add_alert_note(self, message, started, acted):
+    def add_alert_note(self, message, started):
         """Re-encode a `js` result with a note about any alert sound from an app this chat drives."""
-        if acted:
-            time.sleep(ALERT_WAIT)
         names = self.alerts.take(started, self.last_js_end + ALERT_LATE, self.used_apps)
         self.last_js_end = time.monotonic()
         result = message.get("result")
@@ -613,7 +613,7 @@ class Proxy:
                     if action:
                         self.answer_child(child, message["id"], action)
                         continue
-                key, js_call = json.dumps(message["id"]), None
+                key, js_started = json.dumps(message["id"]), None
                 with self.lock:
                     if "method" in message:
                         self.server_requests.add(key)
@@ -623,7 +623,7 @@ class Proxy:
                     else:
                         self.client_requests.discard(key)
                         if key in self.js_calls:
-                            js_call = self.js_calls.pop(key)
+                            js_started = self.js_calls.pop(key)
                             raw = self.drop_repeated_docs(message) or raw
                         elif key in self.list_calls:
                             self.list_calls.discard(key)
@@ -632,8 +632,8 @@ class Proxy:
                             self.initialize_key = None
                             raw = self.add_instructions(message) or raw
                     self.last_activity = time.monotonic()
-                if js_call:
-                    raw = self.add_alert_note(message, *js_call) or raw
+                if js_started is not None:
+                    raw = self.add_alert_note(message, js_started) or raw
             self.write_client(raw)
         with self.lock:
             if self.child is not child:  # stopped on purpose
