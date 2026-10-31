@@ -30,7 +30,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-actions-dark.svg">
-    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 61 ms, clicks in 66 ms and takes a screenshot in 59 ms, against 166 ms, 182 ms and 290 ms for agent-desktop." width="860">
+    <img src="assets/benchmarks/speed-actions-light.svg" alt="Bar chart of single actions. UCU reads a small window in 55 ms, clicks in 57 ms and takes a screenshot in 52 ms, against 145 ms, 84 ms and 295 ms for agent-desktop." width="860">
   </picture>
 </p>
 
@@ -43,15 +43,17 @@
 | Light on tokens | A task costs about a quarter of the tokens of agent-desktop, and the model gets compact text and diffs. |
 | You choose the apps | Every app is approved except the ones you deny, with one command. |
 | Shows who did what | Every approval is logged with the agent and folder that caused it. |
-| Light when idle | It stops the engine between uses: 24 MB instead of 639 MB. |
+| Light when idle | It stops the engine between uses: 24 MB instead of 638 MB. |
 | Picks the right window | `list_windows` and `focus_window` choose which window of an app to act on. |
+| Hears errors | When an app plays the macOS alert sound, the agent is told, at no cost in speed. The engine alone reports success. |
 | Stays up to date | A Codex update needs nothing from you: UCU finds the newest engine each time it starts it. |
 
 ## How it compares
 
 UCU runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. The
 gap between those two bars is noise, not a speedup. What UCU adds is everything around the engine: it works
-with your agents, stops the engine when idle, and adds the deny list, the log and the window tools.
+with your agents, stops the engine when idle, and adds the deny list, the log, the window tools and the
+error-sound notes.
 
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) from Vercel Labs is a separate, open-source tool
 with its own engine. These are the numbers for all three on the same Mac and the same tasks:
@@ -59,53 +61,56 @@ with its own engine. These are the numbers for all three on the same Mac and the
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-jobs-dark.svg">
-    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.1 s against 1.5 s for agent-desktop, and reads a large window in 2.0 s against 3.1 s, or 180 ms for agent-desktop's outline. agent-desktop starts faster, 344 ms against 655 ms." width="860">
+    <img src="assets/benchmarks/speed-jobs-light.svg" alt="Bar chart of longer jobs. UCU finishes a task in 1.4 s against 780 ms for agent-desktop, and reads a large window in 2.1 s against 3.0 s, or 169 ms for agent-desktop's outline. agent-desktop starts faster, 315 ms against 654 ms." width="860">
   </picture>
 </p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
-    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 588 tokens with UCU and 2,265 with agent-desktop. Reading a small window takes 421 against 1,130, and a large window 1,647 against 2,216, or 1,112 for agent-desktop's outline." width="860">
+    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens. A task takes 552 tokens with UCU and 2,109 with agent-desktop. Reading a small window takes 390 against 1,099, and a large window 1,651 against 2,177, or 1,112 for agent-desktop's outline." width="860">
   </picture>
 </p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/overhead-dark.svg">
-    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 6,956 tokens with UCU and 2,882 with agent-desktop. Idle memory is 24 MB for UCU, 639 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
+    <img src="assets/benchmarks/overhead-light.svg" alt="Bar chart of setup and idle memory. Setting up a session takes 6,992 tokens with UCU and 2,882 with agent-desktop. Idle memory is 24 MB for UCU, 638 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
   </picture>
 </p>
 
 **Where UCU wins**
 
-- Reads a window 2.7 times faster, clicks 2.8 times faster and takes screenshots 4.9 times faster than agent-desktop.
-- Uses 3.8 times fewer tokens on the task, and needs 2 model round trips, the same as agent-desktop with `batch`.
+- Reads a small window 2.7 times faster, clicks 1.5 times faster and takes screenshots 5.7 times faster than agent-desktop.
+- Uses 3.8 times fewer tokens on the task, with 2 model round trips, the same as agent-desktop with `batch`.
 - Can click by position in a background window. agent-desktop needs `--headed` for that, which moves your real
   pointer and takes focus.
+- Tells the agent when an app plays its error sound.
 - Has a per-app deny list and an approval log, and works as an MCP server.
 
 **Where agent-desktop wins**
 
-- Starts about twice as fast: 344 ms against 655 ms.
-- Costs less to set up: 2,882 tokens against 6,956, so UCU only pulls ahead on total tokens from the third task on.
-- Gives a quick outline of a large window in 180 ms, then lets the agent drill in. UCU reads the whole window.
+- Finishes the task faster: 780 ms against 1.4 s. A single click is close, but a run of six presses takes the engine
+  longer.
+- Starts about twice as fast: 315 ms against 654 ms.
+- Costs less to set up: 2,882 tokens against 6,992, so UCU only pulls ahead on total tokens from the third task on.
+- Gives a quick outline of a large window in 169 ms, then lets the agent drill in. UCU reads the whole window.
 - Is fully open source, runs on Windows and Linux too, and uses slightly less memory when idle (15 MB against 24 MB).
 - Reports if each action was delivered and if a retry is safe, and rejects stale element references.
 
 | Test (median) | UCU | Codex engine alone | agent-desktop |
 | --- | ---: | ---: | ---: |
-| Read a small window | 61 ms | 88 ms | 166 ms |
-| Click a button | 66 ms | 66 ms | 182 ms |
-| Take a screenshot | 59 ms | 69 ms | 290 ms |
-| Finish a task | 1.1 s | 1.2 s | 1.5 s |
-| Read a large window | 2.0 s | 1.8 s | 3.1 s (outline only: 180 ms) |
-| Start from nothing | 655 ms | 637 ms | 344 ms |
-| Tokens for the task | 588 | 588 | 2,265 |
-| Tokens to read a small window | 421 | 421 | 1,130 |
-| Tokens to read a large window | 1,647 | 1,647 | 2,216 (outline only: 1,112) |
-| Tokens to set up a session | 6,956 | 6,357 | 2,882 |
-| Memory while idle | 24 MB | 639 MB | 15 MB |
+| Read a small window | 55 ms | 82 ms | 145 ms |
+| Click a button | 57 ms | 52 ms | 84 ms |
+| Take a screenshot | 52 ms | 59 ms | 295 ms |
+| Finish a task | 1.4 s | 1.4 s | 780 ms |
+| Read a large window | 2.1 s | 1.9 s | 3.0 s (outline only: 169 ms) |
+| Start from nothing | 654 ms | 632 ms | 315 ms |
+| Tokens for the task | 552 | 552 | 2,109 |
+| Tokens to read a small window | 390 | 390 | 1,099 |
+| Tokens to read a large window | 1,651 | 1,651 | 2,177 (outline only: 1,112) |
+| Tokens to set up a session | 6,992 | 6,357 | 2,882 |
+| Memory while idle | 24 MB | 638 MB | 15 MB |
 
 <details>
 <summary>How this was measured</summary>
@@ -119,9 +124,9 @@ python3 -I benchmarks/chart.py
 ```
 
 - The small window is Calculator and the large one is Font Book. The task is pressing `12 + 34 =` and reading the
-  answer, starting from seeing the buttons.
-- The tools take turns sample by sample, for 3 rounds. Each number is a median of up to 30 samples. Large windows
-  vary the most: for UCU, the middle half of those reads took between 0.4 s and 2.2 s.
+  answer, starting from a cleared display and seeing the buttons.
+- The tools take turns sample by sample, for 3 rounds. Each number is a median of up to 30 samples. Reads of large
+  windows varied the most between runs.
 - The clock covers the tool only, not the model's thinking time. agent-desktop runs through its CLI, as an agent
   would use it, with `-i --compact` and `batch`, the options its docs recommend to save tokens.
 - Tokens are estimated as characters / 4, and count what the model reads and writes. Screenshots aren't counted.
@@ -225,6 +230,17 @@ In a `js` call, wait for a window to react instead of sleeping:
 const { waitForChange } = await import("<this folder>/js/wait.mjs");
 const r = await waitForChange(app, () => app.click(8), { timeoutMs: 20000 }); // { changed, settled, ms, changedBlocks }
 ```
+
+When an app rejects an input it plays the macOS alert sound, which a person hears but an agent can't. UCU watches
+the system sound server's log and adds a note to a `js` result:
+
+```
+[ucu: Calculator played an alert sound during your last actions, which usually means it rejected an input. Check the app before going on.]
+```
+
+Nothing waits for a sound, so this adds no time to a call. The note comes with the same result if a read follows the
+action in that call, and with the next result if not. It needs no permission, hears no audio, and only reports apps
+that chat is driving.
 
 The server sends the usage rules in its MCP `instructions`, so clients get them without their own config.
 

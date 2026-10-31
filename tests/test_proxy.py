@@ -17,6 +17,11 @@ PROXY = ROOT / "scripts/ucu-proxy.py"
 FAKE = ROOT / "tests/fake_cua_repl.py"
 
 
+FAKE_LOG_COMMAND = """#!/bin/sh
+exec tail -n 0 -f "$FAKE_ALERTS"
+"""
+
+
 class Proxy:
     """A running proxy around the fake cua_repl. --stop-grace 0 stops cua_repl as soon as a turn ends.
 
@@ -27,7 +32,14 @@ class Proxy:
     def __init__(self, test, from_plugin=False):
         self.home = tempfile.TemporaryDirectory()  # HOME without Sky, so turn ends notify nothing real
         self.log = Path(self.home.name) / "fake.log"
-        env = {**os.environ, "HOME": self.home.name, "FAKE_LOG": str(self.log)}
+        self.alert_file = Path(self.home.name) / "alerts.txt"
+        self.alert_file.touch()
+        tools = Path(self.home.name) / "tools"
+        tools.mkdir()
+        (tools / "log").write_text(FAKE_LOG_COMMAND)
+        (tools / "log").chmod(0o755)
+        env = {**os.environ, "HOME": self.home.name, "FAKE_LOG": str(self.log), "FAKE_ALERTS": str(self.alert_file),
+               "PATH": f"{tools}:{os.environ['PATH']}"}
         command = [] if from_plugin else ["--", sys.executable, "-I", str(FAKE)]
         folder = Path(self.home.name) / "My Project"
         folder.mkdir()
@@ -231,6 +243,62 @@ class ProxyTest(unittest.TestCase):
         instructions = proxy.initialize()["result"]["instructions"]
         self.assertTrue(instructions.startswith("Fake cua_repl.\n\nucu rules:"), instructions)
         self.assertIn("`list_windows`", instructions)
+
+    def notes(self, reply):
+        return [item["text"] for item in reply["result"]["content"] if "alert sound" in item["text"]]
+
+    def test_tells_the_agent_about_an_alert_sound_from_its_app(self):
+        proxy = Proxy(self)
+        proxy.initialize()
+        proxy.call("js", 'let app = await cua.getApp("Calculator");')
+        time.sleep(0.3)  # the fake log's start
+        self.assertEqual(self.notes(proxy.call("js", "alert:Calculator")), [
+            "[ucu: Calculator played an alert sound during your last actions, which usually means it rejected "
+            "an input. Check the app before going on.]"])
+        self.assertEqual(self.notes(proxy.call("js")), [])  # told once
+
+    def test_tells_the_agent_about_a_sound_too_late_for_the_last_result(self):
+        proxy = Proxy(self)
+        proxy.initialize()
+        proxy.call("js", 'let app = await cua.getApp("Calculator");')
+        time.sleep(0.3)
+        proxy.call("js", "alert-late:Calculator")
+        time.sleep(0.3)
+        self.assertEqual(len(self.notes(proxy.call("js"))), 1)
+
+    def test_ignores_other_apps_other_sounds_and_sounds_between_calls(self):
+        proxy = Proxy(self)
+        proxy.initialize()
+        proxy.call("js", 'let app = await cua.getApp("Calculator");')
+        time.sleep(0.3)
+        self.assertEqual(self.notes(proxy.call("js", "alert:Safari")), [])
+        self.assertEqual(self.notes(proxy.call("js", "other-sound:Calculator")), [])
+        with proxy.alert_file.open("a") as handle:  # the user, a while after the last call
+            time.sleep(1.2)
+            handle.write("-> Incoming Request : actionID 4096, inClientPID 7(Calculator), inBehavior 1\n")
+        time.sleep(0.3)
+        self.assertEqual(self.notes(proxy.call("js")), [])
+
+    def test_exits_even_when_cua_repl_dies_as_it_starts(self):
+        request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}
+        for _ in range(20):  # the race needs cua_repl to win it, which isn't every time
+            process = subprocess.Popen([sys.executable, "-I", str(PROXY), "--", "/usr/bin/false"],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            self.addCleanup(process.stdout.close)
+            self.addCleanup(process.kill)
+            process.stdin.write((json.dumps(request) + "\n").encode())
+            process.stdin.close()
+            self.assertEqual(process.wait(5), 0)
+
+    def test_stops_watching_for_sounds_when_cua_repl_stops(self):
+        proxy = Proxy(self)
+        proxy.initialize()
+        proxy.call("js")
+        tails = lambda: subprocess.run(["pgrep", "-f", str(proxy.alert_file)], capture_output=True, text=True).stdout.split()
+        proxy.wait_until(lambda: len(tails()) == 1)
+        proxy.end_turn()
+        proxy.wait_until(lambda: not tails())
 
     def test_lists_the_window_tools_after_cua_repls_own(self):
         proxy = Proxy(self)

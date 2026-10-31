@@ -146,11 +146,16 @@ class Engine:
     @staticmethod
     def button(state, label):
         patterns = {"Add": r"(\d+) button Add", "Equals": r"(\d+) button Equals",
+                    "Change Sign": r"(\d+) button Description: Change Sign",
                     "Clear": r"(\d+) button (?:Clear|Description: All Clear)"}  # "All Clear" once the display is empty
         return int(re.search(patterns.get(label, rf"(\d+) button Description: {label}, ID"), state).group(1))
 
-    def click_point(self, state):
-        self.mcp.js(f"await calc.click({self.button(state, 'Point')});")
+    def click_sign(self, state):
+        self.mcp.js(f"await calc.click({self.button(state, 'Change Sign')});")
+
+    def reset(self):
+        for _ in range(2):  # Clear, then All Clear
+            self.mcp.js(f"await calc.click({self.button(self.read(SMALL), 'Clear')});")
 
     def task(self):
         """12 + 34 =: see the buttons, then press them and read the answer in one call."""
@@ -159,7 +164,7 @@ class Engine:
         state = self.mcp.js(code)
         sent.append(code), seen.append(state)
         presses = "".join(f"await calc.click({self.button(state, label)});\n"
-                          for label in ("Clear", "1", "2", "Add", "3", "4", "Equals"))
+                          for label in ("1", "2", "Add", "3", "4", "Equals"))
         code = presses + "await calc.getAXState();"
         answer = self.mcp.js(code)
         sent.append(code), seen.append(answer)
@@ -221,8 +226,13 @@ class Desktop:
         self.cli("screenshot", "--app", SMALL, str(Path(self.folder) / "shot.png"))
         (Path(self.folder) / "shot.png").unlink()
 
-    def click_point(self, state):
-        self.cli("click", self.buttons(state)["Point"])
+    def click_sign(self, state):
+        self.cli("click", self.buttons(state)["Change Sign"])
+
+    def reset(self):
+        for _ in range(2):  # Clear, then All Clear
+            refs = self.buttons(self.read(SMALL))
+            self.cli("click", refs.get("Clear") or refs["All Clear"])
 
     def task(self):
         """12 + 34 =: see the buttons, press them in a batch, then read the answer in the same batch."""
@@ -230,9 +240,7 @@ class Desktop:
         state = self.read(SMALL)
         sent.append(f'agent-desktop snapshot --app {SMALL} -i --compact'), seen.append(state)
         refs = self.buttons(state)
-        refs["Clear"] = refs.get("Clear") or refs["All Clear"]  # "All Clear" once the display is empty
-        steps = [{"command": "click", "args": {"ref_id": refs[label]}}
-                 for label in ("Clear", "1", "2", "Add", "3", "4", "Equals")]
+        steps = [{"command": "click", "args": {"ref_id": refs[label]}} for label in ("1", "2", "Add", "3", "4", "Equals")]
         steps.append({"command": "find", "args": {"app": SMALL, "role": "statictext"}})  # its cheapest way to read it
         batch = json.dumps(steps)
         answer = self.cli("batch", batch, "--stop-on-error")
@@ -267,7 +275,7 @@ def measure(tools, order, samples, sizes):
     """One round. Tools take turns sample by sample, so a slow moment on the Mac hits all of them alike."""
     states = {}
     for tool in tools:
-        tool.task()  # the same display for every tool
+        tool.reset()  # the same display for every tool
         tool.read(DENSE)  # warm up: the first read of a window after a pause is not typical
         states[tool.name] = tool.read(SMALL)
     for _ in range(READS):
@@ -287,9 +295,10 @@ def measure(tools, order, samples, sizes):
                 add(samples, "agent-desktop skeleton", "read dense app (chars)", len(skeleton))
     for _ in range(CLICKS):
         for tool in order:
-            add(samples, tool.name, "click (ms)", timed(lambda: tool.click_point(states[tool.name]))[0])
+            add(samples, tool.name, "click (ms)", timed(lambda: tool.click_sign(states[tool.name]))[0])
     for _ in range(TASKS):
         for tool in order:
+            tool.reset()
             ms, (sent, seen) = timed(tool.task)
             add(samples, tool.name, "task (ms)", ms)
             add(samples, tool.name, "task tokens read", sum(map(len, seen)) / 4)

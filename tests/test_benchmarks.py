@@ -13,6 +13,7 @@ STATE = """Window: "Calculator", App: Calculator.
 \t\t\t8 button Percent
 \t\t\t18 button Description: 1, ID: One
 \t\t\t21 button Add
+\t\t\t22 button Description: Change Sign, Help: Change sign of a value, ID: Negate
 \t\t\t24 button Description: Point, ID: Decimal
 \t\t\t25 button Equals
 """
@@ -29,7 +30,8 @@ def load(name):
 class BenchmarkTest(unittest.TestCase):
     def test_finds_buttons_in_the_engines_text(self):
         button = load("run").Engine.button
-        self.assertEqual([button(STATE, label) for label in ("Clear", "1", "Add", "Point", "Equals")], [7, 18, 21, 24, 25])
+        self.assertEqual([button(STATE, label) for label in ("Clear", "1", "Add", "Change Sign", "Point", "Equals")],
+                         [7, 18, 21, 22, 24, 25])
         self.assertEqual(button(STATE.replace("button Clear", "button Description: All Clear, ID: AllClear"), "Clear"), 7)
 
     def test_finds_buttons_in_agent_desktops_json(self):
