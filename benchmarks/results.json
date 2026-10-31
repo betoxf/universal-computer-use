@@ -8,126 +8,126 @@
   },
   "medians": {
     "Codex engine": {
-      "read small app (ms)": 88.5,
-      "screenshot (ms)": 68.9,
-      "read dense app (ms)": 1780.7,
-      "read dense app (chars)": 6587,
-      "click (ms)": 65.8,
-      "task (ms)": 1161.4,
-      "task tokens read": 532.2,
-      "task tokens written": 56.2,
-      "cold start (ms)": 636.7
+      "read small app (ms)": 82.5,
+      "screenshot (ms)": 62.3,
+      "read dense app (ms)": 2204.4,
+      "read dense app (chars)": 6617,
+      "click (ms)": 53.4,
+      "task (ms)": 1386.0,
+      "task tokens read": 501.0,
+      "task tokens written": 51.0,
+      "cold start (ms)": 632.0
     },
     "ucu": {
-      "read small app (ms)": 61.3,
-      "screenshot (ms)": 59.1,
-      "read dense app (ms)": 1986.3,
-      "read dense app (chars)": 6587,
-      "click (ms)": 65.7,
-      "task (ms)": 1088.0,
-      "task tokens read": 532.2,
-      "task tokens written": 56.2,
-      "cold start (ms)": 655.0
+      "read small app (ms)": 57.0,
+      "screenshot (ms)": 54.4,
+      "read dense app (ms)": 2159.3,
+      "read dense app (chars)": 6617,
+      "click (ms)": 80.5,
+      "task (ms)": 1448.9,
+      "task tokens read": 501.0,
+      "task tokens written": 51.0,
+      "cold start (ms)": 657.9
     },
     "agent-desktop": {
-      "read small app (ms)": 165.7,
-      "screenshot (ms)": 289.5,
-      "read dense app (ms)": 3053.9,
-      "read dense app (chars)": 8862,
-      "click (ms)": 182.1,
-      "task (ms)": 1490.0,
-      "task tokens read": 2110.2,
-      "task tokens written": 154.5,
-      "cold start (ms)": 343.5
+      "read small app (ms)": 148.6,
+      "screenshot (ms)": 298.4,
+      "read dense app (ms)": 3056.9,
+      "read dense app (chars)": 8359,
+      "click (ms)": 84.8,
+      "task (ms)": 798.7,
+      "task tokens read": 1970.2,
+      "task tokens written": 138.5,
+      "cold start (ms)": 322.8
     },
     "agent-desktop skeleton": {
-      "read dense app (ms)": 179.6,
+      "read dense app (ms)": 232.5,
       "read dense app (chars)": 4447
     }
   },
   "spread": {
     "Codex engine": {
       "read small app (ms)": [
-        83.7,
-        94.4
+        77.1,
+        87.3
       ],
       "screenshot (ms)": [
-        65.1,
-        74.0
+        56.0,
+        65.7
       ],
       "read dense app (ms)": [
-        413.9,
-        2202.2
+        2094.0,
+        2272.6
       ],
       "click (ms)": [
-        63.3,
-        69.7
+        40.8,
+        60.4
       ],
       "task (ms)": [
-        1104.5,
-        1347.6
+        1327.5,
+        1422.9
       ],
       "cold start (ms)": [
-        632.2,
-        643.6
+        617.6,
+        645.5
       ]
     },
     "ucu": {
       "read small app (ms)": [
-        59.1,
-        66.6
+        54.5,
+        61.1
       ],
       "screenshot (ms)": [
-        56.9,
-        61.8
+        51.0,
+        60.0
       ],
       "read dense app (ms)": [
-        375.6,
-        2173.5
+        1972.4,
+        2323.4
       ],
       "click (ms)": [
-        61.4,
-        68.9
+        67.9,
+        88.7
       ],
       "task (ms)": [
-        1063.6,
-        1164.6
+        1282.3,
+        1467.1
       ],
       "cold start (ms)": [
-        650.4,
-        665.5
+        655.3,
+        675.9
       ]
     },
     "agent-desktop": {
       "read small app (ms)": [
-        151.3,
-        171.2
+        135.6,
+        159.4
       ],
       "screenshot (ms)": [
-        281.8,
-        302.4
+        286.0,
+        316.2
       ],
       "read dense app (ms)": [
-        975.8,
-        3059.4
+        3053.8,
+        3062.3
       ],
       "click (ms)": [
-        170.0,
-        189.2
+        70.6,
+        97.3
       ],
       "task (ms)": [
-        1297.6,
-        1618.7
+        652.4,
+        852.2
       ],
       "cold start (ms)": [
-        316.7,
-        352.4
+        295.0,
+        336.0
       ]
     },
     "agent-desktop skeleton": {
       "read dense app (ms)": [
-        109.2,
-        235.6
+        215.8,
+        241.4
       ]
     }
   },
@@ -172,15 +172,15 @@
   },
   "sizes": {
     "Codex engine": {
-      "read small app (chars)": 1685,
+      "read small app (chars)": 1560,
       "task model round trips": 2
     },
     "ucu": {
-      "read small app (chars)": 1685,
+      "read small app (chars)": 1560,
       "task model round trips": 2
     },
     "agent-desktop": {
-      "read small app (chars)": 4520,
+      "read small app (chars)": 4397,
       "task model round trips": 2
     }
   },
@@ -192,7 +192,7 @@
     },
     "ucu": {
       "tool definitions": 6675,
-      "instructions": 1234,
+      "instructions": 1377,
       "first-use docs": 19915
     },
     "agent-desktop": {
@@ -202,8 +202,8 @@
     }
   },
   "idle memory (MB)": {
-    "Codex engine": 638.8,
-    "agent-desktop": 15.0,
-    "ucu": 23.8
+    "Codex engine": 634.7,
+    "agent-desktop": 15.1,
+    "ucu": 24.2
   }
 }

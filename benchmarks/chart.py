@@ -120,7 +120,7 @@ def main():
     footer = (f"Medians on an {versions['chip']}, macOS {versions['macOS']}. agent-desktop {versions['agent-desktop']}, "
               f"Codex plugin {versions['codex plugin']}. Each row has its own scale. Reproduce: benchmarks/run.py")
     charts = {
-        "speed": ("Speed", "Shorter is faster. ucu runs the Codex engine, so those two differ only by noise.",
+        "speed": ("Speed", "Shorter is faster. ucu runs the Codex engine: it waits 20 ms after an action to catch error sounds, and other gaps are noise.",
                   rows_speed(results)),
         "tokens": ("Tokens and memory", "Shorter is better. Tokens are estimated as characters / 4.",
                    rows_tokens(results)),

@@ -2,16 +2,20 @@
 """Stand-in for cua_repl in tests: a line-delimited JSON-RPC MCP server that logs what it gets.
 
 Its start, every line it receives and its exit are appended as JSON to $FAKE_LOG (when set).
-The `js` tool understands two `code` values: "crash" exits without answering, and "elicit" (or
-"elicit:<app>") asks the client to approve Calculator (or <app>) and returns the answer. Any other
-call returns its `_meta`.
+The `js` tool understands these `code` values: "crash" exits without answering, "elicit" (or
+"elicit:<app>") asks the client to approve Calculator (or <app>) and returns the answer, and
+"alert:<app>", "alert-late:<app>" and "other-sound:<app>" write a sound to $FAKE_ALERTS for the fake
+`log` command: an alert during the call, an alert just after it, or a sound that isn't an alert.
+Any other call returns its `_meta`.
 The first `js` result of each process starts with a long documentation block, like cua_repl's.
 """
 import json
 import os
 import sys
+import time
 
 LOG = os.environ.get("FAKE_LOG")
+ALERTS = os.environ.get("FAKE_ALERTS")
 DOCS = "# cua_repl documentation\n" + "Use cua.getApp(name) to get an app.\n" * 200
 TOOLS = [{"name": name, "inputSchema": {"type": "object"}} for name in ("js", "js_reset")]
 
@@ -25,6 +29,11 @@ def log(event, **fields):
 def send(message):
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
     sys.stdout.flush()
+
+
+def sound(app, action_id=4096):
+    with open(ALERTS, "a") as handle:
+        handle.write(f"-> Incoming Request : actionID {action_id}, inClientPID 7({app}), inBehavior 1\n")
 
 
 def texts(request_id, *items):
@@ -60,6 +69,14 @@ def main():
                 log("recv", message=answer)
                 texts(request_id, json.dumps(answer.get("result")))
                 continue
+            kind, _, app = str(code).partition(":")
+            if name == "js" and kind == "alert-late":
+                texts(request_id, "done")
+                sound(app)
+                continue
+            if name == "js" and kind in ("alert", "other-sound"):
+                sound(app, 4096 if kind == "alert" else 1100)
+                time.sleep(0.3)  # the fake log's turn
             meta = json.dumps(params.get("_meta"))
             if name == "js" and not docs_sent:
                 docs_sent = True

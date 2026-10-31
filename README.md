@@ -29,7 +29,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/speed-dark.svg">
-    <img src="assets/benchmarks/speed-light.svg" alt="Bar chart of speed. ucu reads a small window in 61 ms, clicks in 66 ms and takes a screenshot in 59 ms, against 166 ms, 182 ms and 290 ms for agent-desktop. agent-desktop starts faster, 344 ms against 655 ms." width="860">
+    <img src="assets/benchmarks/speed-light.svg" alt="Bar chart of speed. ucu reads a small window in 57 ms and takes a screenshot in 54 ms, against 149 ms and 298 ms for agent-desktop. Clicks take about the same. agent-desktop finishes the task and starts faster." width="860">
   </picture>
 </p>
 
@@ -42,15 +42,17 @@
 | Light on tokens | A task costs about a quarter of the tokens of agent-desktop, and the model gets compact text and diffs. |
 | You choose the apps | Every app is approved except the ones you deny, with one command. |
 | Shows who did what | Every approval is logged with the agent and folder that caused it. |
-| Light when idle | It stops the engine between uses: 24 MB instead of 639 MB. |
+| Light when idle | It stops the engine between uses: 24 MB instead of 635 MB. |
 | Picks the right window | `list_windows` and `focus_window` choose which window of an app to act on. |
+| Hears errors | When an app plays the macOS alert sound, the agent is told in the result. The engine alone reports success. |
 | Stays up to date | A Codex update needs nothing from you: `ucu` finds the newest engine each time it starts it. |
 
 ## How it compares
 
-`ucu` runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. The
-gap between those two bars is noise, not a speedup. What `ucu` adds is everything around the engine: it works
-with your agents, stops the engine when idle, and adds the deny list, the log and the window tools.
+`ucu` runs OpenAI's Computer Use engine, so its speed and tokens per task match the engine on its own. It adds
+about 25 ms to a click, to catch error sounds. Any other gap between those two bars is noise, not a speedup.
+What `ucu` adds is everything around the engine: it works with your agents, stops the engine when idle, and
+adds the deny list, the log, the window tools and the error-sound notes.
 
 [agent-desktop](https://github.com/vercel-labs/agent-desktop) from Vercel Labs is a separate, open-source tool
 with its own engine. These are the numbers for all three on the same Mac and the same tasks:
@@ -58,39 +60,42 @@ with its own engine. These are the numbers for all three on the same Mac and the
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks/tokens-dark.svg">
-    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens and memory. A task takes 588 tokens with ucu and 2,265 with agent-desktop. Setting up a session takes 6,956 tokens with ucu and 2,882 with agent-desktop. Idle memory is 24 MB for ucu, 639 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
+    <img src="assets/benchmarks/tokens-light.svg" alt="Bar chart of tokens and memory. A task takes 552 tokens with ucu and 2,109 with agent-desktop. Setting up a session takes 6,992 tokens with ucu and 2,882 with agent-desktop. Idle memory is 24 MB for ucu, 635 MB for the Codex engine alone and 15 MB for agent-desktop." width="860">
   </picture>
 </p>
 
 **Where `ucu` wins**
 
-- Reads a window 2.7 times faster, clicks 2.8 times faster and takes screenshots 4.9 times faster than agent-desktop.
-- Uses 3.8 times fewer tokens on the task, and needs 2 model round trips, the same as agent-desktop with `batch`.
+- Reads a window 2.6 times faster and takes screenshots 5.5 times faster than agent-desktop.
+- Uses 3.8 times fewer tokens on the task, with 2 model round trips, the same as agent-desktop with `batch`.
 - Can click by position in a background window. agent-desktop needs `--headed` for that, which moves your real
   pointer and takes focus.
+- Tells the agent when an app plays its error sound.
 - Has a per-app deny list and an approval log, and works as an MCP server.
 
 **Where agent-desktop wins**
 
-- Starts about twice as fast: 344 ms against 655 ms.
-- Costs less to set up: 2,882 tokens against 6,956, so `ucu` only pulls ahead on total tokens from the third task on.
-- Gives a quick outline of a large window in 180 ms, then lets the agent drill in. `ucu` reads the whole window.
+- Finishes the task faster: 799 ms against 1.4 s. Single clicks take about the same, but the engine waits longer
+  for the app to settle between clicks in a row.
+- Starts about twice as fast: 323 ms against 658 ms.
+- Costs less to set up: 2,882 tokens against 6,992, so `ucu` only pulls ahead on total tokens from the third task on.
+- Gives a quick outline of a large window in 232 ms, then lets the agent drill in. `ucu` reads the whole window.
 - Is fully open source, runs on Windows and Linux too, and uses slightly less memory when idle (15 MB against 24 MB).
 - Reports if each action was delivered and if a retry is safe, and rejects stale element references.
 
 | Test (median) | `ucu` | Codex engine alone | agent-desktop |
 | --- | ---: | ---: | ---: |
-| Read a small window | 61 ms | 88 ms | 166 ms |
-| Click a button | 66 ms | 66 ms | 182 ms |
-| Take a screenshot | 59 ms | 69 ms | 290 ms |
-| Finish a task | 1.1 s | 1.2 s | 1.5 s |
-| Read a large window | 2.0 s | 1.8 s | 3.1 s (outline only: 180 ms) |
-| Start from nothing | 655 ms | 637 ms | 344 ms |
-| Tokens for the task | 588 | 588 | 2,265 |
+| Read a small window | 57 ms | 82 ms | 149 ms |
+| Click a button | 80 ms | 53 ms | 85 ms |
+| Take a screenshot | 54 ms | 62 ms | 298 ms |
+| Finish a task | 1.4 s | 1.4 s | 799 ms |
+| Read a large window | 2.2 s | 2.2 s | 3.1 s (outline only: 232 ms) |
+| Start from nothing | 658 ms | 632 ms | 323 ms |
+| Tokens for the task | 552 | 552 | 2,109 |
 | Tokens to read a small window | 421 | 421 | 1,130 |
-| Tokens to read a large window | 1,647 | 1,647 | 2,216 (outline only: 1,112) |
-| Tokens to set up a session | 6,956 | 6,357 | 2,882 |
-| Memory while idle | 24 MB | 639 MB | 15 MB |
+| Tokens to read a large window | 1,654 | 1,654 | 2,090 (outline only: 1,112) |
+| Tokens to set up a session | 6,992 | 6,357 | 2,882 |
+| Memory while idle | 24 MB | 635 MB | 15 MB |
 
 <details>
 <summary>How this was measured</summary>
@@ -104,9 +109,9 @@ python3 -I benchmarks/chart.py
 ```
 
 - The small window is Calculator and the large one is Font Book. The task is pressing `12 + 34 =` and reading the
-  answer, starting from seeing the buttons.
-- The tools take turns sample by sample, for 3 rounds. Each number is a median of up to 30 samples. Large windows
-  vary the most: for `ucu`, the middle half of those reads took between 0.4 s and 2.2 s.
+  answer, starting from a cleared display and seeing the buttons.
+- The tools take turns sample by sample, for 3 rounds. Each number is a median of up to 30 samples. Reads of large
+  windows varied the most between runs.
 - The clock covers the tool only, not the model's thinking time. agent-desktop runs through its CLI, as an agent
   would use it, with `-i --compact` and `batch`, the options its docs recommend to save tokens.
 - Tokens are estimated as characters / 4, and count what the model reads and writes. Screenshots aren't counted.
@@ -210,6 +215,15 @@ In a `js` call, wait for a window to react instead of sleeping:
 const { waitForChange } = await import("<this folder>/js/wait.mjs");
 const r = await waitForChange(app, () => app.click(8), { timeoutMs: 20000 }); // { changed, settled, ms, changedBlocks }
 ```
+
+When an app rejects an input it plays the macOS alert sound, which a person hears but an agent can't. `ucu`
+watches the system sound server's log and adds a note to the `js` result:
+
+```
+[ucu: Calculator played an alert sound, which usually means it rejected an input. Check the app before going on.]
+```
+
+It needs no permission and hears no audio, and it only reports apps that chat is driving.
 
 The server sends the usage rules in its MCP `instructions`, so clients get them without their own config.
 

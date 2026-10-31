@@ -45,6 +45,10 @@ chat. It passes every message through unchanged, except that it
   pick which window of an app `cua.getApp` acts on (always the app's main window)
   by running ~/.local/bin/ucu-window, which `ucu install` builds from
   native/ucu-window.swift. They answer without starting cua_repl;
+* tells the agent when an app it drives plays the macOS alert sound. Humans hear
+  that an input was rejected, but the engine still reports success, so the proxy
+  watches the system sound server's log while cua_repl runs and adds a note to the
+  `js` result. It needs no permission and hears no audio;
 * adds ucu's usage rules to the `instructions` in cua_repl's `initialize` reply,
   so they reach every client and not only those with the rules in their own config;
 * answers a request left unanswered by a cua_repl that exited on its own with an
@@ -62,9 +66,10 @@ ignored, so a proxy started from an older version of this file, which has no
 handler for it, is left alone.
 
 `ucu install` registers this file as the `ucu` server. Its tests are in
-tests/test_proxy.py, tests/test_plugin.py and tests/test_policy.py.
+tests/test_proxy.py, tests/test_plugin.py, tests/test_policy.py and tests/test_alerts.py.
 """
 import argparse
+import collections
 import hashlib
 import itertools
 import json
@@ -105,6 +110,8 @@ screenshot.
 - Pass `timeout_ms` to `js` for slow apps; the default is 30 seconds.
 - ucu stops `cua_repl` when idle, so variables such as `app` can disappear: get `app` again at the start of each \
 turn. Don't call `js_reset` when you finish.
+- A note that an app played an alert sound means it probably rejected your input, even if the call succeeded: \
+check the app before going on.
 - Don't let two agents drive the same app at the same time."""
 
 
@@ -113,6 +120,14 @@ POLICY = Path.home() / "Library/Application Support/ucu/policy.json"
 APPROVAL_LOG = Path.home() / "Library/Logs/ucu/approve.log"
 APPROVAL_LOG_LIMIT = 1_000_000  # bytes; the log then moves to approve.log.1 and starts again
 APPROVAL_PROMPT = re.compile(r'^Allow Computer Use to use "(.+)"\?$')
+ALERT_COMMAND = ["log", "stream", "--style", "compact", "--level", "default", "--predicate",
+                 'process == "systemsoundserverd" AND eventMessage CONTAINS "Incoming Request"']
+ALERT_LINE = re.compile(r"actionID 4096, inClientPID \d+\((.+?)\)")  # 4096 is the user's alert sound
+ALERT_WAIT = 0.02  # seconds after an action; its sound reaches the log 2-13 ms after the call returns
+ALERT_LATE = 1  # seconds after a call in which a sound still belongs to it
+ALERT_NOTE = "[ucu: {} played an alert sound, which usually means it rejected an input. Check the app before going on.]"
+ACTION_CALL = re.compile(r"\.(?:click|drag|scroll|pressKey|typeText|paste|setValue|selectText|performSecondaryAction)\(")
+APP_CALL = re.compile(r"""getApp\(\s*["'`]([^"'`]+)""")
 WINDOW_HELPER = Path.home() / ".local/bin/ucu-window"
 APP_PROPERTY = {"type": "string", "description": 'Name or bundle id of a running app, e.g. "Windows App".'}
 WINDOW_TOOLS = [
@@ -263,6 +278,45 @@ def encode(message):
     return (json.dumps(message) + "\n").encode()
 
 
+class AlertWatcher:
+    """Collects the alert sounds apps play, from the system sound server's log."""
+
+    def __init__(self):
+        self.process = None
+        self.lock = threading.Lock()
+        self.heard = []  # (time, app name) of sounds not reported yet
+
+    def start(self):
+        if self.process is None:
+            try:
+                self.process = subprocess.Popen(ALERT_COMMAND, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.DEVNULL, text=True, errors="replace")
+            except OSError:
+                return  # no `log` command: agents just aren't told
+            threading.Thread(target=self.read, args=(self.process,), daemon=True).start()
+
+    def read(self, process):
+        for line in process.stdout:
+            match = ALERT_LINE.search(line)
+            if match:
+                with self.lock:
+                    self.heard = self.heard[-49:] + [(time.monotonic(), match.group(1))]
+        process.wait()
+
+    def stop(self):
+        process, self.process = self.process, None
+        if process:
+            process.terminate()  # `log` takes a moment to go: read() collects it, so nothing waits here
+
+    def take(self, started, late_until, apps):
+        """Forget every sound heard so far; return the names of those from `apps` that belong to this call:
+        played while it ran, or just after the previous call, too late for that call's result."""
+        with self.lock:
+            heard, self.heard = self.heard, []
+        return [name for moment, name in heard
+                if app_key(name) in apps and (moment >= started or moment <= late_until)]
+
+
 class Proxy:
     def __init__(self, command, turn_idle, stop_grace, stop_idle):
         self.command = command
@@ -277,10 +331,13 @@ class Proxy:
         self.initialized = None             # replayed to each restarted cua_repl
         self.initialize_key = None          # Claude's pending initialize, whose result gets the usage rules
         self.folder = working_folder()
+        self.alerts = AlertWatcher()
+        self.used_apps = set()              # apps this chat has driven, as app_key names
+        self.last_js_end = 0
         self.client_requests = set()  # Claude -> server requests still waiting for a reply
         self.server_requests = set()  # server -> Claude requests (elicitation etc.) still waiting
         self.own_requests = set()     # requests this proxy sent; their replies are dropped
-        self.js_calls = set()         # Claude's pending `js` calls, whose results may repeat the documentation
+        self.js_calls = {}            # Claude's pending `js` calls, as (start time, whether they act on an app)
         self.list_calls = set()       # Claude's pending `tools/list` requests, whose results get the window tools
         self.docs_seen = set()        # hashes of documentation blocks this chat has already received
         self.ids = itertools.count(1)
@@ -338,6 +395,7 @@ class Proxy:
             child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
         except (RuntimeError, OSError) as error:
             return str(error)
+        self.alerts.start()
         with self.lock:
             self.child = child  # before from_child starts, so it can tell a crash from a planned stop
             replay = self.initialized is not None
@@ -366,6 +424,7 @@ class Proxy:
             child, self.child = self.child, None
             self.own_requests.clear()
             self.turn_ended_at = None
+        self.alerts.stop()
         try:
             child.stdin.close()  # cua_repl exits on EOF and takes its kernel and sandboxes with it
         except OSError:
@@ -396,7 +455,7 @@ class Proxy:
                     return
             try:
                 self.write_to(self.child, raw)
-            except (BrokenPipeError, ValueError, OSError):
+            except (AttributeError, BrokenPipeError, ValueError, OSError):  # AttributeError: it has already exited
                 self.fail_own_request(key, "ucu stopped unexpectedly; it restarts on the next call")
 
     def fail_own_request(self, key, reason):
@@ -404,7 +463,7 @@ class Proxy:
             if key is None or key not in self.client_requests:
                 return
             self.client_requests.discard(key)
-            self.js_calls.discard(key)
+            self.js_calls.pop(key, None)
         self.fail_requests([key], reason)
 
     def drop_repeated_docs(self, message):
@@ -456,8 +515,9 @@ class Proxy:
                             if params.get("name") == "js_reset":
                                 self.docs_seen.clear()  # Claude asked for a fresh start: show the docs again
                             if params.get("name") == "js":
-                                self.js_calls.add(key)
                                 code = str((params.get("arguments") or {}).get("code", ""))
+                                self.js_calls[key] = (time.monotonic(), bool(ACTION_CALL.search(code)))
+                                self.used_apps.update(app_key(name) for name in APP_CALL.findall(code))
                                 if BROWSER_CALL.search(code):
                                     self.turn_used_browser = True
                             raw = encode(message)
@@ -511,6 +571,19 @@ class Proxy:
         result["tools"] = result["tools"] + WINDOW_TOOLS
         return encode(message)
 
+    def add_alert_note(self, message, started, acted):
+        """Re-encode a `js` result with a note about any alert sound from an app this chat drives."""
+        if acted:
+            time.sleep(ALERT_WAIT)
+        names = self.alerts.take(started, self.last_js_end + ALERT_LATE, self.used_apps)
+        self.last_js_end = time.monotonic()
+        result = message.get("result")
+        if not names or not isinstance(result, dict) or not isinstance(result.get("content"), list):
+            return None
+        apps = [name if times == 1 else f"{name} ({times} times)" for name, times in collections.Counter(names).items()]
+        result["content"].append({"type": "text", "text": ALERT_NOTE.format(" and ".join(apps))})
+        return encode(message)
+
     def answer_child(self, child, request_id, action):
         """Answer a cua_repl request in Claude's place, from a thread so from_child keeps reading."""
         result = {"action": action, "content": {}} if action == "accept" else {"action": action}
@@ -535,11 +608,12 @@ class Proxy:
                 if message.get("method") == "elicitation/create":
                     action, app = policy_decision(message.get("params") or {})
                     if app:
+                        self.used_apps.add(app_key(app))
                         log_approval(self.asker(), app, action)
                     if action:
                         self.answer_child(child, message["id"], action)
                         continue
-                key = json.dumps(message["id"])
+                key, js_call = json.dumps(message["id"]), None
                 with self.lock:
                     if "method" in message:
                         self.server_requests.add(key)
@@ -549,7 +623,7 @@ class Proxy:
                     else:
                         self.client_requests.discard(key)
                         if key in self.js_calls:
-                            self.js_calls.discard(key)
+                            js_call = self.js_calls.pop(key)
                             raw = self.drop_repeated_docs(message) or raw
                         elif key in self.list_calls:
                             self.list_calls.discard(key)
@@ -558,6 +632,8 @@ class Proxy:
                             self.initialize_key = None
                             raw = self.add_instructions(message) or raw
                     self.last_activity = time.monotonic()
+                if js_call:
+                    raw = self.add_alert_note(message, *js_call) or raw
             self.write_client(raw)
         with self.lock:
             if self.child is not child:  # stopped on purpose
@@ -626,6 +702,7 @@ class Proxy:
         while not self.done.wait(1):  # the timeout keeps signal handlers running promptly
             pass
         self.stop_child(force=True)
+        self.alerts.stop()
         return 0
 
 
