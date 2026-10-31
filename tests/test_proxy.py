@@ -37,12 +37,13 @@ class Proxy:
         self.window_log = Path(self.home.name) / "windows.log"
         self.window_reports = Path(self.home.name) / "window-reports.txt"
         self.window_reports.touch()
-        tools = Path(self.home.name) / "tools"
+        self.tools = tools = Path(self.home.name) / "tools"
         tools.mkdir()
         (tools / "log").write_text(FAKE_LOG_COMMAND)
         (tools / "log").chmod(0o755)
         env = {**os.environ, "HOME": self.home.name, "FAKE_LOG": str(self.log), "FAKE_ALERTS": str(self.alert_file),
                "FAKE_WINDOW_LOG": str(self.window_log), "FAKE_WINDOW_REPORTS": str(self.window_reports),
+               "FAKE_SAFARI_STATE": str(Path(self.home.name) / "safari.json"),
                "PATH": f"{tools}:{os.environ['PATH']}"}
         command = [] if from_plugin else ["--", sys.executable, "-I", str(FAKE)]
         folder = Path(self.home.name) / "My Project"
@@ -63,7 +64,7 @@ class Proxy:
 
     def policy(self, **lists):
         path = Path(self.home.name) / "Library/Application Support/ucu/policy.json"
-        path.parent.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(lists))
 
     def window_helper(self):
@@ -308,7 +309,8 @@ class ProxyTest(unittest.TestCase):
         proxy = Proxy(self)
         proxy.initialize()
         tools = proxy.request("tools/list")["result"]["tools"]
-        self.assertEqual([tool["name"] for tool in tools], ["js", "js_reset", "list_windows", "focus_window"])
+        self.assertEqual([tool["name"] for tool in tools],
+                         ["js", "js_reset", "list_windows", "focus_window", "move_to_desktop", "safari"])
 
     def test_runs_the_window_tools_without_starting_cua_repl(self):
         proxy = Proxy(self)

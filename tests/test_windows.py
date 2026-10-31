@@ -1,7 +1,9 @@
 """How ucu-proxy.py keeps apps out of the way, reports new windows and shortens what agents read."""
+import base64
 import copy
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -66,7 +68,19 @@ class WatchingProxy(Proxy):
         path.parent.mkdir(parents=True)
         path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{ROOT / "tests/fake_ucu_window.py"}" "$@"\n')
         path.chmod(0o755)
+        (self.tools / "osascript").write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{ROOT / "tests/fake_osascript.py"}" "$@"\n')
+        (self.tools / "screencapture").write_text('#!/bin/sh\nfor last; do :; done\nprintf picture > "$last"\n')
+        (self.tools / "osascript").chmod(0o755)
+        (self.tools / "screencapture").chmod(0o755)
         self.initialize()
+
+    def safari(self, **arguments):
+        if not (Path(self.home.name) / "Library/Application Support/ucu/policy.json").exists():
+            self.policy(deny=[])
+        return self.request("tools/call", {"name": "safari", "arguments": arguments})["result"]
+
+    def safari_calls(self, op=None):
+        return [command["safari"] for command in self.commands("safari") if op in (None, command["safari"]["op"])]
 
     def report(self, **fields):
         with self.window_reports.open("a") as handle:
@@ -112,7 +126,7 @@ class WatchTest(unittest.TestCase):
     def test_says_nothing_about_an_app_that_was_already_running(self):
         proxy = WatchingProxy(self)
         proxy.policy(deny=[])
-        self.assertEqual(proxy.notes(proxy.call("js", 'let app = await cua.getApp("Safari");')), [])
+        self.assertEqual(proxy.notes(proxy.call("js", 'let app = await cua.getApp("Notes");')), [])
 
     def test_leaves_a_denied_app_closed_and_cua_repl_refuses_it(self):
         proxy = WatchingProxy(self)
@@ -130,12 +144,99 @@ class WatchTest(unittest.TestCase):
         proxy.policy(deny=[])
         proxy.call("js", 'let app = await cua.getApp("Closed App");')
         proxy.call("js", "await app.click(12);")
-        self.assertEqual(proxy.commands("show"), [])
+        self.assertEqual(proxy.commands("park"), [])
         proxy.call("js", "await app.click([100, 200]);")
-        self.assertEqual(proxy.commands("show")[0]["show"], ["Closed App"])
-        self.assertGreater(proxy.events("recv")[-1]["at"], proxy.commands("show")[0]["at"])
+        self.assertEqual(proxy.commands("park")[0]["park"], ["Closed App"])
+        calls = [event["message"]["params"]["arguments"]["code"] for event in proxy.received("tools/call")]
+        self.assertEqual(calls[-2:], ['await cua.getApp("Closed App");', "await app.click([100, 200]);"])
+        self.assertGreater(proxy.received("tools/call")[-2]["at"], proxy.commands("park")[0]["at"])
+
+    def test_reads_a_window_only_after_it_moved(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        proxy.call("js", 'let app = await cua.getApp("Closed App");')
         proxy.call("js", "await app.click([100, 200]);")
-        self.assertEqual(len(proxy.commands("show")), 1)
+        count = len(proxy.received("tools/call"))
+        proxy.call("js", "await app.click([100, 200]);")
+        self.assertEqual(len(proxy.received("tools/call")), count + 1)
+
+    def test_shows_a_hidden_app_behind_the_user_without_a_desktop(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        proxy.call("js", 'let app = await cua.getApp("Closed Stuck App");')
+        proxy.call("js", "await app.click([100, 200]);")
+        self.assertEqual(proxy.commands("show")[0]["show"], ["Closed Stuck App"])
+        proxy.call("js", "await app.click([100, 200]);")
+        self.assertEqual(len(proxy.commands("park")), 1)
+
+    def test_never_moves_a_denied_app(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=["Passwords"])
+        result = proxy.request("tools/call", {"name": "move_to_desktop", "arguments": {"app": "Passwords"}})["result"]
+        self.assertTrue(result["isError"])
+        self.assertEqual(proxy.commands("park"), [])
+
+    def test_leaves_an_app_the_user_took_back_alone(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        proxy.call("js", 'let app = await cua.getApp("Closed App");')
+        proxy.call("js", "await app.click([100, 200]);")
+        self.assertTrue(proxy.commands("park")[0]["onlyHidden"])
+
+    def test_keeps_the_docs_for_the_agent_when_moving_an_app_first(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        proxy.request("tools/call", {"name": "move_to_desktop", "arguments": {"app": "Blender"}})
+        self.assertEqual(proxy.received("tools/call"), [])
+
+    def test_stays_busy_until_the_last_call_ends(self):
+        proxy = WatchingProxy(self)
+        for number in (91, 92):
+            proxy.send({"id": number, "method": "tools/call", "params": {"name": "js", "arguments": {"code": "slow"}}})
+        proxy.receive(), proxy.receive()
+        proxy.wait_until(lambda: not proxy.commands("busy")[-1]["busy"])
+        self.assertEqual([command["busy"] for command in proxy.commands("busy")], [True, True, False])
+
+    def test_moves_an_app_to_the_desktop_when_asked(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        result = proxy.request("tools/call", {"name": "move_to_desktop", "arguments": {"app": "Blender"}})["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(proxy.commands("park")[0]["park"], ["Blender"])
+        failed = proxy.request("tools/call", {"name": "move_to_desktop", "arguments": {"app": "Stuck"}})["result"]
+        self.assertTrue(failed["isError"])
+
+    def test_tells_the_agent_when_a_running_app_got_a_window(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        self.assertIn("had no open window", proxy.notes(proxy.call("js", 'let app = await cua.getApp("Empty App");'))[0])
+
+    def test_works_on_the_window_a_call_names(self):
+        proxy = WatchingProxy(self)
+        proxy.request("tools/call", {"name": "js", "arguments": {
+            "code": "1", "window": {"app": "TextEdit", "title": "Notes"}}})
+        self.assertEqual(proxy.commands("args")[0]["args"], ["focus", "TextEdit", "Notes"])
+        self.assertEqual(proxy.received("tools/call")[-1]["message"]["params"]["arguments"], {"code": "1"})
+        self.assertGreater(proxy.received("tools/call")[-1]["at"], proxy.commands("args")[0]["at"])
+
+    def test_runs_calls_for_windows_one_at_a_time(self):
+        proxy = WatchingProxy(self)
+        for number, title in ((91, "One"), (92, "Two")):
+            proxy.send({"id": number, "method": "tools/call", "params": {"name": "js", "arguments": {
+                "code": "slow", "window": {"app": "TextEdit", "title": title}}}})
+        replies = [proxy.receive(), proxy.receive()]
+        self.assertEqual(sorted(reply["id"] for reply in replies), [91, 92])
+        first, second = proxy.commands("args")
+        self.assertGreater(second["at"], first["at"] + 0.25)
+
+    def test_keeps_going_after_a_window_that_is_not_there(self):
+        proxy = WatchingProxy(self)
+        reply = proxy.request("tools/call", {"name": "js", "arguments": {
+            "code": "1", "window": {"app": "TextEdit", "title": "Missing"}}})
+        self.assertIn("error", reply)
+        again = proxy.request("tools/call", {"name": "js", "arguments": {
+            "code": "1", "window": {"app": "TextEdit", "title": "Notes"}}})
+        self.assertIn("result", again)
 
     def test_shows_a_hidden_app_when_the_engine_finds_no_window_on_screen(self):
         proxy = WatchingProxy(self)
@@ -143,7 +244,7 @@ class WatchTest(unittest.TestCase):
         proxy.call("js", 'let app = await cua.getApp("Closed App");')
         reply = proxy.call("js", "no-windows")  # `app.click(point)`: nothing here says it uses coordinates
         self.assertIn("Closed App was hidden", proxy.notes(reply)[0])
-        proxy.wait_until(lambda: proxy.commands("show"))
+        proxy.wait_until(lambda: proxy.commands("park"))
 
     def test_leaves_the_app_alone_after_the_agent_showed_it(self):
         proxy = WatchingProxy(self)
@@ -153,7 +254,7 @@ class WatchTest(unittest.TestCase):
             "app": "Closed App", "title": "x", "activate": True}})
         self.assertEqual(proxy.commands("allow")[0]["allow"], "Closed App")
         proxy.call("js", "await app.click([100, 200]);")
-        self.assertEqual(proxy.commands("show"), [])
+        self.assertEqual(proxy.commands("park"), [])
 
     def test_shows_a_hidden_app_that_turned_an_action_down(self):
         proxy = WatchingProxy(self)
@@ -214,10 +315,142 @@ class WatchTest(unittest.TestCase):
         reply = proxy.call("js", 'let app = await cua.getApp("Closed App");')
         self.assertFalse(any(text.startswith("[ucu:") for text in [item["text"] for item in reply["result"]["content"]]))
 
-    def test_explains_a_refused_app_where_it_happens(self):
+    def test_explains_errors_where_they_happen(self):
         proxy = WatchingProxy(self)
-        reply = proxy.call("js", "refuse")
-        self.assertIn("deny list", proxy.notes(reply)[0])
+        self.assertIn("deny list", proxy.notes(proxy.call("js", "refuse"))[0])
+        self.assertIn("xdotool names", proxy.notes(proxy.call("js", "no-key"))[0])
+
+
+class SharedMacTest(unittest.TestCase):
+    def other_chat(self, proxy, pid, apps):
+        folder = Path(proxy.home.name) / "Library/Application Support/ucu/sessions"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{pid}.json").write_text(json.dumps({"who": "claude-code:website", "apps": apps}))
+        return folder / f"{pid}.json"
+
+    def test_says_when_another_agent_is_using_an_app_once(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        self.other_chat(proxy, os.getpid(), {"calculator": time.time()})
+        notes = proxy.notes(proxy.call("js", 'let app = await cua.getApp("Calculator");'))
+        self.assertIn("Another agent (claude-code:website) is using Calculator", notes[0])
+        self.assertEqual(proxy.notes(proxy.call("js", 'let app = await cua.getApp("Calculator");')), [])
+
+    def test_survives_a_session_file_with_anything_in_it(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        path = self.other_chat(proxy, os.getpid(), {})
+        for junk in ("[]", "{", '{"apps": 3}', '{"apps": {"calculator": "soon"}}'):
+            path.write_text(junk)
+            self.assertIn("result", proxy.call("js", 'let app = await cua.getApp("Calculator");'))
+
+    def test_ignores_other_apps_old_use_and_chats_that_ended(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        self.other_chat(proxy, os.getpid(), {"calculator": time.time() - 1000, "safari": time.time()})
+        ended = self.other_chat(proxy, 999999, {"calculator": time.time()})
+        self.assertEqual(proxy.notes(proxy.call("js", 'let app = await cua.getApp("Calculator");')), [])
+        self.assertFalse(ended.exists())
+
+    def test_publishes_what_it_uses_and_cleans_up(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        proxy.call("js", 'let app = await cua.getApp("Calculator");')
+        files = list((Path(proxy.home.name) / "Library/Application Support/ucu/sessions").glob("*.json"))
+        self.assertIn("calculator", json.loads(files[0].read_text())["apps"])
+        self.assertIn("test-client", json.loads(files[0].read_text())["who"])
+        proxy.process.stdin.close()
+        proxy.process.wait(10)
+        self.assertFalse(files[0].exists())
+
+
+class SafariTest(unittest.TestCase):
+    def test_opens_tabs_in_one_window_of_its_own(self):
+        proxy = WatchingProxy(self)
+        first = json.loads(proxy.safari(op="open", url="https://a.test")["content"][0]["text"])
+        proxy.safari(op="open", url="https://b.test")
+        self.assertEqual(first["window_id"], 900)
+        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
+        self.assertEqual([call["reuse_blank"] for call in proxy.safari_calls("open_tab")], [True, False])
+        self.assertEqual(proxy.received("tools/call"), [])  # no need for the engine
+
+    def test_acts_on_its_last_tab_by_default(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="read", what="links")
+        call = proxy.safari_calls("read")[0]
+        self.assertEqual((call["window_id"], call["tab_index"], call["what"]), (900, 1, "links"))
+
+    def test_stays_out_of_safari_when_it_is_denied(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=["Safari"])
+        result = proxy.safari(op="list")
+        self.assertTrue(result["isError"])
+        self.assertIn("deny list", result["content"][0]["text"])
+        self.assertEqual(proxy.safari_calls(), [])
+
+    def test_marks_the_window_it_makes(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertRegex(proxy.safari_calls("create_window")[0]["mark"], "^[0-9a-f]{32}$")
+
+    def test_needs_a_tab_first(self):
+        proxy = WatchingProxy(self)
+        result = proxy.safari(op="read")
+        self.assertTrue(result["isError"])
+        self.assertIn("call `open` first", result["content"][0]["text"])
+
+    def test_shows_every_window_and_marks_its_own(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        windows = json.loads(proxy.safari(op="list")["content"][0]["text"])
+        self.assertEqual([(window["window_id"], window["yours"]) for window in windows], [(51, False), (900, True)])
+
+    def test_reads_the_users_tabs_but_changes_them_only_when_told(self):
+        proxy = WatchingProxy(self)
+        self.assertFalse(proxy.safari(op="read", window_id=51, tab_index=1)["isError"])
+        refused = proxy.safari(op="click", window_id=51, tab_index=1, selector="a")
+        self.assertIn("the user's", refused["content"][0]["text"])
+        self.assertFalse(proxy.safari(op="click", window_id=51, tab_index=1, selector="a", allow_user_tab=True)["isError"])
+        viewing = proxy.safari(op="click", window_id=51, tab_index=2, selector="a", allow_user_tab=True)
+        self.assertIn("is viewing", viewing["content"][0]["text"])
+        self.assertFalse(proxy.safari(op="click", window_id=51, tab_index=2, selector="a", allow_user_tab=True,
+                                      allow_current_tab=True)["isError"])
+        self.assertEqual(len(proxy.safari_calls("click")), 2)
+
+    def test_takes_a_screenshot_on_the_agents_desktop_and_hides_after_the_turn(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        image = proxy.safari(op="shot")["content"][0]
+        self.assertEqual((image["type"], image["mimeType"], base64.b64decode(image["data"])),
+                         ("image", "image/jpeg", b"picture"))
+        self.assertEqual(proxy.safari_calls("show_window")[0]["bounds"]["x"], -1900)
+        proxy.safari(op="shot")
+        self.assertEqual(len(proxy.safari_calls("show_window")), 1)
+        proxy.end_turn()
+        proxy.wait_until(lambda: proxy.safari_calls("hide_window"))
+
+    def test_captures_only_its_own_window(self):
+        proxy = WatchingProxy(self)
+        self.assertTrue(proxy.safari(op="shot", window_id=51, tab_index=2)["isError"])
+
+    def test_closes_its_window_when_the_chat_ends(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.process.stdin.close()
+        proxy.process.wait(10)
+        self.assertEqual(proxy.safari_calls("close_window")[0]["window_id"], 900)
+
+    def test_says_how_to_turn_on_what_safari_needs(self):
+        proxy = WatchingProxy(self)
+        result = proxy.safari(op="open", url="https://no-javascript.test")
+        self.assertTrue(result["isError"])
+        self.assertIn("Safari > Develop > Allow JavaScript from Apple Events", result["content"][0]["text"])
+
+    def test_points_to_the_tool_when_the_user_is_in_safari(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        self.assertIn("`safari` tool", proxy.notes(proxy.call("js", 'let app = await cua.getApp("Safari");'))[0])
 
 
 class ShorterTest(unittest.TestCase):
@@ -232,7 +465,8 @@ class ShorterTest(unittest.TestCase):
     def test_hides_tools_and_browser_examples_from_the_tool_list(self):
         message = {"result": {"tools": copy.deepcopy(ENGINE_TOOLS)}}
         tools = json.loads(self.proxy.Proxy.edit_tools(message))["result"]["tools"]
-        self.assertEqual([tool["name"] for tool in tools], ["js", "js_reset", "list_windows", "focus_window"])
+        self.assertEqual([tool["name"] for tool in tools],
+                         ["js", "js_reset", "list_windows", "focus_window", "move_to_desktop", "safari"])
         self.assertNotIn("many browser examples", tools[0]["description"])
         self.assertIn("cua.getState()", tools[0]["description"])
         self.assertIn("If the user specifies an app", tools[0]["description"])
@@ -309,6 +543,15 @@ class ShorterTest(unittest.TestCase):
         self.assertIn('"line one line two x', note)
         self.assertNotIn("\n", note)
         self.assertLess(len(note), 500)
+
+    def test_frees_the_window_lock_for_a_cancelled_call_that_fails(self):
+        proxy = self.proxy.Proxy(None, 1, 1, 1)
+        self.proxy.run_window_tool = lambda *_: ("focused", False)
+        proxy.client_requests.add("1")
+        self.assertTrue(proxy.start_window_call({}, "1"))
+        proxy.client_requests.discard("1")  # cancelled
+        proxy.fail_own_request("1", "gone")
+        self.assertTrue(proxy.window_turn.acquire(blocking=False))
 
     def test_says_how_to_reach_each_kind_of_window(self):
         sheet = self.proxy.window_note({"event": "window", "app": "Notes", "kind": "sheet"})

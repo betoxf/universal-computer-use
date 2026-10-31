@@ -28,7 +28,7 @@
 </div>
 
 <p align="center">
-  <img src="assets/benchmarks/headline.svg" alt="2.2 times faster window reads, 48 ms against 103 ms for agent-desktop. 4.1 times fewer tokens per task, 518 against 2,110 for agent-desktop. 19 times less idle memory, 19 MB against 363 MB for the Codex engine." width="860">
+  <img src="assets/benchmarks/headline.svg" alt="2.6 times faster window reads, 56 ms against 149 ms for agent-desktop. 4.1 times fewer tokens per task, 518 against 2,110 for agent-desktop. 24 times less idle memory, 27 MB against 628 MB for the Codex engine." width="860">
 </p>
 
 ## Why UCU
@@ -37,13 +37,16 @@
 | --- | --- |
 | Works in the background | Agents click, type and read other apps without moving your pointer or taking focus. |
 | Stays out of your way | A closed app opens hidden, so nothing appears on your screen, and if an app jumps to the front during an agent's action, your app is put back. |
+| Has its own desktop | Apps that need clicks by position run on a private desktop you never see. |
+| Shares Safari with you | The `safari` tool works in the agent's own hidden window, so you keep your tabs and your keyboard. |
+| Runs side by side | Agents in different chats work at once, and each is told when another is using the same app. |
 | Sees every window | Agents are told when an app opens a new window, a sheet or a system dialog, with its text and buttons, and `list_windows` lists every open window. |
 | Reaches apps without an accessibility tree | Agents can click by screen position in a background window. Some remote-desktop and canvas apps ignore background input. |
 | Light on tokens | A task costs about a quarter of the tokens of agent-desktop, and the model gets compact text and diffs. |
 | You choose the apps | Every app is approved except the ones you deny, with one command. |
 | Shows who did what | Every approval is logged with the agent and folder that caused it. |
-| Light when idle | It stops the engine between uses: 19 MB instead of 363 MB. |
-| Picks the right window | `focus_window` chooses which window of an app to act on, without moving it. |
+| Light when idle | It stops the engine between uses: 27 MB instead of 628 MB. |
+| Picks the right window | `focus_window` chooses which window of an app to act on, without moving it, and `js` calls can name a window, so one turn can cover several. |
 | Hears errors | When an app plays the macOS alert sound, the agent is told, at no cost in speed. The engine alone reports success. |
 | Stays up to date | A Codex update needs nothing from you: UCU finds the newest engine each time it starts it. |
 
@@ -59,22 +62,22 @@ with its own engine. The charts compare UCU with agent-desktop, and the table ad
 and the same tasks:
 
 <p align="center">
-  <img src="assets/benchmarks/speed-actions.svg" alt="Candle chart of single actions. UCU reads a small window in 48 ms, clicks in 26 ms and takes a screenshot in 44 ms, against 103 ms, 48 ms and 288 ms for agent-desktop." width="860">
+  <img src="assets/benchmarks/speed-actions.svg" alt="Candle chart of single actions. UCU reads a small window in 56 ms, clicks in 59 ms and takes a screenshot in 53 ms, against 149 ms, 88 ms and 299 ms for agent-desktop." width="860">
 </p>
 
 <p align="center">
-  <img src="assets/benchmarks/speed-jobs.svg" alt="Candle chart of longer jobs. agent-desktop finishes the task in 462 ms against 1.0 s for UCU, and starts in 256 ms against 774 ms. UCU reads a large window in 1.5 s against 3.0 s. Large window reads vary the most." width="860">
+  <img src="assets/benchmarks/speed-jobs.svg" alt="Candle chart of longer jobs. agent-desktop finishes the task in 822 ms against 1.4 s for UCU, and starts in 349 ms against 785 ms. UCU reads a large window in 2.1 s against 3.1 s. Large window reads vary the most." width="860">
 </p>
 
 <p align="center">
-  <img src="assets/benchmarks/tokens.svg" alt="Line chart of total tokens over a session. UCU starts higher, at 4,091 tokens against 2,882 for agent-desktop, then costs 518 tokens per task against 2,110. UCU costs less from the first task on. After 8 tasks, UCU is at 8,239 tokens and agent-desktop at 19,759." width="860">
+  <img src="assets/benchmarks/tokens.svg" alt="Line chart of total tokens over a session. UCU starts higher, at 4,707 tokens against 2,882 for agent-desktop, then costs 518 tokens per task against 2,110. UCU costs less from task 2 on. After 8 tasks, UCU is at 8,855 tokens and agent-desktop at 19,758." width="860">
 </p>
 
 **Where UCU wins**
 
-- Reads a small window 2.2 times faster, clicks 1.9 times faster and takes screenshots 6.5 times faster than agent-desktop.
+- Reads a small window 2.6 times faster, clicks 1.5 times faster and takes screenshots 5.7 times faster than agent-desktop.
 - Uses 4 times fewer tokens on the task, with 2 model round trips, the same as agent-desktop with `batch`, and pulls
-  ahead on total tokens from the first task.
+  ahead on total tokens from the second task.
 - Can click by position in a background window. agent-desktop needs `--headed` for that, which moves your real
   pointer and takes focus.
 - Tells the agent when an app plays its error sound or opens another window.
@@ -83,27 +86,27 @@ and the same tasks:
 
 **Where agent-desktop wins**
 
-- Finishes the task faster: 462 ms against 1.0 s. A single click is faster with UCU, but the engine waits about 450 ms
+- Finishes the task faster: 822 ms against 1.4 s. A single click is faster with UCU, but the engine waits about 450 ms
   before it reads a window after an action.
-- Starts three times as fast: 256 ms against 774 ms.
-- Costs less to set up: 2,882 tokens against 4,091.
-- Gives a quick outline of a large window in 164 ms, then lets the agent drill in. UCU reads the whole window.
-- Is fully open source, runs on Windows and Linux too, and uses slightly less memory when idle (15 MB against 19 MB).
+- Starts more than twice as fast: 349 ms against 785 ms.
+- Costs less to set up: 2,882 tokens against 4,707.
+- Gives a quick outline of a large window in 232 ms, then lets the agent drill in. UCU reads the whole window.
+- Is fully open source, runs on Windows and Linux too, and uses less memory when idle (15 MB against 27 MB).
 - Reports if each action was delivered and if a retry is safe, and rejects stale element references.
 
 | Test (median) | UCU | Codex engine alone | agent-desktop |
 | --- | ---: | ---: | ---: |
-| Read a small window | 48 ms | 77 ms | 103 ms |
-| Click a button | 26 ms | 30 ms | 48 ms |
-| Take a screenshot | 44 ms | 49 ms | 288 ms |
-| Finish a task | 1.0 s | 1.0 s | 462 ms |
-| Read a large window | 1.5 s | 1.6 s | 3.0 s (outline only: 164 ms) |
-| Start from nothing | 774 ms | 622 ms | 256 ms |
+| Read a small window | 56 ms | 85 ms | 149 ms |
+| Click a button | 59 ms | 58 ms | 88 ms |
+| Take a screenshot | 53 ms | 59 ms | 299 ms |
+| Finish a task | 1.4 s | 1.4 s | 822 ms |
+| Read a large window | 2.1 s | 2.1 s | 3.1 s (outline only: 232 ms) |
+| Start from nothing | 785 ms | 632 ms | 349 ms |
 | Tokens for the task | 518 | 552 | 2,110 |
-| Tokens to read a small window | 390 | 390 | 1,100 |
-| Tokens to read a large window | 1,651 | 1,651 | 2,542 (outline only: 1,112) |
-| Tokens to set up a session | 4,091 | 6,366 | 2,882 |
-| Memory while idle | 19 MB | 363 MB | 15 MB |
+| Tokens to read a small window | 390 | 390 | 1,093 |
+| Tokens to read a large window | 1,647 | 1,647 | 2,113 (outline only: 1,112) |
+| Tokens to set up a session | 4,707 | 6,356 | 2,882 |
+| Memory while idle | 27 MB | 628 MB | 15 MB |
 
 <details>
 <summary>How this was measured</summary>
@@ -146,6 +149,8 @@ python3 -I benchmarks/chart.py
   that fits your account. You use it at your own risk.
 - **Agents get real access.** Anything an app can do, an agent can do through it. Deny the apps you want to
   keep them out of.
+- **The private desktop is a virtual display.** It uses a private macOS feature, and it appears in your display
+  settings while an agent needs it.
 
 ## Requirements
 
@@ -217,12 +222,16 @@ Each decision goes to `~/Library/Logs/ucu/approve.log`, with the client and fold
 
 ## Tools
 
-- `js`, `js_reset`: the engine's own tools.
+- `js {code, timeout_ms?, window?}`: the engine's tool. With `window: {app, title}`, UCU makes that window the
+  app's main window first.
+- `js_reset`: the engine's own tool.
 - `list_windows {app?}`: the windows of an app, or of every app without `app`, which one is the main window, and
   whether each is a dialog, minimized or full screen. `cua.getApp(app)` always acts on the main window.
 - `focus_window {app, title, unfullscreen?, activate?}`: makes the window whose title contains `title` the
   main window, so the next `cua.getApp(app)` acts on it. The window stays where it is. With `activate: true`, the app
   also comes to the front, for when you should see it.
+- `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
+- `safari {op, ...}`: works in Safari in the agent's own window.
 
 In a `js` call, wait for a window to react instead of sleeping:
 
@@ -260,12 +269,62 @@ denied app stays closed.
 
 The agent reads a hidden app, takes screenshots of it and clicks its elements as usual. Two things need a window on
 screen: input by coordinates, and a few actions that an app refuses while hidden, such as opening its settings. For
-those, UCU shows the app behind your windows, without taking focus. Agents that open an app with the `open` command
-skip all of this, so the usage rules tell them not to.
+those, UCU moves the app to the agent's private desktop. Agents that open an app with the `open` command skip all of
+this, so the usage rules tell them not to.
 
 If an app comes to the front during an agent's call or just after it, and it is an app that chat drives or one that
 just started, UCU puts your app back and tells the agent. If you pressed a key or clicked just before, it does nothing,
 because you may have switched apps yourself.
+
+### The private desktop
+
+Each chat that needs one gets a virtual display, called UCU Agent Desktop, 1920 by 1200. macOS treats its windows as
+on screen, so they keep rendering and take clicks by position, but nobody sees them, and the agent's cursor stays
+there too. The display touches your screens at one corner at most, so your pointer won't wander onto it. It appears
+in System Settings > Displays while it exists.
+
+UCU creates it on first use and removes it 2 minutes after a turn ends, or when the chat closes. The apps on it are
+hidden first, and macOS puts their windows back where they were. If you click such an app in the Dock, its windows come
+back to your screen. When an agent calls `focus_window` with `activate: true`, they do too.
+
+Virtual displays are a private macOS feature. If they are not available, apps are shown behind your windows instead.
+
+### Safari
+
+The engine can only act on an app's main window, and in Safari that is the window you are working in. So agents use
+the `safari` tool, and UCU tells them to if they call `cua.getApp("Safari")` while you are in it:
+
+- `list` shows every window and tab, yours too.
+- `open` loads a page in a new tab of the agent's own hidden window. Each chat has its own, closed when the chat ends.
+- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in those tabs while the window stays hidden.
+- `shot` takes a screenshot. Safari stops painting hidden windows, so the window moves to the private desktop until
+  the turn ends. Your window keeps the keyboard.
+- Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`.
+  Agents are told to use those only if you asked.
+
+It needs **Safari > Settings > Advanced > Show features for web developers**, then **Develop > Allow JavaScript from
+Apple Events**, and permission for the app running Claude Code to control Safari. `shot` also needs Screen Recording
+for that app. The first window can flash for a moment when it is created. Clicks and typing are synthetic, so file
+pickers and some logins ignore them.
+
+### Several windows and several agents
+
+One `js` call can drive several apps. To work on several windows of one app in a turn, an agent sends one `js` call
+for each with `window: {app, title}`, and UCU runs them one at a time.
+
+Agents in different chats can work at the same time on different apps, with no slowdown you'd notice. Each chat keeps a
+small file in `~/Library/Application Support/ucu/sessions/`, and when an agent gets an app another agent used in the
+last 3 minutes, it gets a note saying who. Two agents on the same window still undo each other's work, so the note asks
+it to wait or ask you. In Safari, each chat has its own window, so they don't collide.
+
+The engine's cursor has no color setting, so all agents look the same. An agent working on a hidden app or on the
+private desktop shows no cursor on your screen at all.
+
+### When something goes wrong
+
+The engine's errors are short, so UCU explains the common ones where they happen: a key name it doesn't know, a stale
+element number, an app that didn't answer, an app that isn't approved. If a running app has no window, UCU opens one
+hidden instead of letting the call fail.
 
 ## Other MCP clients
 
@@ -305,7 +364,8 @@ everything.
 | --- | --- |
 | `ucu` | The `install`, `uninstall`, `doctor`, `deny`, `allow` and `denied` commands. |
 | `scripts/ucu-proxy.py` | The MCP server: a stdio proxy that runs the engine as the newest usable Codex plugin defines it, answers app approvals from the policy, adds the window tools and usage rules, ends turns, stops and restarts the engine when idle, and shortens what the model reads. |
-| `native/ucu-window.swift` | `ucu-window list/focus`, behind the `list_windows` and `focus_window` tools, and `ucu-window watch`, which opens apps hidden and reports new windows while the engine runs. |
+| `native/ucu-window.swift` | `ucu-window list/focus`, behind the `list_windows` and `focus_window` tools, and `ucu-window watch`, which opens apps hidden, reports new windows and holds the private desktop. |
+| `native/safari.js` | The Safari side of the `safari` tool, run with `osascript`. |
 | `js/wait.mjs` | `waitForChange()`, which waits for a window to change and settle. |
 
 ## Tests

@@ -8,126 +8,126 @@
   },
   "medians": {
     "Codex engine": {
-      "read small app (ms)": 76.8,
-      "screenshot (ms)": 49.4,
-      "read dense app (ms)": 1585.8,
-      "read dense app (chars)": 6603,
-      "click (ms)": 30.0,
-      "task (ms)": 1034.0,
+      "read small app (ms)": 84.8,
+      "screenshot (ms)": 58.7,
+      "read dense app (ms)": 2079.9,
+      "read dense app (chars)": 6587,
+      "click (ms)": 57.9,
+      "task (ms)": 1357.7,
       "task tokens read": 501.0,
       "task tokens written": 51.0,
-      "cold start (ms)": 621.6
+      "cold start (ms)": 632.5
     },
     "ucu": {
-      "read small app (ms)": 47.7,
-      "screenshot (ms)": 44.3,
-      "read dense app (ms)": 1461.4,
-      "read dense app (chars)": 6603,
-      "click (ms)": 26.0,
-      "task (ms)": 1015.1,
+      "read small app (ms)": 56.4,
+      "screenshot (ms)": 52.9,
+      "read dense app (ms)": 2130.0,
+      "read dense app (chars)": 6587,
+      "click (ms)": 59.2,
+      "task (ms)": 1351.5,
       "task tokens read": 467.5,
       "task tokens written": 51.0,
-      "cold start (ms)": 773.5
+      "cold start (ms)": 785.3
     },
     "agent-desktop": {
-      "read small app (ms)": 102.7,
-      "screenshot (ms)": 287.5,
-      "read dense app (ms)": 3044.5,
-      "read dense app (chars)": 10166,
-      "click (ms)": 48.5,
-      "task (ms)": 462.5,
-      "task tokens read": 1971.2,
+      "read small app (ms)": 148.7,
+      "screenshot (ms)": 298.9,
+      "read dense app (ms)": 3058.1,
+      "read dense app (chars)": 8453,
+      "click (ms)": 87.7,
+      "task (ms)": 821.8,
+      "task tokens read": 1971.0,
       "task tokens written": 138.5,
-      "cold start (ms)": 255.8
+      "cold start (ms)": 348.9
     },
     "agent-desktop skeleton": {
-      "read dense app (ms)": 164.5,
+      "read dense app (ms)": 231.7,
       "read dense app (chars)": 4448
     }
   },
   "spread": {
     "Codex engine": {
       "read small app (ms)": [
-        72.0,
-        78.8
+        81.8,
+        88.0
       ],
       "screenshot (ms)": [
-        46.4,
-        51.4
+        56.2,
+        64.3
       ],
       "read dense app (ms)": [
-        438.1,
-        1817.0
+        1979.2,
+        2156.1
       ],
       "click (ms)": [
-        27.7,
-        32.3
+        52.9,
+        62.1
       ],
       "task (ms)": [
-        1015.5,
-        1077.0
+        1318.1,
+        1374.1
       ],
       "cold start (ms)": [
-        604.8,
-        632.7
+        630.8,
+        638.1
       ]
     },
     "ucu": {
       "read small app (ms)": [
-        44.2,
-        50.5
+        53.6,
+        60.9
       ],
       "screenshot (ms)": [
-        43.1,
-        48.5
+        50.3,
+        56.1
       ],
       "read dense app (ms)": [
-        418.6,
-        2026.9
+        2035.9,
+        2247.7
       ],
       "click (ms)": [
-        24.1,
-        32.3
+        53.5,
+        64.1
       ],
       "task (ms)": [
-        998.4,
-        1043.6
+        1325.2,
+        1379.9
       ],
       "cold start (ms)": [
-        759.9,
-        775.0
+        757.7,
+        788.5
       ]
     },
     "agent-desktop": {
       "read small app (ms)": [
-        100.1,
-        108.7
+        146.0,
+        154.4
       ],
       "screenshot (ms)": [
-        272.3,
-        298.2
+        285.2,
+        311.2
       ],
       "read dense app (ms)": [
-        1041.0,
-        3064.5
+        3055.2,
+        3062.0
       ],
       "click (ms)": [
-        45.2,
-        53.5
+        80.1,
+        98.2
       ],
       "task (ms)": [
-        443.5,
-        471.1
+        806.7,
+        877.6
       ],
       "cold start (ms)": [
-        242.5,
-        261.0
+        334.2,
+        363.1
       ]
     },
     "agent-desktop skeleton": {
       "read dense app (ms)": [
-        97.4,
-        200.3
+        218.3,
+        248.8
       ]
     }
   },
@@ -180,7 +180,7 @@
       "task model round trips": 2
     },
     "agent-desktop": {
-      "read small app (chars)": 4399,
+      "read small app (chars)": 4372,
       "task model round trips": 2
     }
   },
@@ -188,11 +188,11 @@
     "Codex engine": {
       "tool definitions": 5451,
       "instructions": 61,
-      "first-use docs": 19953
+      "first-use docs": 19915
     },
     "ucu": {
-      "tool definitions": 3796,
-      "instructions": 1078,
+      "tool definitions": 5971,
+      "instructions": 1366,
       "first-use docs": 11491
     },
     "agent-desktop": {
@@ -202,8 +202,8 @@
     }
   },
   "idle memory (MB)": {
-    "Codex engine": 362.8,
+    "Codex engine": 627.9,
     "agent-desktop": 15.0,
-    "ucu": 18.8
+    "ucu": 26.6
   }
 }

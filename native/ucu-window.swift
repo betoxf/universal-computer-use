@@ -76,6 +76,10 @@ func windows(of app: NSRunningApplication) -> (AXUIElement, [AXUIElement]) {
     return (element, list)
 }
 
+func isMain(_ window: AXUIElement, of element: AXUIElement) -> Bool {
+    (attribute(element, kAXMainWindowAttribute) as AXUIElement?).map { CFEqual($0, window) } ?? false
+}
+
 func title(_ window: AXUIElement) -> String { attribute(window, kAXTitleAttribute) ?? "" }
 func flag(_ window: AXUIElement, _ name: String) -> Bool { (attribute(window, name) as Bool?) ?? false }
 
@@ -153,14 +157,102 @@ func contents(of window: AXUIElement) -> (text: String, buttons: [String]) {
     return (texts.joined(separator: " "), Array(buttons.prefix(6)))
 }
 
+// A display only an agent uses, placed so that it touches the user's screens at a corner at most. Windows on it are
+// on screen for macOS, so they render and take clicks by position, but nobody sees them. When it goes away, macOS
+// moves them back to where they were. The classes are private, so they are looked up at run time: without them
+// `open()` returns nil and apps stay hidden or are shown behind the user's windows.
+final class AgentDesktop {
+    static let width: UInt = 1920, height: UInt = 1200, slots = 1...8
+    static let modeSelector = NSSelectorFromString("initWithWidth:height:refreshRate:")
+    static let settle = 0.6
+
+    var display: NSObject?  // the display lasts as long as this object
+    var made = Date.distantFuture
+    var slot: UInt32?
+
+    // Screens are remembered by serial number, so reusing a few numbers keeps macOS's list of them short.
+    func takeSlot() -> UInt32? {
+        let folder = NSHomeDirectory() + "/Library/Application Support/ucu"
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        for slot in Self.slots {
+            let lock = Darwin.open("\(folder)/desktop-\(slot).lock", O_CREAT | O_RDWR, 0o600)
+            if lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 {  // the file stays open: the lock goes with this process
+                self.slot = UInt32(slot)
+                return self.slot
+            }
+            close(lock)
+        }
+        return nil
+    }
+
+    func make() -> NSObject? {
+        guard let descriptor = (NSClassFromString("CGVirtualDisplayDescriptor") as? NSObject.Type)?.init(),
+              let settings = (NSClassFromString("CGVirtualDisplaySettings") as? NSObject.Type)?.init(),
+              let displayClass = NSClassFromString("CGVirtualDisplay") as AnyObject?,
+              let modeClass: AnyClass = NSClassFromString("CGVirtualDisplayMode"),
+              let implementation = class_getMethodImplementation(modeClass, Self.modeSelector),
+              let serial = slot ?? takeSlot() else { return nil }
+        descriptor.setValue("UCU Agent Desktop", forKey: "name")
+        descriptor.setValue(Self.width * 2, forKey: "maxPixelsWide")
+        descriptor.setValue(Self.height * 2, forKey: "maxPixelsHigh")
+        descriptor.setValue(NSValue(size: NSSize(width: 520, height: 325)), forKey: "sizeInMillimeters")
+        descriptor.setValue(0x55C1, forKey: "productID")
+        descriptor.setValue(0x55C1, forKey: "vendorID")
+        descriptor.setValue(serial, forKey: "serialNum")
+        descriptor.setValue(DispatchQueue.main, forKey: "queue")
+        typealias ModeInit = @convention(c) (AnyObject, Selector, UInt, UInt, Double) -> Unmanaged<AnyObject>
+        let allocated = (modeClass as AnyObject).perform(NSSelectorFromString("alloc")).takeUnretainedValue()
+        let start = unsafeBitCast(implementation, to: ModeInit.self)
+        let mode = start(allocated, Self.modeSelector, Self.width, Self.height, 30)
+        settings.setValue(1, forKey: "hiDPI")  // the engine's screenshots and coordinates assume Retina
+        settings.setValue([mode.takeUnretainedValue()], forKey: "modes")
+        typealias Apply = @convention(c) (AnyObject, Selector, AnyObject) -> Bool
+        let apply = NSSelectorFromString("applySettings:")
+        let blank: AnyObject = displayClass.perform(NSSelectorFromString("alloc")).takeUnretainedValue()
+        guard let made = blank.perform(NSSelectorFromString("initWithDescriptor:"), with: descriptor),
+              let display = made.takeUnretainedValue() as? NSObject,
+              let method = class_getMethodImplementation(type(of: display), apply),
+              unsafeBitCast(method, to: Apply.self)(display, apply, settings) else { return nil }
+        return display
+    }
+
+    func open() -> Bool {
+        if display == nil {
+            display = make()
+            made = Date()
+            guard let id = displayID else { return false }
+            var configuration: CGDisplayConfigRef?
+            CGBeginDisplayConfiguration(&configuration)
+            CGConfigureDisplayOrigin(configuration, id, -6000, -6000)  // macOS moves it next to the others, at a corner
+            CGCompleteDisplayConfiguration(configuration, .forSession)
+        }
+        return displayID != nil
+    }
+
+    // Where the desktop is, in the coordinates windows use.
+    var bounds: CGRect? { displayID.map(CGDisplayBounds).flatMap { $0.width > 0 ? $0 : nil } }
+
+    var displayID: CGDirectDisplayID? { (display?.value(forKey: "displayID") as? NSNumber)?.uint32Value }
+
+    // Apps hear about a new display a moment after macOS shows it. Until then, one that gets a window moved there
+    // brings it back to a screen it knows, in part onto the user's.
+    var isReady: Bool {
+        -made.timeIntervalSinceNow > Self.settle && NSScreen.screens.contains {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+        }
+    }
+}
+
 // Runs next to cua_repl for as long as its stdin stays open, so it can't outlive the proxy. Commands come as one
 // JSON object per line on stdin; replies and reports go out the same way on stdout.
 //
 //   {"id": 1, "open": "Blender", "deny": ["Terminal"]}  open a closed app hidden, unless it is denied
 //   {"id": 2, "show": ["Blender"]}                      show hidden apps, behind the user's windows
+//   {"id": 3, "desktop": true}                          make the agent's desktop and say where it is
+//   {"id": 4, "park": ["Blender"]}                      move apps' windows to that desktop and show them there
 //   {"watch": ["safari"]}                               report these apps' new windows from now on
 //   {"busy": true}                                      an agent's call began (false: it ended)
-//   {"allow": "Blender"}                                let this app come to the front
+//   {"allow": "Blender"}                                bring this app back and let it come to the front
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back.
@@ -168,7 +260,7 @@ final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
                                             "AuthenticationServicesAgent", "coreautha"]
     static let quietTail = 1.5, windowSettle = 0.3, hideGuard = 3.0, noWindowLimit = 6.0, openLimit = 45.0
-    static let inputWindow = 1.5, longestCall = 300.0
+    static let inputWindow = 1.5, longestCall = 300.0, moveSettle = 0.3
 
     var watched = Set<String>()
     var driven = [NSRunningApplication]()  // the watched apps that were running when the last call began
@@ -176,6 +268,8 @@ final class Watcher {
     var seenDialogs = Set<Int>()
     var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
     var keptHidden = Set<pid_t>()
+    let desktop = AgentDesktop()
+    var parked = [pid_t: (app: NSRunningApplication, places: [(AXUIElement, CGPoint)], target: CGPoint)]()
     var busySince = Date.distantFuture
     var busyUntil = Date.distantPast
     var front = NSWorkspace.shared.frontmostApplication
@@ -202,10 +296,17 @@ final class Watcher {
                       let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
                 DispatchQueue.main.async { self.handle(command) }
             }
-            exit(0)
+            DispatchQueue.main.async { self.finish() }
         }
         RunLoop.main.run()
         exit(0)
+    }
+
+    // Without the desktop, macOS moves its windows back to the user's screens, so they are hidden first.
+    func finish() {
+        parked.values.forEach { $0.app.hide() }
+        if parked.isEmpty { exit(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(0) }
     }
 
     func handle(_ command: [String: Any]) {
@@ -216,6 +317,7 @@ final class Watcher {
         if let name = command["allow"] as? String, let app = running(name) {
             allowed = app.processIdentifier
             keptHidden.remove(app.processIdentifier)
+            bringBack(app)
         }
         if let busy = command["busy"] as? Bool {
             busyUntil = Date() + (busy ? Self.longestCall : Self.quietTail)  // no end comes if cua_repl crashes
@@ -230,6 +332,15 @@ final class Watcher {
             open(name, deny: command["deny"] as? [String] ?? [], id: command["id"] ?? NSNull())
         }
         if let names = command["show"] as? [String] { show(names, id: command["id"]) }
+        if let names = command["park"] as? [String] {
+            park(names, onlyHidden: command["onlyHidden"] as? Bool ?? false, id: command["id"])
+        }
+        if command["desktop"] != nil, let id = command["id"] {
+            withDesktop { area in
+                let bounds = area.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] }
+                emit(["id": id, "bounds": bounds as Any])
+            }
+        }
     }
 
     func running(_ query: String) -> NSRunningApplication? {
@@ -247,8 +358,9 @@ final class Watcher {
             return
         }
         let bundle = Bundle(url: url), info = bundle?.infoDictionary
-        let names = [query, url.deletingPathExtension().lastPathComponent, FileManager.default.displayName(atPath: url.path),
-                     bundle?.bundleIdentifier, info?["CFBundleName"] as? String, info?["CFBundleDisplayName"] as? String]
+        let names = [query, url.deletingPathExtension().lastPathComponent,
+                     FileManager.default.displayName(atPath: url.path), bundle?.bundleIdentifier,
+                     info?["CFBundleName"] as? String, info?["CFBundleDisplayName"] as? String]
         guard Set(names.compactMap { $0 }.map(key)).isDisjoint(with: deny.map(key)) else {
             emit(["id": id, "state": "denied"])
             return
@@ -259,22 +371,31 @@ final class Watcher {
             known[key(query)] = app
         }
         if let app {
-            emit(["id": id, "state": "running", "hidden": app.isHidden])
+            if app.activationPolicy == .regular, !Self.hasWindows(app) {
+                launch(url, id: id, state: "reopened", limit: 2)  // the engine fails on an app without a window
+                return
+            }
+            emit(["id": id, "state": "running", "active": app.isActive])
             return
         }
+        launch(url, id: id, state: "opened", limit: Self.noWindowLimit)
+    }
+
+    func launch(_ url: URL, id: Any, state: String, limit: Double) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.hides = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
-            DispatchQueue.main.async { [self] in keepHidden(app, id: id) }
+            DispatchQueue.main.async { [self] in keepHidden(app, id: id, state: state, limit: limit) }
         }
     }
 
     // Some apps ignore `hides` or show themselves once their window is up (Blender), and cua_repl needs that
     // window, so this hides the app until it has one, and for a moment after in case it shows itself again.
-    func keepHidden(_ launched: NSRunningApplication?, id: Any?) {
+    func keepHidden(_ launched: NSRunningApplication?, id: Any?, state: String = "opened",
+                    limit: Double = noWindowLimit) {
         func reply(_ state: String) { if let id { emit(["id": id, "state": state]) } }
         guard let app = launched else {
             reply("failed")
@@ -286,7 +407,7 @@ final class Watcher {
         Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] timer in
             if app.isTerminated || !keptHidden.contains(pid) || (app.isActive && Self.userIsActive())
                 || (replied.map { -$0.timeIntervalSinceNow > Self.hideGuard } ?? false) {
-                if replied == nil { reply("opened") }
+                if replied == nil { reply(state) }
                 keptHidden.remove(pid)
                 timer.invalidate()
                 return
@@ -295,10 +416,10 @@ final class Watcher {
             if finished == nil, app.isFinishedLaunching { finished = Date() }
             guard replied == nil else { return }
             let list: [AXUIElement] = trusted ? attribute(element, kAXWindowsAttribute) ?? [] : []
-            let waited = finished.map { -$0.timeIntervalSinceNow > Self.noWindowLimit } ?? false
+            let waited = finished.map { -$0.timeIntervalSinceNow > limit } ?? false
             if (app.isHidden && !list.isEmpty) || (!trusted && finished != nil) || waited
                 || -started.timeIntervalSinceNow > Self.openLimit {
-                reply("opened")
+                reply(state)
                 replied = Date()
             }
         }
@@ -319,10 +440,113 @@ final class Watcher {
         }
     }
 
-    static func isOnScreen(_ app: NSRunningApplication) -> Bool {
+    // macOS takes a moment to put a new display in place, and a window moved before that stays where it was.
+    func withDesktop(_ action: @escaping (CGRect?) -> Void) {
+        guard desktop.open() else { return action(nil) }
+        let started = Date()
+        if desktop.isReady { return action(desktop.bounds) }
+        Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [self] timer in
+            if desktop.isReady || -started.timeIntervalSinceNow > 3 {
+                timer.invalidate()
+                action(desktop.isReady ? desktop.bounds : nil)
+            }
+        }
+    }
+
+    func park(_ names: [String], onlyHidden: Bool, id: Any?) {
+        withDesktop { [self] area in
+            if let area {
+                // An app that isn't hidden any more is one the user took back.
+                let apps = names.compactMap(running).filter {
+                    !onlyHidden || $0.isHidden || parked[$0.processIdentifier] != nil
+                }
+                moveToDesktop(apps, area: area, id: id)
+            } else if let id {
+                emit(["id": id, "state": "no desktop"])
+            }
+        }
+    }
+
+    // A window moved while its app shows slides there, across the user's screen. Moved while hidden, it is just there.
+    func moveToDesktop(_ apps: [NSRunningApplication], area: CGRect, id: Any?) {
+        let moved = apps.contains { parked[$0.processIdentifier] == nil }
+        var targets = [(NSRunningApplication, CGPoint)]()
+        for app in apps {
+            if let place = parked[app.processIdentifier] {
+                targets.append((app, place.target))
+                continue
+            }
+            app.hide()
+            keptHidden.remove(app.processIdentifier)
+            let offset = CGFloat(parked.count * 40 + 30)
+            let target = CGPoint(x: area.minX + offset, y: area.minY + offset)
+            let list: [AXUIElement] = attribute(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+            var places = [(AXUIElement, CGPoint)]()
+            for window in list {
+                var origin = CGPoint.zero
+                if let value: AXValue = attribute(window, kAXPositionAttribute) {
+                    AXValueGetValue(value, .cgPoint, &origin)
+                }
+                places.append((window, origin))
+                move(window, to: target)
+            }
+            parked[app.processIdentifier] = (app, places, target)
+            targets.append((app, target))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (moved ? Self.moveSettle : 0)) {
+            let started = Date()
+            func placed() -> Bool { targets.allSatisfy { !$0.0.isHidden && Self.isOnScreen($0.0, at: $0.1) } }
+            func finish() {
+                if let id { emit(["id": id, "state": placed() ? "parked" : "no desktop", "moved": moved]) }
+            }
+            apps.filter(\.isHidden).forEach { $0.unhide() }
+            if placed() { return finish() }
+            Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { timer in
+                if placed() || -started.timeIntervalSinceNow > 2 {
+                    timer.invalidate()
+                    finish()
+                }
+            }
+        }
+    }
+
+    func move(_ window: AXUIElement, to point: CGPoint) {
+        var point = point
+        if let value = AXValueCreate(.cgPoint, &point) {
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+        }
+    }
+
+    func bringBack(_ app: NSRunningApplication) {
+        guard let place = parked.removeValue(forKey: app.processIdentifier) else { return }
+        place.places.forEach { move($0.0, to: $0.1) }
+        let opened: [AXUIElement] = attribute(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+        for window in opened where !place.places.contains(where: { CFEqual($0.0, window) }) {
+            move(window, to: place.places.first?.1 ?? CGPoint(x: 100, y: 100))  // opened while it was on the desktop
+        }
+    }
+
+    // AX leaves out windows on other Spaces, but the window server knows them.
+    static func hasWindows(_ app: NSRunningApplication) -> Bool {
+        let seen: [AXUIElement]? = attribute(appElement(app.processIdentifier), kAXWindowsAttribute)
+        guard seen?.isEmpty == true else { return true }
+        let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return list.contains {
+            ($0[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier)
+                && ($0[kCGWindowLayer as String] as? Int) == 0 && ($0[kCGWindowAlpha as String] as? Double ?? 0) > 0
+                && ($0[kCGWindowBounds as String] as? [String: CGFloat])?["Height"] ?? 0 > 60
+        }
+    }
+
+    static func isOnScreen(_ app: NSRunningApplication, at point: CGPoint? = nil) -> Bool {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []
-        return list.contains { ($0[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier) }
+        return list.contains { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier) else { return false }
+            guard let point, let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] else { return true }
+            return abs((bounds["X"] ?? .infinity) - point.x) < 2 && abs((bounds["Y"] ?? .infinity) - point.y) < 2
+        }
     }
 
     // MARK: new windows
@@ -401,6 +625,7 @@ final class Watcher {
         // An app takes seconds to start, so a new one counts as the user's if they did anything since just before it.
         let sinceInput = isNew ? -launched.timeIntervalSinceNow + Self.inputWindow : Self.inputWindow
         front = app
+        if Self.userIsActive() { bringBack(app) }  // they clicked its Dock icon: its windows can't stay out of sight
         guard Date() < busyUntil, let previous, previous.processIdentifier != pid, !previous.isTerminated,
               pid != allowed, isNew || driven.contains(app), !Self.userIsActive(within: sinceInput) else { return }
         front = previous
@@ -447,10 +672,9 @@ case "focus", "unfullscreen":
             app.unhide()
             app.activate()
         }
-        usleep(200_000)
+        for _ in 0..<20 where !isMain(window, of: element) { usleep(10_000) }
     }
-    let main: AXUIElement? = attribute(element, kAXMainWindowAttribute)
-    let isMain = main.map { CFEqual($0, window) } ?? false
+    let isMain = isMain(window, of: element)
     print("\"\(title(window))\" main=\(isMain) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))")
     exit(command == "focus" && !isMain ? 4 : 0)
 default:
