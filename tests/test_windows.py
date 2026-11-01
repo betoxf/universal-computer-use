@@ -322,10 +322,10 @@ class WatchTest(unittest.TestCase):
 
 
 class SharedMacTest(unittest.TestCase):
-    def other_chat(self, proxy, pid, apps):
+    def other_chat(self, proxy, pid, apps, color=None):
         folder = Path(proxy.home.name) / "Library/Application Support/ucu/sessions"
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / f"{pid}.json").write_text(json.dumps({"who": "claude-code:website", "apps": apps}))
+        (folder / f"{pid}.json").write_text(json.dumps({"who": "claude-code:website", "color": color, "apps": apps}))
         return folder / f"{pid}.json"
 
     def test_says_when_another_agent_is_using_an_app_once(self):
@@ -340,7 +340,7 @@ class SharedMacTest(unittest.TestCase):
         proxy = WatchingProxy(self)
         proxy.policy(deny=[])
         path = self.other_chat(proxy, os.getpid(), {})
-        for junk in ("[]", "{", '{"apps": 3}', '{"apps": {"calculator": "soon"}}'):
+        for junk in ("[]", "{", '{"apps": 3}', '{"apps": {"calculator": "soon"}}', '{"color": []}'):
             path.write_text(junk)
             self.assertIn("result", proxy.call("js", 'let app = await cua.getApp("Calculator");'))
 
@@ -362,6 +362,34 @@ class SharedMacTest(unittest.TestCase):
         proxy.process.stdin.close()
         proxy.process.wait(10)
         self.assertFalse(files[0].exists())
+
+    def cursor_color(self, proxy):
+        proxy.policy(deny=[])
+        proxy.call("js", 'let app = await cua.getApp("Calculator");')
+        return proxy.commands("cursor")[0]["cursor"]
+
+    def test_gives_the_helper_a_cursor_color_before_anything_else(self):
+        proxy = WatchingProxy(self)
+        color = self.cursor_color(proxy)
+        self.assertRegex(color, r"^#[0-9A-F]{6}$")
+        self.assertIn("cursor", json.loads(proxy.window_log.read_text().splitlines()[0]))
+        files = list((Path(proxy.home.name) / "Library/Application Support/ucu/sessions").glob("*.json"))
+        self.assertEqual(json.loads(files[0].read_text())["color"], color)
+
+    def test_a_chat_doesnt_take_a_color_another_chat_has(self):
+        taken = self.cursor_color(WatchingProxy(self))
+        proxy = WatchingProxy(self)
+        self.other_chat(proxy, os.getpid(), {}, color=taken)
+        self.assertNotEqual(self.cursor_color(proxy), taken)
+
+    def test_tells_the_helper_when_the_turn_ends(self):
+        proxy = WatchingProxy(self)
+        self.cursor_color(proxy)
+        proxy.end_turn()
+        deadline = time.time() + 7
+        while not proxy.commands("turnEnded") and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(proxy.commands("turnEnded"))
 
 
 class SafariTest(unittest.TestCase):

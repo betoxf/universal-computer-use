@@ -121,6 +121,23 @@ func leaveFullScreen(_ window: AXUIElement) {
     usleep(300_000)
 }
 
+// What the window server knows about one window, without the cost of listing them all.
+func windowInfo(_ id: CGWindowID) -> [String: Any]? {
+    var pointer = UnsafeRawPointer(bitPattern: UInt(id))
+    guard let list = CFArrayCreate(kCFAllocatorDefault, &pointer, 1, nil) else { return nil }
+    return (CGWindowListCreateDescriptionFromArray(list) as? [[String: Any]])?.first
+}
+
+func bounds(of window: [String: Any]) -> CGRect {
+    (window[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) } ?? .null
+}
+
+func color(_ hex: String) -> NSColor? {
+    guard let value = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+    return NSColor(srgbRed: CGFloat(value >> 16 & 255) / 255, green: CGFloat(value >> 8 & 255) / 255,
+                   blue: CGFloat(value & 255) / 255, alpha: 1)
+}
+
 func emit(_ message: [String: Any]) {
     guard var line = try? JSONSerialization.data(withJSONObject: message) else { return }
     line.append(10)
@@ -243,6 +260,252 @@ final class AgentDesktop {
     }
 }
 
+// The agent's own cursor. The engine draws its cursors in windows of its service, one per chat, with no setting for how
+// they look. So each chat draws its own, in its color, wherever the engine's goes: the window server still reports those
+// windows while the service is hidden. Hiding the service is what takes the engine's cursors off the screen, and its
+// next action brings them back for about a frame, so it is hidden again each time. Shape and shadow copy the engine's.
+final class AgentCursor {
+    static let serviceID = "com.openai.sky.CUAService"
+    static let size: CGFloat = 126, tick = 1.0 / 120, searchEvery = 0.1, hideEvery = 0.03, linger = 20.0, fadeTime = 0.25
+    static let bend: CGFloat = 0.16, tiltLimit: CGFloat = 0.42, tiltEase = 0.07, restHeading = 3 * CGFloat.pi / 4
+
+    var color: NSColor?  // without one from the proxy, the engine's cursor stays
+    var timer: Timer?
+    var panel: NSPanel?
+    let arrow = CAShapeLayer()
+    var service: NSRunningApplication?
+    var seen = [CGWindowID: (center: CGPoint, onScreen: Bool)]()  // the engine's cursors
+    var nextSearch = Date.distantPast, nextHide = Date.distantPast, restAt = Date.distantFuture, lastStep = Date()
+    var target: CGWindowID?  // the window under the cursor, which it stays just above
+    var ticks = 0
+    var position: CGPoint?, velocity = CGPoint.zero, tilt: CGFloat = 0
+    var path: (start: CGPoint, control: CGPoint, end: CGPoint, began: Date, time: Double, moving: Bool)?
+
+    func wake(_ state: @escaping () -> (busy: Bool, apps: [NSRunningApplication])) {
+        guard color != nil, timer == nil else { return }
+        lastStep = Date()
+        timer = Timer.scheduledTimer(withTimeInterval: Self.tick, repeats: true) { [self] _ in
+            let now = state()
+            step(busy: now.busy, apps: now.apps)
+        }
+    }
+
+    func rest() { restAt = Date() }
+
+    func step(busy: Bool, apps: [NSRunningApplication]) {
+        let now = Date(), elapsed = now.timeIntervalSince(lastStep)
+        lastStep = now
+        ticks += 1
+        if busy {
+            restAt = now + Self.linger
+            follow(apps, now)
+        }
+        glide(now, elapsed)
+        if ticks % 30 == 0 { keepInPlace() }
+        if let panel, position != nil, now >= restAt {
+            panel.alphaValue -= elapsed / Self.fadeTime
+            if panel.alphaValue <= 0 {
+                panel.orderOut(nil)
+                position = nil
+                path = nil
+                target = nil
+            }
+        }
+        if !busy && position == nil {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    func follow(_ apps: [NSRunningApplication], _ now: Date) {
+        if now >= nextSearch {
+            nextSearch = now + Self.searchEvery
+            for window in serviceWindows([.optionAll]).filter(Self.isCursor) {
+                if let id = window[kCGWindowNumber as String] as? CGWindowID, seen[id] == nil {
+                    seen[id] = (CGPoint(x: CGFloat.nan, y: 0), false)
+                }
+            }
+        }
+        var anyOnScreen = false
+        for (id, last) in seen {
+            guard let window = windowInfo(id) else {
+                seen[id] = nil
+                continue
+            }
+            let frame = bounds(of: window), center = CGPoint(x: frame.midX, y: frame.midY)
+            let onScreen = window[kCGWindowIsOnscreen as String] as? Bool ?? false
+            anyOnScreen = anyOnScreen || onScreen
+            // A click on the same spot doesn't move the window, it only brings it back.
+            if center != last.center || (onScreen && !last.onScreen), let under = mine(id, at: center, apps) {
+                head(to: center, over: under, now)
+            }
+            seen[id] = (center, onScreen)
+        }
+        if anyOnScreen, now >= nextHide {
+            nextHide = now + Self.hideEvery
+            hideEngine()
+        }
+    }
+
+    static func isCursor(_ window: [String: Any]) -> Bool {
+        let frame = bounds(of: window)
+        return abs(frame.width - frame.height) < 1 && (60...200).contains(frame.width)
+    }
+
+    func serviceWindows(_ options: CGWindowListOption) -> [[String: Any]] {
+        if service?.isTerminated ?? true {
+            service = NSRunningApplication.runningApplications(withBundleIdentifier: Self.serviceID).first
+        }
+        guard let pid = service?.processIdentifier else { return [] }
+        let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+        return list.filter { ($0[kCGWindowOwnerPID as String] as? Int) == Int(pid) }
+    }
+
+    // A permission window of the service has to stay on screen, and nothing can be hidden without the Accessibility
+    // permission, so then the two cursors show together.
+    func hideEngine() {
+        guard let service, serviceWindows([.optionOnScreenOnly]).allSatisfy(Self.isCursor) else { return }
+        AXUIElementSetAttributeValue(appElement(service.processIdentifier), kAXHiddenAttribute as CFString, kCFBooleanTrue)
+    }
+
+    // The window a cursor of the engine is over, if that window is one this chat drives. The engine keeps a cursor just
+    // above its window, so the next window down tells, even where windows overlap. Once it is hidden, or when another
+    // chat has hidden it first, only the place is left to go by.
+    func mine(_ id: CGWindowID, at point: CGPoint, _ apps: [NSRunningApplication]) -> [String: Any]? {
+        let pids = Set(apps.map { Int($0.processIdentifier) }), serviceID = Int(service?.processIdentifier ?? 0)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let top = list.first { pids.contains($0[kCGWindowOwnerPID as String] as? Int ?? 0) && bounds(of: $0).contains(point) }
+        guard let place = list.firstIndex(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == id }) else { return top }
+        let below = list[(place + 1)...].first {
+            $0[kCGWindowOwnerPID as String] as? Int != serviceID && $0[kCGWindowOwnerName as String] as? String != "ucu-window"
+        }
+        guard let below, pids.contains(below[kCGWindowOwnerPID as String] as? Int ?? 0) else { return nil }
+        return top ?? below
+    }
+
+    func head(to end: CGPoint, over window: [String: Any], _ now: Date) {
+        let panel = panel ?? makePanel()
+        target = window[kCGWindowNumber as String] as? CGWindowID
+        panel.level = NSWindow.Level(rawValue: window[kCGWindowLayer as String] as? Int ?? 0)
+        panel.alphaValue = 1
+        guard let start = position else {
+            position = end
+            place(panel, at: end)
+            keepInPlace()
+            return
+        }
+        let dx = end.x - start.x, dy = end.y - start.y, distance = hypot(dx, dy)
+        guard distance > 0.5 else { return }
+        let time = min(0.55, 0.2 + Double(distance) / 1800)
+        var control: CGPoint
+        let moving = path != nil
+        if moving {  // already on its way: it leaves at the speed it has, so the turn is a curve and not a corner
+            let lead = CGFloat(time) / 4
+            control = CGPoint(x: start.x + velocity.x * lead, y: start.y + velocity.y * lead)
+        } else {  // a hand swings on an arc, so the path bows upward, or to the right when it goes straight up or down
+            var side = CGPoint(x: dy / distance, y: -dx / distance)
+            if side.y > 0.01 || (abs(side.y) <= 0.01 && side.x < 0) { side = CGPoint(x: -side.x, y: -side.y) }
+            control = CGPoint(x: (start.x + end.x) / 2 + side.x * distance * Self.bend * 2,
+                              y: (start.y + end.y) / 2 + side.y * distance * Self.bend * 2)
+        }
+        path = (start, control, end, now, time, moving)
+    }
+
+    func glide(_ now: Date, _ elapsed: Double) {
+        guard let panel, let old = position else { return }
+        var turn: CGFloat = 0
+        if let path {
+            let t = min(1, CGFloat(now.timeIntervalSince(path.began) / path.time))
+            let u = path.moving ? t * (2 - t) : t * t * (3 - 2 * t)  // from rest it eases in as well as out
+            let v = 1 - u
+            let next = CGPoint(x: v * v * path.start.x + 2 * v * u * path.control.x + u * u * path.end.x,
+                               y: v * v * path.start.y + 2 * v * u * path.control.y + u * u * path.end.y)
+            if elapsed > 0 { velocity = CGPoint(x: (next.x - old.x) / elapsed, y: (next.y - old.y) / elapsed) }
+            position = next
+            place(panel, at: next)
+            if t >= 1 {
+                self.path = nil
+                velocity = .zero
+            }
+            // It leans toward where it is going, more the faster it goes. Screen y grows downward, the layer's upward.
+            let speed = hypot(velocity.x, velocity.y)
+            if speed > 1 {
+                var away = atan2(-velocity.y, velocity.x) - Self.restHeading
+                away = atan2(sin(away), cos(away))
+                turn = max(-Self.tiltLimit, min(Self.tiltLimit, away * 0.5)) * min(1, speed / 900)
+            }
+        }
+        tilt += (turn - tilt) * CGFloat(1 - exp(-elapsed / Self.tiltEase))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        arrow.setAffineTransform(CGAffineTransform(rotationAngle: tilt))
+        CATransaction.commit()
+    }
+
+    func place(_ panel: NSPanel, at point: CGPoint) {
+        let height = NSScreen.screens.first?.frame.height ?? 0  // window coordinates count from its top, these from its bottom
+        panel.setFrameOrigin(NSPoint(x: point.x - Self.size / 2, y: height - point.y - Self.size / 2))
+    }
+
+    // The window under it may have come forward or gone to another Space since.
+    func keepInPlace() {
+        guard let panel, let target else { return }
+        if let window = windowInfo(target), window[kCGWindowIsOnscreen as String] as? Bool == true {
+            panel.order(.above, relativeTo: Int(target))
+        } else {
+            panel.orderOut(nil)
+        }
+    }
+
+    func makePanel() -> NSPanel {
+        NSApplication.shared.setActivationPolicy(.accessory)  // no Dock icon, and it never becomes the active app
+        let size = Self.size, bounds = NSRect(x: 0, y: 0, width: size, height: size)
+        let panel = NSPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+                            defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        let view = NSView(frame: bounds)
+        view.wantsLayer = true
+        panel.contentView = view
+        let tint = color ?? .gray
+        let shadow = CAGradientLayer()  // these stops are the engine's shadow, measured from a screenshot of it
+        shadow.type = .radial
+        shadow.frame = bounds
+        shadow.startPoint = CGPoint(x: 0.5, y: 0.5)
+        shadow.endPoint = CGPoint(x: 1, y: 1)
+        shadow.colors = [0.8, 0.65, 0.44, 0.22, 0.08, 0.02, 0].map { tint.withAlphaComponent($0).cgColor }
+        shadow.locations = [0, 0.14, 0.24, 0.33, 0.43, 0.52, 0.6]
+        view.layer?.addSublayer(shadow)
+        arrow.frame = bounds
+        arrow.path = Self.arrowPath(center: size / 2)
+        arrow.fillColor = (tint.blended(withFraction: 0.28, of: .black) ?? tint).cgColor  // darker than the shadow
+        arrow.strokeColor = NSColor.white.cgColor
+        arrow.lineWidth = 1.3
+        arrow.lineJoin = .round
+        view.layer?.addSublayer(arrow)
+        self.panel = panel
+        return panel
+    }
+
+    // A rounded dart around the click point, pointing up and to the left. Its corners are in screen directions.
+    static func arrowPath(center: CGFloat) -> CGPath {
+        let corners: [(x: CGFloat, y: CGFloat, radius: CGFloat)] = [
+            (-6, -6, 1.6), (10.4, 0.4, 1.4), (3.4, 3.4, 2.5), (0.4, 10.4, 1.4)]
+        let points = corners.map { CGPoint(x: center + $0.x, y: center - $0.y) }
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: (points[0].x + points[3].x) / 2, y: (points[0].y + points[3].y) / 2))
+        for (index, corner) in corners.enumerated() {
+            path.addArc(tangent1End: points[index], tangent2End: points[(index + 1) % 4], radius: corner.radius)
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
 // Runs next to cua_repl for as long as its stdin stays open, so it can't outlive the proxy. Commands come as one
 // JSON object per line on stdin; replies and reports go out the same way on stdout.
 //
@@ -253,6 +516,8 @@ final class AgentDesktop {
 //   {"watch": ["safari"]}                               report these apps' new windows from now on
 //   {"busy": true}                                      an agent's call began (false: it ended)
 //   {"allow": "Blender"}                                bring this app back and let it come to the front
+//   {"cursor": "#E5484D"}                               draw the agent's cursor in this color
+//   {"turnEnded": true}                                 the turn ended, so the cursor can go
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back.
@@ -269,6 +534,7 @@ final class Watcher {
     var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
     var keptHidden = Set<pid_t>()
     let desktop = AgentDesktop()
+    let cursor = AgentCursor()
     var parked = [pid_t: (app: NSRunningApplication, places: [(AXUIElement, CGPoint)], target: CGPoint)]()
     var busySince = Date.distantFuture
     var busyUntil = Date.distantPast
@@ -310,6 +576,8 @@ final class Watcher {
     }
 
     func handle(_ command: [String: Any]) {
+        if let hex = command["cursor"] as? String { cursor.color = color(hex) }
+        if command["turnEnded"] != nil { cursor.rest() }
         if let names = command["watch"] as? [String] {
             watched.formUnion(names.map(key))
             driven = watched.compactMap(running)
@@ -326,6 +594,7 @@ final class Watcher {
                 front = NSWorkspace.shared.frontmostApplication
                 driven = watched.compactMap(running)
                 scan()
+                cursor.wake { [self] in (Date() < busyUntil, driven) }
             }
         }
         if let name = command["open"] as? String {

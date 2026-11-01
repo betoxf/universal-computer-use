@@ -40,6 +40,7 @@
 | Has its own desktop | Apps that need clicks by position run on a private desktop you never see. |
 | Shares Safari with you | The `safari` tool works in the agent's own hidden window, so you keep your tabs and your keyboard. |
 | Runs side by side | Agents in different chats work at once, and each is told when another is using the same app. |
+| Has its own cursors | Each chat gets its own cursor color, so you can tell at a glance who is doing what. |
 | Sees every window | Agents are told when an app opens a new window, a sheet or a system dialog, with its text and buttons, and `list_windows` lists every open window. |
 | Reaches apps without an accessibility tree | Agents can click by screen position in a background window. Some remote-desktop and canvas apps ignore background input. |
 | Light on tokens | A task costs about a quarter of the tokens of agent-desktop, and the model gets compact text and diffs. |
@@ -317,8 +318,17 @@ small file in `~/Library/Application Support/ucu/sessions/`, and when an agent g
 last 3 minutes, it gets a note saying who. Two agents on the same window still undo each other's work, so the note asks
 it to wait or ask you. In Safari, each chat has its own window, so they don't collide.
 
-The engine's cursor has no color setting, so all agents look the same. An agent working on a hidden app or on the
-private desktop shows no cursor on your screen at all.
+### Cursors
+
+Each chat has its own cursor in place of the engine's: the same shape and soft shadow, in a color no other chat is using.
+A chat in the same folder gets the same color when it is free, and the color goes in the chat's session file. The cursor
+takes a curved path to each new spot, leans into the move, stays just above the window it is working on, and fades out
+when the turn ends. It takes no clicks and never moves your pointer.
+
+The engine has no setting for its cursor, so `ucu-window watch` follows the engine's cursor windows and hides the engine's
+service, which needs Accessibility permission. The engine's own cursor can show for about a frame each time it moves.
+Without that permission you see both cursors. Chats that were already open keep the engine's cursor until they restart.
+An agent working on a hidden app or on the private desktop shows no cursor on your screen at all.
 
 ### When something goes wrong
 
@@ -364,7 +374,7 @@ everything.
 | --- | --- |
 | `ucu` | The `install`, `uninstall`, `doctor`, `deny`, `allow` and `denied` commands. |
 | `scripts/ucu-proxy.py` | The MCP server: a stdio proxy that runs the engine as the newest usable Codex plugin defines it, answers app approvals from the policy, adds the window tools and usage rules, ends turns, stops and restarts the engine when idle, and shortens what the model reads. |
-| `native/ucu-window.swift` | `ucu-window list/focus`, behind the `list_windows` and `focus_window` tools, and `ucu-window watch`, which opens apps hidden, reports new windows and holds the private desktop. |
+| `native/ucu-window.swift` | `ucu-window list/focus`, behind the `list_windows` and `focus_window` tools, and `ucu-window watch`, which opens apps hidden, reports new windows, holds the private desktop and draws each chat's cursor. |
 | `native/safari.js` | The Safari side of the `safari` tool, run with `osascript`. |
 | `js/wait.mjs` | `waitForChange()`, which waits for a window to change and settle. |
 
