@@ -68,6 +68,8 @@ chat. It passes every message through unchanged, except that it
   keeps it from seeing other apps;
 * tells an agent when another chat is using the app it is getting, through one small
   file per chat in ~/Library/Application Support/ucu/sessions;
+* gives each chat a cursor color of its own, kept in that same file, which `ucu-window
+  watch` draws in place of the engine's cursor;
 * explains engine errors where they happen, so that the next try is the right one;
 * tells the agent about windows it wouldn't see: new windows and sheets of the apps it
   drives, and system dialogs such as password prompts, with their text and buttons, in
@@ -161,6 +163,7 @@ OPEN_TIMEOUT, SHOW_TIMEOUT = 50, 3  # seconds; the helper gives up on an app bef
 PARK_TIMEOUT, READ_TIMEOUT, SHOT_TIMEOUT, WINDOW_WAIT = 6, 10, 15, 120
 SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
+CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
 SAFARI_TIMEOUT = 45   # seconds; a page showing a dialog blocks every script until it is answered
 SAFARI_PAINT = 0.45   # seconds Safari takes to paint a page that has been hidden
 ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
@@ -504,33 +507,58 @@ class Sessions:
         self.path = SESSIONS / f"{os.getpid()}.json"
         self.apps = {}      # app_key -> when this chat last got it
         self.told = set()   # apps this chat already heard about
+        self.who = None
+        self.color = None
+
+    def others(self):
+        """Return what the other chats have written."""
+        found = []
+        for path in SESSIONS.glob("*.json"):
+            if path == self.path:
+                continue
+            try:
+                os.kill(int(path.stem), 0)
+                found.append(json.loads(path.read_text()))
+            except ProcessLookupError:  # a chat that ended without cleaning up
+                path.unlink(missing_ok=True)
+            except (OSError, ValueError, TypeError):
+                pass
+        return found
 
     def using(self, key):
         """Return who else has got this app lately, once per app."""
         if key in self.told:
             return []
         found, now = [], time.time()
-        for path in SESSIONS.glob("*.json"):
-            if path == self.path:
-                continue
+        for session in self.others():
             try:
-                os.kill(int(path.stem), 0)
-                session = json.loads(path.read_text())
                 if now - session["apps"].get(key, 0) < SHARED_APP_AGE:
                     found.append(str(session.get("who") or "unknown"))
-            except ProcessLookupError:  # a chat that ended without cleaning up
-                path.unlink(missing_ok=True)
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            except (KeyError, TypeError, AttributeError):
                 pass
         if found:
             self.told.add(key)
         return found
 
+    def cursor_color(self, folder):
+        """Return this chat's cursor color: its folder's own, or the next one no other chat is using."""
+        if self.color is None:
+            taken = [session.get("color") for session in self.others() if isinstance(session, dict)]
+            first = int(hashlib.sha256(folder.encode()).hexdigest(), 16) % len(CURSOR_COLORS)
+            turns = [CURSOR_COLORS[(first + step) % len(CURSOR_COLORS)] for step in range(len(CURSOR_COLORS))]
+            self.color = next((color for color in turns if color not in taken), turns[0])
+            self.write()
+        return self.color
+
     def got(self, key, who):
         self.apps[key] = time.time()
+        self.who = who
+        self.write()
+
+    def write(self):
         try:
             SESSIONS.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps({"who": who, "apps": self.apps}))
+            self.path.write_text(json.dumps({"who": self.who, "color": self.color, "apps": self.apps}))
         except OSError:
             pass
 
@@ -694,7 +722,8 @@ class WindowWatcher:
     """Runs `ucu-window watch` while cua_repl runs. Without the helper, or with one from before it could watch,
     everything here does nothing, and the agent just doesn't get what it adds."""
 
-    def __init__(self):
+    def __init__(self, color):
+        self.color = color     # gives this chat's cursor color
         self.process = None
         self.unusable = False  # it exited by itself, so it isn't started again
         self.lock = threading.Lock()
@@ -712,6 +741,7 @@ class WindowWatcher:
                 self.unusable = True
                 return
             threading.Thread(target=self.read, args=(self.process,), daemon=True).start()
+            self.send({"cursor": self.color()})
 
     def read(self, process):
         for line in process.stdout:
@@ -794,8 +824,8 @@ class Proxy:
         self.initialize_key = None          # Claude's pending initialize, whose result gets the usage rules
         self.folder = working_folder()
         self.alerts = AlertWatcher()
-        self.windows = WindowWatcher()
         self.sessions = Sessions()
+        self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder))
         self.safari = SafariWorkspace(self)
         self.used_apps = set()              # apps this chat has driven, as app_key names
         self.hidden_apps = {}               # apps ucu opened and still keeps hidden, app_key -> name
@@ -1334,6 +1364,7 @@ class Proxy:
                     stop_helper = self.child is None and self.windows.process is not None
             if signalled:
                 threading.Thread(target=self.safari.hide, daemon=True).start()
+                self.windows.send({"turnEnded": True})
             if stop_helper:
                 self.stop_helper()
             if sky_payload and os.access(SKY_CLIENT, os.X_OK):
