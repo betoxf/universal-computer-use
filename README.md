@@ -1,3 +1,16 @@
+> [!IMPORTANT]
+> **UCU has moved to [betoxf/agent-desktop](https://github.com/betoxf/agent-desktop/tree/ucu/ucu).** It now runs on its
+> own engine instead of the one in the ChatGPT desktop app, fixes calls that could hang for 5 minutes, and keeps itself
+> up to date. This repository is no longer updated. To switch:
+>
+> ```bash
+> git clone https://github.com/betoxf/agent-desktop.git
+> cd agent-desktop/ucu
+> ./ucu install
+> ```
+>
+> `./ucu install` registers the new copy in place of this one. Your approval policy stays as it is.
+
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/brand/ucu-logo-dark.svg">
