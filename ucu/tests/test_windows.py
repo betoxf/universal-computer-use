@@ -322,6 +322,40 @@ class SafariTest(unittest.TestCase):
         self.assertEqual([call["reuse_blank"] for call in proxy.safari_calls("open_tab")], [True, False])
         self.assertEqual(proxy.engine_calls(), [])  # no need for the engine
 
+    def test_keeps_its_window_when_its_tabs_close(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertEqual(json.loads(proxy.safari(op="close")["content"][0]["text"]), {"closed": True})
+        self.assertIn("call `open` first", proxy.safari(op="read")["content"][0]["text"])
+        proxy.safari(op="open", url="https://b.test")
+        self.assertEqual((len(proxy.safari_calls("create_window")), proxy.safari_calls("close_window")), (1, []))
+        self.assertEqual([call["reuse_blank"] for call in proxy.safari_calls("open_tab")], [True, True])
+
+    def test_keeps_its_window_when_its_last_tab_closes(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="open", url="https://b.test")
+        proxy.safari(op="close", tab_index=2)
+        self.assertFalse(proxy.safari(op="read", tab_index=1)["isError"])  # the other tab is still its own
+        self.assertEqual(json.loads(proxy.safari(op="close", tab_index=1)["content"][0]["text"]), {"closed": True})
+        self.assertEqual([call["keep_window"] for call in proxy.safari_calls("close_tab")], [True, True])
+        proxy.safari(op="open", url="https://c.test")
+        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
+        self.assertEqual(proxy.safari_calls("open_tab")[-1]["reuse_blank"], True)
+
+    def test_closes_a_tab_of_the_users_as_it_is(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="close", window_id=51, tab_index=1, allow_user_tab=True)
+        self.assertEqual(proxy.safari_calls("close_tab")[0]["keep_window"], False)
+
+    def test_tells_the_helper_the_window_is_its_own(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertEqual([(command["watch"], command["own"]) for command in proxy.commands("watch")],
+                         [(["safari"], True)])
+        proxy.look("Calculator")
+        self.assertNotIn("own", proxy.commands("watch")[-1])  # an app like any other: its windows are the user's
+
     def test_acts_on_its_last_tab_by_default(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
@@ -502,13 +536,41 @@ class ChromeTest(unittest.TestCase):
     def test_has_the_helper_undo_the_focus_its_own_steps_take(self):
         proxy = WatchingProxy(self)
         proxy.chrome(op="open", url="https://a.test")
-        self.assertIn("Google Chrome", [command["ours"] for command in proxy.commands("ours")])
+        self.assertEqual([command["ours"] for command in proxy.commands("ours")], ["Google Chrome"])  # its window
+
+    def test_leaves_chrome_to_the_user_while_its_steps_stay_behind(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        proxy.chrome(op="open", url="https://b.test")
+        proxy.chrome(op="navigate", url="https://c.test")
+        proxy.end_turn()
+        proxy.wait_until(lambda: proxy.chrome_calls("hide_window"))
+        proxy.chrome(op="read")  # its window shows again
+        self.assertEqual(len(proxy.commands("ours")), 1)  # only making the window brought Chrome forward
+
+    def test_tells_the_helper_before_a_page_brings_chrome_forward(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        opened = json.loads(proxy.chrome(op="open", url="chrome://no-script/")["content"][0]["text"])
+        self.assertEqual((opened["tab_index"], opened["url"]), (2, "chrome://no-script/"))
+        proxy.chrome(op="navigate", url="chrome://no-script/again")
+        self.assertEqual(len(proxy.commands("ours")), 3)
+        typed = [(call["tab_index"], call["url"]) for call in proxy.chrome_calls("navigate") if call.get("typed")]
+        self.assertEqual(typed, [(2, "chrome://no-script/"), (2, "chrome://no-script/again")])
+
+    def test_has_the_helper_undo_the_focus_a_step_in_its_page_takes(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Google Chrome", window="Mail")
+        self.assertEqual(proxy.commands("ours"), [])  # no window of its own: the windows are the user's
+        proxy.chrome(op="open", url="https://a.test")
+        proxy.call("act", app="Google Chrome", window="Mail", steps=[{"do": "click", "on": 1}])
+        self.assertEqual(len(proxy.commands("ours")), 2)
 
     def test_still_tells_the_agent_about_a_window_its_page_opens(self):
         proxy = WatchingProxy(self)
         proxy.chrome(op="open", url="https://a.test")
         time.sleep(3.1)  # long after its own window was made
-        proxy.chrome(op="navigate", url="https://b.test")
+        proxy.chrome(op="navigate", url="chrome://no-script/")  # which brings Chrome forward, as the agent knows
         proxy.report(event="focus", app="Google Chrome", back="Mail")
         proxy.report(event="window", app="Google Chrome", kind="window", title="Sign in", text="", buttons=[],
                      main=False)
@@ -540,6 +602,15 @@ class ChromeTest(unittest.TestCase):
         proxy.wait_until(lambda: proxy.chrome_calls("hide_window"))
         self.assertEqual(proxy.chrome_calls("hide_window")[0]["only_at"]["x"], -1900)
         proxy.wait_until(lambda: "call `open` first" in proxy.chrome(op="read")["content"][0]["text"])
+
+    def test_follows_its_desktop_when_macos_moves_it(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        (Path(proxy.home.name) / "desktop-moved").touch()  # another chat's desktop left, so this one moved
+        proxy.end_turn()
+        proxy.wait_until(lambda: proxy.chrome_calls("hide_window"))
+        self.assertEqual(proxy.chrome_calls("hide_window")[0]["only_at"]["x"], -3820)  # where its window is now
+        self.assertFalse(proxy.chrome(op="read")["isError"])  # so the window is still its own
 
     def test_does_several_operations_in_one_call(self):
         proxy = WatchingProxy(self)

@@ -18,9 +18,11 @@ server runs it once per action, and adds what makes it fit for working next to a
   native/ucu-window.swift;
 * apps stay out of the user's way. `ucu-window watch` opens a closed app hidden. Actions work on a hidden app, and a
   click by position that needs a window on screen moves the app to the agent's desktop, a virtual display nobody sees.
-  An app the chat drives can't take the user's focus: if it comes to the front by itself, or makes a window of its out
-  of sight the main one, while the chat works or just after, the user gets theirs back. A click, a modifier key, Return,
-  or their app going out of sight counts as the user switching apps themselves, but their typing doesn't;
+  An app the chat drives can't take the user's focus: if it comes to the front by itself, or gives a window of its out
+  of sight the keyboard, while the chat works or just after, the user gets theirs back. A click, a modifier key, Return,
+  or their app going out of sight counts as the user switching apps themselves, but their typing doesn't. In a browser
+  where the chat has its own window, the window that got the keyboard tells instead: the user can't choose one they
+  don't see;
 * a Safari and a Chrome window of each chat's own through the `safari` and `chrome` tools (native/browser.js);
 * a note when another chat is using the app, through one small file per chat in
   ~/Library/Application Support/ucu/sessions;
@@ -197,7 +199,7 @@ WINDOW_TOOLS = [
                     "tab, the user's too. `open` loads a URL in a new tab of your own hidden window. In your tabs: "
                     "`navigate`, `read` (what: text, html, links, or interactive, which gives refs), `click`, `type`, "
                     "`wait`, `eval` (a function body that returns a value), `upload` and `shot` (a screenshot). "
-                    "`close` closes a tab, or your window without tab_index. window_id and tab_index default to your "
+                    "`close` closes a tab, or all of yours without tab_index. window_id and tab_index default to your "
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks and typing are synthetic, so some logins ignore "
                     "them. `upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
@@ -425,7 +427,8 @@ class BrowserWorkspace:
     role and the keyboard. Safari's stays hidden and its tabs work anyway, but Safari stops painting hidden windows
     after a few seconds, so a screenshot shows it on the agent's desktop until the turn ends. Chrome's is on that
     desktop whenever the chat works in it, where pages behave as on a screen and look and act reach it, and hidden
-    after the turn. Making a Chrome window brings Chrome forward, and ucu-window puts the user's app back."""
+    after the turn. Making a Chrome window brings Chrome forward, and ucu-window puts the user's app back, so the
+    window is made once and outlives its tabs."""
 
     OPERATIONS = {"navigate": "navigate", "read": "read", "click": "click", "type": "type", "wait": "wait_for",
                   "eval": "eval", "upload": "upload"}
@@ -483,7 +486,8 @@ class BrowserWorkspace:
             if state in ("opened", "reopened"):
                 self.server.windows.ask({"park": [self.app]}, PARK_TIMEOUT)
             request["bounds"] = self.place = self.desktop_place()
-        self.server.windows.expect(self.app)  # the agent needn't hear about the window it made
+        # The agent needn't hear about the window it made, nor that making it brought Chrome forward.
+        self.server.windows.expect(self.app, "window", *(["focus"] if self.tool == "chrome" else []))
         self.window = self.call(request)["window_id"]
         self.shown = bool(request.get("bounds"))
         return self.window, True
@@ -513,10 +517,17 @@ class BrowserWorkspace:
         self.place = self.desktop_place()
         if not self.place:
             raise RuntimeError("There is no agent desktop to show the window on, so it can't be captured.")
-        self.server.windows.expect(self.app)  # its own window coming back is no news
+        self.server.windows.expect(self.app, "window")  # its own window coming back is no news
         self.call({"op": "show_window", "window_id": self.window, "bounds": self.place})
         self.shown = True
         return True
+
+    def find_place(self):
+        """Where the window is now. macOS moves a chat's desktop, and the window with it, when another chat's desktop
+        goes away, so the place from when it was shown may be an old one."""
+        if self.shown:
+            self.place = self.desktop_place() or self.place
+        return self.place
 
     def window_number(self):
         """The window server's number for the window, which a screenshot needs. Safari's window ids are those, but
@@ -537,6 +548,7 @@ class BrowserWorkspace:
             time.sleep(SAFARI_PAINT)
         if self.call({"op": "select_tab", **target})["changed"]:
             time.sleep(SAFARI_PAINT)
+        self.find_place()
         return [window_picture(self.window_number(), self.place)]
 
     @staticmethod
@@ -562,7 +574,8 @@ class BrowserWorkspace:
         denied = self.server.denied_apps()
         if denied is None or self.keys & {app_key(app) for app in denied}:
             raise RuntimeError(f"{self.app} is on the user's deny list, or the list can't be read. Tell the user.")
-        self.server.windows.send({"watch": [app_key(self.app)]})  # so it can't take the user's focus
+        # So it can't take the user's focus, while the user can still go to their own windows of it.
+        self.server.windows.send({"watch": [app_key(self.app)], "own": True})
         steps = arguments.get("steps")
         if steps is None:
             return self.run_one(arguments)
@@ -591,15 +604,17 @@ class BrowserWorkspace:
                 result = windows
             elif op == "open":
                 window, created = self.own_window()
-                self.server.windows.expect(self.app, "focus")  # Chrome comes forward when it makes a tab
-                result = self.call({**arguments, "op": "open_tab", "window_id": window, "reuse_blank": created})
+                result = self.go({**arguments, "op": "open_tab", "window_id": window,
+                                  "reuse_blank": created or self.tab is None})
                 self.tab = result["tab_index"]
             elif op == "close" and "tab_index" not in arguments:
-                result = {"closed": self.close_window()}
+                result = {"closed": self.clear_window()}
             elif op == "close":
                 target = self.target(arguments)
                 self.guard(target, arguments)
-                result = self.call({"op": "close_tab", **target})
+                result = self.call({"op": "close_tab", **target, "keep_window": target["window_id"] == self.window})
+                if result.pop("blank", False):
+                    self.tab = None
             elif op == "shot":
                 return self.shot(self.target(arguments))
             elif op == "show":
@@ -615,17 +630,27 @@ class BrowserWorkspace:
                     self.guard(target, arguments)
                 allowed = {key: value for key, value in arguments.items() if not key.startswith("allow_")}
                 timeout = SAFARI_TIMEOUT
-                if op == "navigate":  # Chrome comes forward if the page doesn't let the tab go through it
-                    self.server.windows.expect(self.app, "focus")
                 if op == "upload":
                     allowed["files"], size = self.files(allowed.pop("paths", None))
                     timeout += size / 1_000_000
-                result = self.call({**allowed, **target, "op": self.OPERATIONS[op]}, timeout=timeout)
+                request = {**allowed, **target, "op": self.OPERATIONS[op]}
+                result = self.go(request) if op == "navigate" else self.call(request, timeout=timeout)
                 if op == "read" and isinstance(result.get("content"), list) and arguments.get("what") == "interactive":
                     result["content"] = interactive_lines(result["content"], result.get("url"))
             else:
                 raise RuntimeError(f"Unknown operation {op}. Pass `op`, or `steps`.")
         return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
+
+    def go(self, request):
+        """Load a page in a tab. Chrome comes forward when a tab's address is set, which a page that runs no
+        JavaScript needs. Only then does the helper hear that the agent is bringing Chrome forward, since for that
+        moment it sends the user back from Chrome too, unless they clicked a window of it."""
+        result = self.call(request)
+        if result.get("typed"):
+            self.server.windows.expect(self.app, "focus")
+            result = self.call({**request, "op": "navigate", "window_id": result["window_id"],
+                                "tab_index": result["tab_index"], "typed": True})
+        return result
 
     def reveal_quietly(self):
         """Chrome's window works on the agent's desktop while the chat works; without a desktop it works hidden."""
@@ -634,6 +659,18 @@ class BrowserWorkspace:
                 self.reveal()
             except RuntimeError:
                 pass
+
+    def clear_window(self):
+        """Close the chat's tabs. Its window stays, blank, for the next page: a new one would show for a moment as it
+        is made, and bring Chrome forward."""
+        if self.window is None:
+            return False
+        self.tab = None
+        try:
+            self.call({"op": "clear_window", "window_id": self.window}, timeout=15)
+        except RuntimeError:
+            self.window, self.shown = None, False  # it is gone, so the next page gets a new one
+        return True
 
     def close_window(self):
         window, self.window, self.tab, self.shown = self.window, None, None, False
@@ -649,10 +686,10 @@ class BrowserWorkspace:
         """Hide the window after the turn, unless it has left the agent's desktop: then the user has it."""
         with self.lock:
             if self.shown:
+                place = self.find_place()
                 self.shown = False
                 try:
-                    reply = self.call({"op": "hide_window", "window_id": self.window, "only_at": self.place},
-                                      timeout=15)
+                    reply = self.call({"op": "hide_window", "window_id": self.window, "only_at": place}, timeout=15)
                 except RuntimeError:
                     return
                 if reply.get("moved"):
@@ -1316,7 +1353,10 @@ class Server:
         seen = self.views.get(key)  # without it the agent hasn't read this window, so the result shows all of it
         view = before = seen or self.read(app, window)
         index = 0
+        workspace = self.browser_of(app_key(app))
         while index < len(steps):
+            if workspace and workspace.window is not None:  # a step in a page can bring its browser forward
+                self.windows.send({"ours": app})
             ending = next((at for at in range(index, len(steps)) if self.runs_alone(steps[at])), len(steps))
             step, fresh = steps[index], None
             try:

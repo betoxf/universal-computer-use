@@ -4,8 +4,9 @@ Chrome, whichever the request names.
 
 In Safari the user has window 51 with two tabs, and is viewing the second; in Chrome, window 61 with one tab. A window
 ucu makes is 900 in Safari and 901 in Chrome. State between runs is kept in $FAKE_SAFARI_STATE. A URL containing
-"no-javascript" fails like the browser with JavaScript from Apple Events turned off, and while $HOME/window-moved
-exists, ucu's window has left the agent's desktop.
+"no-javascript" fails like the browser with JavaScript from Apple Events turned off, one containing "no-script" is
+a page Chrome can only reach by having its tab's address set, and while $HOME/window-moved exists, ucu's window has
+left the agent's desktop.
 """
 import json
 import os
@@ -41,6 +42,15 @@ def answer(request, state):
         state["windows"].append({"window_id": NEW_WINDOW[browser], "visible": False, "current_tab_index": 1,
                                  "tabs": []})
         return {"window_id": NEW_WINDOW[browser]}
+    if op in ("open_tab", "navigate") and "no-script" in str(request.get("url")) and not request.get("typed"):
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        if op == "open_tab":
+            window["tabs"].append({"url": "chrome://newtab/"})
+        return {"window_id": request["window_id"], "tab_index": request.get("tab_index", len(window["tabs"])),
+                "typed": True}
+    if op == "navigate" and request.get("typed"):
+        return {"window_id": request["window_id"], "tab_index": request["tab_index"], "url": request["url"],
+                "title": "T", "loaded": True}
     if op == "open_tab":
         window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
         window["tabs"].append({"url": request["url"]})
@@ -48,6 +58,13 @@ def answer(request, state):
                 "title": "T", "loaded": True}
     if op == "close_window":
         state["windows"] = [window for window in state["windows"] if window["window_id"] != request["window_id"]]
+    if op == "clear_window" or (op == "close_tab" and request.get("keep_window")):
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        if op == "clear_window" or len(window["tabs"]) == 1:
+            window["tabs"] = []
+            return {"closed": True, "blank": True}
+        window["tabs"].pop(request["tab_index"] - 1)
+        return {"closed": True}
     if op == "select_tab":
         return {"changed": False}
     if op == "read" and request.get("what") == "interactive":

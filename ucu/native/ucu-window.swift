@@ -198,6 +198,14 @@ final class AgentDesktop {
         return CGDisplayVendorNumber(display) == vendor
     }
 
+    // Whether a place is on an agent's desktop: on no screen, a window may be one the user is moving.
+    static func holds(_ point: CGPoint) -> Bool {
+        var display: CGDirectDisplayID = 0
+        var count: UInt32 = 0
+        return CGGetDisplaysWithPoint(point, 1, &display, &count) == .success && count > 0
+            && CGDisplayVendorNumber(display) == vendor
+    }
+
     func takeSlot() -> UInt32? {
         let folder = NSHomeDirectory() + "/Library/Application Support/ucu"
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
@@ -468,6 +476,7 @@ final class AgentCursor {
 //   {"id": 3, "desktop": true}                          make the agent's desktop and say where it is
 //   {"id": 4, "park": ["Blender"]}                      move apps' windows to that desktop and show them there
 //   {"watch": ["safari"]}                               report these apps' new windows from now on
+//   {"watch": ["safari"], "own": true}                  and the agent works there in a window of its own
 //   {"busy": true}                                      an agent's call began (false: it ended)
 //   {"allow": "Blender"}                                bring this app back and let it come to the front just now
 //   {"ours": "Google Chrome"}                           the agent is about to bring this app forward: always undo it
@@ -479,7 +488,7 @@ final class AgentCursor {
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
-// it gave one of its windows out of sight the keyboard and the user's window got it back.
+// it gave one of its windows out of sight the keyboard, while the user was in that app, and their window got it back.
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
                                             "AuthenticationServicesAgent", "coreautha"]
@@ -490,6 +499,7 @@ final class Watcher {
     static let putBackCheck = 0.1, putBackTries = 3, oursGrace = 3.0, quitWait = 3.0
 
     var watched = Set<String>()
+    var own = Set<String>()  // the watched apps where the agent works in a window of its own, never in the user's
     var driven = [NSRunningApplication]()  // the watched apps that were running when the last call began
     var seenWindows = [pid_t: [AXUIElement]]()
     var seenDialogs = Set<Int>()
@@ -503,7 +513,6 @@ final class Watcher {
     var guardUntil = Date.distantPast  // until then, the apps this chat drives can't take the user's focus
     var front = NSWorkspace.shared.frontmostApplication
     var userWindows = [pid_t: AXUIElement]()  // each driven app's window the user last had, which they can see
-    var guardTicks = 0
     var allowed: pid_t?
     var allowedUntil = Date.distantPast
     var oursUntil = [pid_t: Date]()  // until when an app comes forward because of the agent, whatever the user does
@@ -547,7 +556,9 @@ final class Watcher {
             }
             DispatchQueue.main.async { self.finish() }
         }
-        RunLoop.main.run()
+        // macOS moves an agent's desktop when another chat's goes away. A process sees where its displays are now only
+        // while it takes the window server's events, which the application's own loop does and a bare run loop doesn't.
+        NSApplication.shared.run()
         exit(0)
     }
 
@@ -597,7 +608,7 @@ final class Watcher {
         var tucked = false
         for pid in owners {
             let list: [AXUIElement] = attribute(appElement(pid), kAXWindowsAttribute) ?? []
-            for window in list where Self.isOutOfSight(window) {
+            for window in list where Self.frame(of: window).map(area.intersects) ?? false {  // not another chat's
                 tucked = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
                     == .success || tucked
             }
@@ -619,6 +630,7 @@ final class Watcher {
         }
         if let names = command["watch"] as? [String] {
             watched.formUnion(names.map(key))
+            if command["own"] as? Bool == true { own.formUnion(names.map(key)) }
             driven = watched.compactMap(running)
         }
         if let name = command["ours"] as? String, let app = running(name) {
@@ -1025,15 +1037,49 @@ final class Watcher {
         }
         // An app this chat drives can't come forward by itself while the chat works and for a while after, nor one ucu
         // opened, whose place is out of sight, while the chat runs. When the agent is bringing it forward, the user's
-        // clicks have nothing to do with it. The user's app must still be in sight: if it isn't, they went to another
-        // Space themselves.
+        // clicks elsewhere have nothing to do with it. The user's app must still be in sight: if it isn't, they went to
+        // another Space themselves.
         guard (Date() < guardUntil && driven.contains(app)) || owned || ours else { return }
-        if !ours, Self.userSwitched() { return log("\(over): left in front, as the user clicked or switched apps") }
+        // A click on the app's own window is the user's, even as the agent's step brings the app forward.
+        if ours, Self.clicked(app) {
+            giveKeyboardBack(in: app)
+            return log("\(over): left in front, as the user clicked it")
+        }
+        // Where the agent works in a window of its own, ucu hears of each step of the agent's that brings the app
+        // forward. At any other time it is the user who comes to it, to a window of theirs, and input doesn't tell
+        // that well: a link they click opens its page seconds later, and a launcher takes only keys.
+        if !ours, isOwn(app), hasWindowInSight(app) {
+            giveKeyboardBack(in: app)
+            return log("\(over): left in front, as no step of the agent's was bringing it forward")
+        }
+        if !ours, Self.userSwitched() {
+            giveKeyboardBack(in: app)
+            return log("\(over): left in front, as the user clicked or switched apps")
+        }
         if previous.isHidden || !Self.isOnScreen(previous) {
             return log("\(over): left in front, as the user's app was out of sight")
         }
         putBack(previous, over: app, ours: ours, why: ours ? "the agent's step brought it" : "it came by itself")
         if owned, parked[pid] == nil { app.hide() }  // without a desktop, ucu's app goes back into hiding
+    }
+
+    func isOwn(_ app: NSRunningApplication) -> Bool {
+        [app.localizedName, app.bundleIdentifier].contains { $0.map { own.contains(key($0)) } ?? false }
+    }
+
+    func hasWindowInSight(_ app: NSRunningApplication) -> Bool {
+        let windows: [AXUIElement] = attribute(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+        return windows.contains { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
+    }
+
+    // Whether the user's last click, a moment ago, was on a window of this app.
+    static func clicked(_ app: NSRunningApplication) -> Bool {
+        guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(where: { secondsSince($0) < switchWindow }),
+              let pointer = CGEvent(source: nil)?.location else { return false }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let top = list.first { ($0[kCGWindowLayer as String] as? Int) == 0 && bounds(of: $0).contains(pointer) }
+        return (top?[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier)
     }
 
     // The user's app comes back to the front. Asking it can fail while it is busy, so it is asked again.
@@ -1049,7 +1095,7 @@ final class Watcher {
         guard tries > 1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.putBackCheck) { [self] in
             let stays = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
-            guard stays, ours || !Self.userSwitched() else { return }
+            guard stays, ours ? !Self.clicked(app) : !Self.userSwitched() else { return }
             if tries == 2 { log("\(app.localizedName ?? "?") stayed in front after ucu asked twice: asking once more") }
             putBack(previous, over: app, ours: ours, why: why, tries: tries - 1)
         }
@@ -1083,40 +1129,55 @@ final class Watcher {
         return formatter
     }()
 
-    // In an app this chat drives, a window out of sight can become the main one, such as the agent's browser window on
-    // its desktop when it shows or opens a popup. In the app the user is in, their typing would go there; in another,
-    // it would get the keyboard as soon as they switch to that app. So their window gets the main role back. The app
-    // they are in is checked at every tick, the others now and then, and parked apps have no window of theirs.
+    // In the app the user is in, a window out of their sight can get the keyboard, such as the agent's browser
+    // window on its desktop when it shows or opens a popup, and their typing would go there. So their window gets it
+    // back. Behind another app there is no keyboard to take, and the user's window gets it as they come to the app.
     func guardWindow() {
-        guardTicks += 1
-        for app in driven where !app.isTerminated && !app.isHidden && parked[app.processIdentifier] == nil
-            && (app.isActive || guardTicks % 5 == 0) {
-            let pid = app.processIdentifier, element = appElement(pid), isFront = app.isActive
-            let role = isFront ? kAXFocusedWindowAttribute : kAXMainWindowAttribute
-            guard let current: AXUIElement = attribute(element, role) else { continue }
-            guard Self.isOutOfSight(current) else {
-                userWindows[pid] = current
-                continue
-            }
-            let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
-            let known = userWindows[pid].flatMap { mine in windows.first { CFEqual($0, mine) } }
-            let inSight = windows.first { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
-            guard !(isFront && Self.userSwitched()), let theirs = known ?? inSight else { continue }
-            AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
-            log("\(app.localizedName ?? "?") made a window out of sight its main one: the user's window got it back")
-            guard isFront else { continue }  // nobody was typing: nothing to tell
-            AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
-            emit(["event": "focus", "app": app.localizedName ?? "?", "back": title(theirs), "window": true])
+        for app in driven where app.isActive && !app.isTerminated && !app.isHidden
+            && parked[app.processIdentifier] == nil {
+            giveKeyboardBack(in: app)
         }
+    }
+
+    func giveKeyboardBack(in app: NSRunningApplication) {
+        let pid = app.processIdentifier, element = appElement(pid)
+        guard let current: AXUIElement = attribute(element, kAXFocusedWindowAttribute) else { return }
+        guard Self.isOutOfSight(current) else {
+            userWindows[pid] = current
+            return
+        }
+        // On no screen, it may be a window the user is moving. On an agent's desktop it is never theirs.
+        if !Self.isOnAgentDesktop(current), Self.userSwitched() { return }
+        let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
+        let known = userWindows[pid].flatMap { mine in windows.first { CFEqual($0, mine) } }
+        let inSight = windows.first { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
+        guard let theirs = known ?? inSight else { return }
+        AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
+        log("\(app.localizedName ?? "?") gave a window out of sight the keyboard: the user's window got it back")
+        emit(["event": "focus", "app": app.localizedName ?? "?", "back": title(theirs), "window": true])
+    }
+
+    static func frame(of window: AXUIElement) -> CGRect? {
+        var origin = CGPoint.zero, size = CGSize.zero
+        guard let place: AXValue = attribute(window, kAXPositionAttribute), AXValueGetValue(place, .cgPoint, &origin)
+        else { return nil }
+        if let value: AXValue = attribute(window, kAXSizeAttribute) { AXValueGetValue(value, .cgSize, &size) }
+        return CGRect(origin: origin, size: size)
+    }
+
+    // The middle of a window's title bar, which says what screen it is on.
+    static func titleBar(of window: AXUIElement) -> CGPoint? {
+        frame(of: window).map { CGPoint(x: $0.midX, y: $0.minY + min($0.height / 2, 20)) }
     }
 
     // Whether a window is where the user can't see it: on an agent's desktop, or on no screen.
     static func isOutOfSight(_ window: AXUIElement) -> Bool {
-        var origin = CGPoint.zero, size = CGSize.zero
-        guard let place: AXValue = attribute(window, kAXPositionAttribute), AXValueGetValue(place, .cgPoint, &origin)
-        else { return false }
-        if let value: AXValue = attribute(window, kAXSizeAttribute) { AXValueGetValue(value, .cgSize, &size) }
-        return AgentDesktop.isOutOfSight(CGPoint(x: origin.x + size.width / 2, y: origin.y + min(size.height / 2, 20)))
+        titleBar(of: window).map(AgentDesktop.isOutOfSight) ?? false
+    }
+
+    static func isOnAgentDesktop(_ window: AXUIElement) -> Bool {
+        titleBar(of: window).map(AgentDesktop.holds) ?? false
     }
 }
 
