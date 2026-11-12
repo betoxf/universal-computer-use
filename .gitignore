@@ -3,3 +3,6 @@ __pycache__/
 *.log
 *.bak-*
 .claude/worktrees/
+
+# Claude Code local permissions (may hold approved commands/secrets)
+.claude/settings.local.json
