@@ -12,7 +12,8 @@
 The server approves every app except those denied in ~/Library/Application Support/ucu/policy.json,
 which install writes once (denying password managers, Keychain Access and System Settings) and then
 keeps. Install builds the engine, agent-desktop from this repository, to ~/.local/bin/ucu-engine, and
-ucu-window to ~/.local/bin/ucu-window.
+ucu-window to ~/.local/bin/ucu-window. Where Chrome is set up, it also lets ucu's Chrome extension
+(chrome-extension/, loaded by hand once) start its host, scripts/ucu-chrome-host.py.
 
 install backs up what it changes outside this repo to
 ~/Library/Application Support/ucu/backups/<time>/ first.
@@ -55,6 +56,12 @@ UPDATE_LOG_LIMIT = 1_000_000  # bytes; the log then moves to update.log.1 and st
 SEARCH_PATH = os.pathsep.join(
     [str(HOME / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", ""), "/usr/bin", "/bin"]
 )
+
+CHROME = HOME / "Library/Application Support/Google/Chrome"
+CHROME_HOST = "com.ucu.companion"  # the name chrome-extension/worker.js connects to
+CHROME_EXTENSION = "ddfnafenkalcehfggkpmlehmnamkonlp"  # the id that the key in chrome-extension/manifest.json gives
+CHROME_HOST_MANIFEST = CHROME / f"NativeMessagingHosts/{CHROME_HOST}.json"
+CHROME_HOST_LAUNCHER = HOME / ".local/bin/ucu-chrome-host"
 
 SERVER = "ucu"
 STOP_HOOK = 'pkill -INFO -P "$PPID" -f ucu-proxy.py; exit 0'
@@ -207,6 +214,25 @@ def set_opencode(python, folder=None):
     say("✓", f"{'registered' if python else 'removed'} {SERVER} in {OPENCODE_CONFIG}")
 
 
+# --- Chrome extension ---------------------------------------------------------
+def set_chrome_host(python):
+    """Let ucu's Chrome extension start its host, if Chrome is set up; with python=None, take that away."""
+    if not python:
+        CHROME_HOST_MANIFEST.unlink(missing_ok=True)
+        CHROME_HOST_LAUNCHER.unlink(missing_ok=True)
+        return
+    if not CHROME.exists():
+        return
+    CHROME_HOST_LAUNCHER.parent.mkdir(parents=True, exist_ok=True)  # Chrome runs a program, not a command line
+    CHROME_HOST_LAUNCHER.write_text(f'#!/bin/sh\nexec "{python}" -I "{REPO / "scripts/ucu-chrome-host.py"}"\n')
+    CHROME_HOST_LAUNCHER.chmod(0o755)
+    write_json(CHROME_HOST_MANIFEST, {
+        "name": CHROME_HOST, "description": "Universal Computer Use", "path": str(CHROME_HOST_LAUNCHER),
+        "type": "stdio", "allowed_origins": [f"chrome-extension://{CHROME_EXTENSION}/"]})
+    say("✓", f"registered the host of ucu's Chrome extension; to use it, load {REPO / 'chrome-extension'} once at "
+             "chrome://extensions (Developer mode, Load unpacked)")
+
+
 # --- approval policy ----------------------------------------------------------
 def read_policy():
     try:
@@ -325,6 +351,7 @@ def install(python):
     set_stop_hook(True)
     say("✓", f"set ucu's Stop hook in {SETTINGS}")
     set_opencode(python, folder)
+    set_chrome_host(python)
     print(f'Done. New sessions get `{SERVER}`; open ones need a restart. Run `./ucu deny "App Name"` to block an app.')
     return 0
 
@@ -335,6 +362,7 @@ def uninstall():
     if SERVER in mcp_servers():
         claude("mcp", "remove", SERVER, "-s", "user")
     set_opencode(None)
+    set_chrome_host(None)
     proxy.WINDOW_HELPER.unlink(missing_ok=True)
     proxy.ENGINE.unlink(missing_ok=True)
     say("✓", f"removed {SERVER}, its hook, ucu-window and the engine (your policy stays in {proxy.POLICY})")

@@ -3,7 +3,12 @@ import base64
 import importlib.util
 import json
 import os
+import socket
+import struct
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -657,6 +662,108 @@ class ChromeTest(unittest.TestCase):
         proxy.report(event="window", app="Google Chrome", kind="window", title="New Tab", text="", buttons=[],
                      main=False)
         self.assertEqual(proxy.notes(proxy.look()), [])
+
+
+class CompanionProxy(WatchingProxy):
+    """A server next to a stand-in for ucu's Chrome extension and its host, answering on their socket. Window 902 is
+    the one the extension makes, in the Chrome that the fake osascript answers for. It can't do what `refuses` names."""
+
+    def __init__(self, test, refuses=()):
+        usual, tempfile.tempdir = tempfile.tempdir, "/tmp"  # a socket's path has to be short
+        try:
+            super().__init__(test)
+        finally:
+            tempfile.tempdir = usual
+        self.asked, self.refuses = [], refuses
+        self.listener = socket.socket(socket.AF_UNIX)
+        self.listener.bind(str(Path(self.home.name) / "Library/Application Support/ucu/chrome.sock"))
+        self.listener.listen()
+        test.addCleanup(self.listener.close)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                link, _ = self.listener.accept()
+            except OSError:
+                return
+            with link:
+                request = json.loads(link.makefile().readline())
+                self.asked.append(request)
+                reply = {"ok": True, "result": {"went": True}}
+                if request["op"] in self.refuses:
+                    reply = {"ok": False, "error": "Invalid value for bounds."}
+                elif request["op"] == "create_window":
+                    state = Path(self.home.name) / "safari.json"
+                    browsers = json.loads(state.read_text())
+                    browsers["chrome"]["windows"].append({"window_id": 902, "visible": True, "current_tab_index": 1,
+                                                          "tabs": []})
+                    state.write_text(json.dumps(browsers))
+                    reply = {"ok": True, "result": {"window_id": 902}}
+                link.sendall((json.dumps(reply) + "\n").encode())
+
+
+class CompanionTest(unittest.TestCase):
+    def test_makes_its_chrome_window_through_the_extension_when_it_answers(self):
+        proxy = CompanionProxy(self)
+        opened = json.loads(proxy.chrome(op="open", url="https://a.test")["content"][0]["text"])
+        proxy.chrome(op="open", url="https://b.test")
+        self.assertEqual(opened["window_id"], 902)
+        self.assertEqual(proxy.asked, [{"op": "create_window",
+                                        "bounds": {"x": -1900, "y": -1160, "width": 1280, "height": 900}}])
+        self.assertEqual(proxy.chrome_calls("create_window"), [])
+        self.assertEqual(proxy.commands("ours"), [])  # nothing brought Chrome forward
+
+    def test_has_the_extension_load_a_page_that_runs_no_script(self):
+        proxy = CompanionProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        opened = json.loads(proxy.chrome(op="open", url="chrome://no-script/")["content"][0]["text"])
+        self.assertEqual(opened["url"], "chrome://no-script/")
+        self.assertEqual(proxy.asked[1], {"op": "navigate", "window_id": 902, "tab_index": 2,
+                                          "url": "chrome://no-script/"})
+        self.assertEqual([(call.get("sent"), call.get("typed")) for call in proxy.chrome_calls("navigate")],
+                         [(True, None)])
+        self.assertEqual(proxy.commands("ours"), [])
+
+    def test_goes_through_applescript_when_the_extension_cannot(self):
+        proxy = CompanionProxy(self, refuses=("create_window", "navigate"))
+        opened = json.loads(proxy.chrome(op="open", url="https://a.test")["content"][0]["text"])
+        proxy.chrome(op="navigate", url="chrome://no-script/")
+        self.assertEqual(opened["window_id"], 901)
+        self.assertEqual([request["op"] for request in proxy.asked], ["create_window", "navigate"])
+        self.assertEqual(len(proxy.chrome_calls("create_window")), 1)
+        self.assertTrue(proxy.chrome_calls("navigate")[-1]["typed"])
+        self.assertEqual(len(proxy.commands("ours")), 2)  # as without the extension
+
+    def test_leaves_safari_to_applescript(self):
+        proxy = CompanionProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertEqual(proxy.asked, [])
+        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
+
+    def test_its_host_relays_between_the_chats_and_the_extension(self):
+        home = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(home.cleanup)
+        host = subprocess.Popen([sys.executable, "-I", str(ROOT / "scripts/ucu-chrome-host.py")],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, env={**os.environ, "HOME": home.name})
+        self.addCleanup(host.kill)
+        path = Path(home.name) / "Library/Application Support/ucu/chrome.sock"
+        deadline = time.time() + 5
+        while not path.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        with socket.socket(socket.AF_UNIX) as chat:
+            chat.connect(str(path))
+            chat.sendall(b'{"op": "navigate", "url": "chrome://version"}\n')
+            request = json.loads(host.stdout.read(struct.unpack("=I", host.stdout.read(4))[0]))
+            self.assertEqual((request["op"], request["url"]), ("navigate", "chrome://version"))
+            reply = json.dumps({"id": request["id"], "ok": True, "result": {"went": True}}).encode()
+            host.stdin.write(struct.pack("=I", len(reply)) + reply)
+            host.stdin.flush()
+            self.assertEqual(json.loads(chat.makefile().readline())["result"], {"went": True})
+        host.stdin.close()  # Chrome went away
+        self.assertEqual(host.wait(5), 0)
+        self.assertFalse(path.exists())
+        host.stdout.close()
 
 
 class FocusNoteTest(unittest.TestCase):
