@@ -168,6 +168,22 @@ class WatchTest(unittest.TestCase):
         self.assertIn("private desktop", proxy.text(proxy.call("move_to_desktop", app="Calculator")))
         self.assertEqual(proxy.commands("park")[0]["park"], ["Calculator"])
 
+    def test_shows_the_user_its_desktop_live_when_asked(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertIn("live", proxy.text(proxy.call("mirror")))
+        self.assertEqual(proxy.commands("mirror")[0]["mirror"], True)
+        self.assertEqual(len(proxy.safari_calls("show_window")), 1)  # its Safari window works where the user watches
+        self.assertIn("closed", proxy.text(proxy.call("mirror", show=False)))
+        self.assertEqual(proxy.commands("mirror")[-1]["mirror"], False)
+
+    def test_says_why_the_user_cant_watch(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "no-screen-recording").touch()
+        reply = proxy.call("mirror")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("didn't let ucu see", proxy.text(reply))
+
     def test_tells_the_agent_when_a_running_app_got_a_window(self):
         proxy = WatchingProxy(self)
         self.assertIn("had no open window", proxy.notes(proxy.look("Empty App"))[0])
@@ -583,15 +599,16 @@ class ChromeTest(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn("Sign in", notes[0])
 
-    def test_shows_its_page_as_a_tab_of_the_users_window(self):
+    def test_shows_the_user_a_copy_and_keeps_working_in_its_own_tab(self):
         proxy = WatchingProxy(self)
         proxy.chrome(op="open", url="https://a.test")
         shown = json.loads(proxy.chrome(op="show")["content"][0]["text"])
         self.assertEqual((shown["window_id"], shown["tab_index"]), (61, 2))
-        self.assertIn("allow_user_tab", shown["note"])
-        self.assertEqual(len(proxy.chrome_calls("clear_window")), 1)  # one copy of the page, the user's
+        self.assertIn("window 901, tab 1", shown["note"])
+        self.assertEqual(proxy.chrome_calls("clear_window"), [])  # the agent's page stays where it works
         self.assertIn("Google Chrome", [command["allow"] for command in proxy.commands("allow")])
-        self.assertIn("call `open` first", proxy.chrome(op="read")["content"][0]["text"])
+        self.assertFalse(proxy.chrome(op="read")["isError"])
+        self.assertEqual(proxy.chrome_calls("read")[-1]["window_id"], 901)
         proxy.chrome(op="open", url="https://b.test")
         self.assertEqual(len(proxy.chrome_calls("create_window")), 1)  # its own window stayed, out of sight
         proxy.process.stdin.close()

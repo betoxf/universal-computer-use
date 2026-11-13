@@ -14,8 +14,8 @@ server runs it once per action, and adds what makes it fit for working next to a
 * a deny list: ~/Library/Application Support/ucu/policy.json holds the apps agents can't touch, read at every call. Each
   app a chat starts using goes to ~/Library/Logs/ucu/approve.log with the client and folder. If the file can't be read,
   no app is used;
-* `list_windows`, `focus_window` and `move_to_desktop`, through ~/.local/bin/ucu-window, which `ucu install` builds from
-  native/ucu-window.swift;
+* `list_windows`, `focus_window`, `move_to_desktop` and `mirror`, through ~/.local/bin/ucu-window, which
+  `ucu install` builds from native/ucu-window.swift;
 * apps stay out of the user's way. `ucu-window watch` opens a closed app hidden. Actions work on a hidden app, and a
   click by position that needs a window on screen moves the app to the agent's desktop, a virtual display nobody sees.
   An app the chat drives can't take the user's focus: if it comes to the front by itself, or gives a window of its out
@@ -142,7 +142,8 @@ it, and when you know an element's name, act on it by `name` without looking fir
 - With several windows, pass part of a title as `window`. Calls for different apps can run together.
 - Everything works in the background. Bring an app to the front only when the user asks to see it or be taken \
 there (focus_window with activate, or `show` in the browser tools), never to make an action work, and never use the \
-clipboard, which is theirs. If something can't be done in the background, ask the user.
+clipboard, which is theirs. If something can't be done in the background, ask the user. When they want to watch \
+you work, `mirror` shows them your private desktop live, in a small window that never takes their focus.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in your own window while the user is in \
 theirs. Put what belongs together in one call's `steps`.
@@ -200,6 +201,10 @@ WINDOW_TOOLS = [
                     "with clicks by coordinates and screenshots too. focus_window with activate: true brings them "
                     "back.",
      "inputSchema": {"type": "object", "properties": {"app": APP_PROPERTY}, "required": ["app"]}},
+    {"name": "mirror",
+     "description": "Show the user your private desktop live in a small corner window that never takes their focus, "
+                    "only when they ask to watch you work. It closes as your turn ends, or with `show: false`.",
+     "inputSchema": {"type": "object", "properties": {"show": {"type": "boolean"}}}},
     {"name": "safari",
      "description": "Work in Safari without touching the user's windows or taking focus. `list` shows every window and "
                     "tab, the user's too. `open` loads a URL in a new tab of your own hidden window. In your tabs: "
@@ -209,9 +214,9 @@ WINDOW_TOOLS = [
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks and typing are synthetic, so some logins ignore "
                     "them. `upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
-                    "drops them on an element, with no picker: confirm with the user first. `show` opens your page as "
-                    "a tab of the user's window and brings it to them, only when they asked to see it; that tab is "
-                    "theirs after that. When they say they did something in the browser, `list` shows the tab. `steps` runs several "
+                    "drops them on an element, with no picker: confirm with the user first. `show` opens a copy of your "
+                    "page in a tab of the user's window, only when they asked to see it, such as to sign in; "
+                    "you keep yours. When they say they did something in the browser, `list` shows the tab. `steps` runs several "
                     "operations in one call, each {op, ...}, and stops at the first that fails.",
      "inputSchema": {"type": "object", "properties": {
          "op": {"enum": ["list", "open", "navigate", "read", "click", "type", "wait", "eval", "upload", "shot",
@@ -652,10 +657,12 @@ class BrowserWorkspace:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.call({"op": "show_to_user", **target})
-                if result.pop("in_their_window", False):
-                    self.clear_window()  # one copy of the page, the one they see; the window stays for the next page
-                    result["note"] = ("Your page is now a tab of the user's window, and theirs. Keep working there "
-                                      "with allow_user_tab and allow_current_tab, as they asked to see it.")
+                if result.pop("in_their_window", False):  # a copy: the agent keeps working in its own tab
+                    result["note"] = (f"The user has a copy of your page in their window (window {result['window_id']}, "
+                                      f"tab {result['tab_index']}), which is theirs. Keep working in your own tab "
+                                      f"(window {target['window_id']}, tab {target['tab_index']}). Their sign-ins "
+                                      "reach it, since it is the same browser: when they say they are done, reload "
+                                      "yours by navigating to its address again.")
                 else:
                     self.window, self.tab, self.shown, self.place = None, None, False, None  # the window is theirs
             elif op in self.OPERATIONS:
@@ -692,8 +699,9 @@ class BrowserWorkspace:
         return result
 
     def reveal_quietly(self):
-        """Chrome's window works on the agent's desktop while the chat works; without a desktop it works hidden."""
-        if self.tool == "chrome":
+        """Chrome's window works on the agent's desktop while the chat works, and Safari's while the user watches it
+        there; without a desktop it works hidden."""
+        if self.tool == "chrome" or self.server.mirroring:
             try:
                 self.reveal()
             except RuntimeError:
@@ -1089,6 +1097,7 @@ class Server:
         self.sessions = Sessions()
         self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker)
         self.browsers = {tool: BrowserWorkspace(self, tool) for tool in BROWSERS}
+        self.mirroring = False              # the user watches the agent's desktop, until the turn ends
         self.used_apps = set()              # apps this chat has driven, as app_key names
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
@@ -1198,6 +1207,8 @@ class Server:
             return self.browsers[name].run(arguments)
         if name == "move_to_desktop":
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
+        elif name == "mirror":
+            text, failed = self.mirror(arguments.get("show", True) is not False)
         else:
             text, failed = run_window_tool(name, arguments)
         if failed:
@@ -1305,6 +1316,24 @@ class Server:
             self.hidden_apps[app_key(app)] = app
             self.parked_apps.add(app_key(app))
         return f"{app} is on your private desktop.", False
+
+    def mirror(self, on):
+        """Show or close the user's live view of the agent's desktop. While it shows, Safari's window works on the
+        desktop too, as Chrome's always does, so the view has the agent's pages in it."""
+        self.mirroring = on
+        if not on:
+            self.windows.ask({"mirror": False}, SHOW_TIMEOUT)
+            return "The view of your desktop is closed.", False
+        self.windows.start()
+        reply = self.windows.ask({"mirror": True}, PARK_TIMEOUT)
+        if not reply or not reply.get("shown"):
+            self.mirroring = False
+            return (reply or {}).get("error") or "ucu-window didn't answer, so there is no view to show.", True
+        for workspace in self.browsers.values():
+            with workspace.lock:
+                workspace.reveal_quietly()
+        return ("The user sees your private desktop live, in a small window in a corner of their screen. It closes "
+                "when your turn ends."), False
 
     # --- look and act -----------------------------------------------------
     def window_id(self, app, title):
@@ -1655,6 +1684,7 @@ class Server:
 
     # --- turn ends and idle stops -----------------------------------------
     def hide_browsers(self):
+        self.mirroring = False  # the view goes with the turn
         for workspace in self.browsers.values():
             workspace.hide()
 
