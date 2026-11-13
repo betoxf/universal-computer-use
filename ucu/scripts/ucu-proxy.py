@@ -14,8 +14,8 @@ server runs it once per action, and adds what makes it fit for working next to a
 * a deny list: ~/Library/Application Support/ucu/policy.json holds the apps agents can't touch, read at every call. Each
   app a chat starts using goes to ~/Library/Logs/ucu/approve.log with the client and folder. If the file can't be read,
   no app is used;
-* `list_windows`, `focus_window`, `move_to_desktop` and `mirror`, through ~/.local/bin/ucu-window, which
-  `ucu install` builds from native/ucu-window.swift;
+* `list_windows`, `focus_window` and `move_to_desktop`, through ~/.local/bin/ucu-window, which `ucu install` builds from
+  native/ucu-window.swift;
 * apps stay out of the user's way. `ucu-window watch` opens a closed app hidden. Actions work on a hidden app, and a
   click by position that needs a window on screen moves the app to the agent's desktop, a virtual display nobody sees.
   An app the chat drives can't take the user's focus: if it comes to the front by itself, or gives a window of its out
@@ -100,6 +100,7 @@ PARK_TIMEOUT, SHOT_TIMEOUT = 6, 15
 SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
+TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
 SAFARI_TIMEOUT = 45   # seconds; a page showing a dialog blocks every script until it is answered
 SAFARI_PAINT = 0.45   # seconds Safari takes to paint a page that has been hidden
 ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
@@ -142,8 +143,7 @@ it, and when you know an element's name, act on it by `name` without looking fir
 - With several windows, pass part of a title as `window`. Calls for different apps can run together.
 - Everything works in the background. Bring an app to the front only when the user asks to see it or be taken \
 there (focus_window with activate, or `show` in the browser tools), never to make an action work, and never use the \
-clipboard, which is theirs. If something can't be done in the background, ask the user. When they want to watch \
-you work, `mirror` shows them your private desktop live, in a small window that never takes their focus.
+clipboard, which is theirs. If something can't be done in the background, ask the user.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in your own window while the user is in \
 theirs. Put what belongs together in one call's `steps`.
@@ -201,10 +201,6 @@ WINDOW_TOOLS = [
                     "with clicks by coordinates and screenshots too. focus_window with activate: true brings them "
                     "back.",
      "inputSchema": {"type": "object", "properties": {"app": APP_PROPERTY}, "required": ["app"]}},
-    {"name": "mirror",
-     "description": "Show the user your private desktop live in a small corner window that never takes their focus, "
-                    "only when they ask to watch you work. It closes as your turn ends, or with `show: false`.",
-     "inputSchema": {"type": "object", "properties": {"show": {"type": "boolean"}}}},
     {"name": "safari",
      "description": "Work in Safari without touching the user's windows or taking focus. `list` shows every window and "
                     "tab, the user's too. `open` loads a URL in a new tab of your own hidden window. In your tabs: "
@@ -214,13 +210,13 @@ WINDOW_TOOLS = [
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks and typing are synthetic, so some logins ignore "
                     "them. `upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
-                    "drops them on an element, with no picker: confirm with the user first. `show` opens a copy of your "
-                    "page in a tab of the user's window, only when they asked to see it, such as to sign in; "
-                    "you keep yours. When they say they did something in the browser, `list` shows the tab. `steps` runs several "
+                    "drops them on an element, with no picker: confirm with the user first. `show` brings your window "
+                    "to the user's screen, only when they ask to see it or must act in it, such as to sign in: they "
+                    "use it while you keep working in it, and `hide` takes it back. `steps` runs several "
                     "operations in one call, each {op, ...}, and stops at the first that fails.",
      "inputSchema": {"type": "object", "properties": {
          "op": {"enum": ["list", "open", "navigate", "read", "click", "type", "wait", "eval", "upload", "shot",
-                         "show", "close"]},
+                         "show", "hide", "close"]},
          "url": {"type": "string"}, "window_id": {"type": "integer"}, "tab_index": {"type": "integer"},
          "what": {"enum": ["text", "html", "links", "interactive"]}, "selector": {"type": "string"},
          "ref": {"type": "string"}, "text": {"type": "string"}, "clear": {"type": "boolean"},
@@ -441,7 +437,11 @@ class BrowserWorkspace:
     desktop whenever the chat works in it, where pages behave as on a screen and look and act reach it, and hidden
     after the turn. Making a Chrome window through AppleScript brings Chrome forward, and ucu-window puts the user's
     app back, so the window is made once and outlives its tabs. ucu's Chrome extension makes it with Chrome staying
-    behind, and AppleScript knows that window by the same id."""
+    behind, and AppleScript knows that window by the same id.
+
+    `show` puts the window on the user's screen, where they use it too while the chat keeps working in it, until
+    `hide` takes it back. Meanwhile it is `shared`: it stays where the user has it, also when the turn or the chat
+    ends, and since they open, close and move tabs in it, the chat finds its own tab again before each step."""
 
     OPERATIONS = {"navigate": "navigate", "read": "read", "click": "click", "type": "type", "wait": "wait_for",
                   "eval": "eval", "upload": "upload"}
@@ -451,6 +451,8 @@ class BrowserWorkspace:
         self.server, self.tool = server, tool
         self.app, self.keys, self.setting = BROWSERS[tool]
         self.window, self.tab, self.shown, self.place = None, None, False, None
+        self.shared = False  # the window is on the user's screen, for them to use too
+        self.known = None    # what told its tabs apart when the chat last looked, while it is shared
         self.lock = threading.Lock()
 
     def call(self, request, timeout=SAFARI_TIMEOUT):
@@ -531,6 +533,8 @@ class BrowserWorkspace:
         tab = arguments.get("tab_index", self.tab if window == self.window else None)
         if window is None or tab is None:
             raise RuntimeError("No tab yet: call `open` first, or pass window_id and tab_index from `list`.")
+        if self.shared and window == self.window and self.tab is None:
+            self.tab = tab  # the agent said which tab is its own, after the user's changes hid that
         return {"window_id": window, "tab_index": tab}
 
     def guard(self, target, arguments):
@@ -546,7 +550,7 @@ class BrowserWorkspace:
 
     def reveal(self):
         """Put the window on the agent's desktop for the rest of the turn; return whether it just went there."""
-        if self.shown or self.window is None:
+        if self.shared or self.shown or self.window is None:
             return False
         self.place = self.desktop_place()
         if not self.place:
@@ -578,6 +582,13 @@ class BrowserWorkspace:
     def shot(self, target):
         if target["window_id"] != self.window:
             raise RuntimeError("A screenshot works on your own window only.")
+        if self.shared:  # the user may be on another tab of it, and it is wherever they moved it
+            window = self.window_tabs() or {}
+            if window.get("current_tab_index") != target["tab_index"]:
+                raise RuntimeError("The user is on another tab of your window, and a screenshot would switch it. "
+                                   "`read` the page instead, or ask them.")
+            self.place = window["bounds"]
+            return [window_picture(self.window_number(), self.place)]
         if self.reveal():
             time.sleep(SAFARI_PAINT)
         if self.call({"op": "select_tab", **target})["changed"]:
@@ -629,6 +640,7 @@ class BrowserWorkspace:
     def run_one(self, arguments):
         op = arguments.get("op")
         with self.lock:
+            note = None if op == "list" else self.follow(op, arguments)
             if op not in ("list", "close", "shot"):  # a screenshot shows it itself, and waits for it to paint
                 self.reveal_quietly()
             if op == "list":
@@ -641,30 +653,28 @@ class BrowserWorkspace:
                 result = self.go({**arguments, "op": "open_tab", "window_id": window,
                                   "reuse_blank": created or self.tab is None})
                 self.tab = result["tab_index"]
-            elif op == "close" and "tab_index" not in arguments:
+            elif op == "close" and "tab_index" not in arguments and not self.shared:
                 result = {"closed": self.clear_window()}
-            elif op == "close":
+            elif op == "close":  # in a window the user has too, only the chat's last tab: others may be theirs
                 target = self.target(arguments)
                 self.guard(target, arguments)
                 result = self.call({"op": "close_tab", **target, "keep_window": target["window_id"] == self.window})
-                if result.pop("blank", False):
+                if result.pop("blank", False) or (self.shared and target == {"window_id": self.window,
+                                                                             "tab_index": self.tab}):
                     self.tab = None
             elif op == "shot":
-                return self.shot(self.target(arguments))
+                return self.shot(self.target(arguments)) + ([{"type": "text", "text": note}] if note else [])
             elif op == "show":
                 target = self.target(arguments)
                 if target["window_id"] != self.window:
-                    raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
+                    raise RuntimeError("`show` brings your own window to the user. Theirs are where they left them.")
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.call({"op": "show_to_user", **target})
-                if result.pop("in_their_window", False):  # a copy: the agent keeps working in its own tab
-                    result["note"] = (f"The user has a copy of your page in their window (window {result['window_id']}, "
-                                      f"tab {result['tab_index']}), which is theirs. Keep working in your own tab "
-                                      f"(window {target['window_id']}, tab {target['tab_index']}). Their sign-ins "
-                                      "reach it, since it is the same browser: when they say they are done, reload "
-                                      "yours by navigating to its address again.")
-                else:
-                    self.window, self.tab, self.shown, self.place = None, None, False, None  # the window is theirs
+                self.shared, self.shown = True, False
+                result["note"] = ("Your window is on the user's screen, in front. They can use it, and you keep "
+                                  "working in it. `hide` takes it back when they are done.")
+            elif op == "hide":
+                result = {"hidden": self.take_back()}
             elif op in self.OPERATIONS:
                 target = self.target(arguments)
                 if op in self.CHANGES:
@@ -680,7 +690,56 @@ class BrowserWorkspace:
                     result["content"] = interactive_lines(result["content"], result.get("url"))
             else:
                 raise RuntimeError(f"Unknown operation {op}. Pass `op`, or `steps`.")
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
+            if self.shared and op != "list":
+                self.remember()
+        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)},
+                *([{"type": "text", "text": note}] if note else [])]
+
+    def window_tabs(self):
+        """The chat's window with its tabs, what tells them apart and where it is, or None once it is gone."""
+        windows = self.call({"op": "list", "window_id": self.window})
+        return windows[0] if windows else None
+
+    def remember(self):
+        window = self.window_tabs()
+        self.known = tab_marks(window) if window else None
+
+    def follow(self, op, arguments):
+        """Before a step in a window the user has too: find the chat's tab again after they opened, closed or moved
+        tabs in it, and return what to tell the agent about that, or None. They may have closed the window."""
+        if not self.shared:
+            return None
+        window = self.window_tabs()
+        if window is None:
+            self.window, self.tab, self.shared, self.known = None, None, False, None
+            gone = "The user closed the window you showed them."
+            if op == "open":
+                return f"[ucu: {gone} This page is in a new one, out of their sight.]"
+            raise RuntimeError(f"{gone} `open` starts a new one, out of their sight.")
+        marks, known = tab_marks(window), self.known or []
+        by_id = bool(marks) and isinstance(marks[0], int)  # Chrome; Safari tells only that their number changed
+        self.known = marks
+        if marks == known or (not by_id and len(marks) == len(known)):
+            return None
+        if self.tab is not None:
+            self.tab = moved_tab(known, marks, self.tab)
+        tabs = "; ".join(
+            f"{tab['tab_index']} {quoted(str(tab.get('title') or '')[:40])} {str(tab.get('url') or '')[:80]}"
+            + (" (yours)" if tab["tab_index"] == self.tab else "")
+            + (" (they are on it)" if tab["tab_index"] == window.get("current_tab_index") else "")
+            for tab in window["tabs"][:TAB_NOTE_LIMIT])
+        change = f"The user changed the tabs of your window, which they have on their screen. Now: {tabs}."
+        if self.tab is None and op != "open" and "tab_index" not in arguments:
+            raise RuntimeError(f"{change} Yours can't be told from them now: pass tab_index for the one you mean.")
+        return f"[ucu: {change}]"
+
+    def take_back(self):
+        """Take the window off the user's screen, out of sight again, where the chat works in it as before."""
+        if not self.shared:
+            return False
+        self.shared, self.known = False, None
+        self.call({"op": "hide_window", "window_id": self.window}, timeout=15)
+        return True
 
     def go(self, request):
         """Load a page in a tab. A page that runs no JavaScript needs its tab's address set. The extension does that
@@ -699,9 +758,8 @@ class BrowserWorkspace:
         return result
 
     def reveal_quietly(self):
-        """Chrome's window works on the agent's desktop while the chat works, and Safari's while the user watches it
-        there; without a desktop it works hidden."""
-        if self.tool == "chrome" or self.server.mirroring:
+        """Chrome's window works on the agent's desktop while the chat works; without a desktop it works hidden."""
+        if self.tool == "chrome":
             try:
                 self.reveal()
             except RuntimeError:
@@ -721,7 +779,7 @@ class BrowserWorkspace:
 
     def close_window(self):
         window, self.window, self.tab, self.shown = self.window, None, None, False
-        if window is None:
+        if window is None or self.shared:  # on the user's screen it is theirs to close
             return False
         try:
             self.call({"op": "close_window", "window_id": window}, timeout=15)
@@ -964,6 +1022,43 @@ def picture_scale(frame):
     return min(1, SHOT_EDGE / max(width, height), (SHOT_AREA / (width * height)) ** 0.5)
 
 
+def tab_marks(window):
+    """What tells a window's tabs apart, in order: Chrome's ids for them, and in Safari, which has none, their
+    addresses."""
+    return [tab["id"] if "id" in tab else str(tab.get("url") or "") for tab in window["tabs"]]
+
+
+def places_in(short, long):
+    """The leftmost places in `long` of the items of `short`, in order, or None if they aren't all there."""
+    places, start = [], 0
+    for item in short:
+        try:
+            start = long.index(item, start) + 1
+        except ValueError:
+            return None
+        places.append(start - 1)
+    return places
+
+
+def moved_tab(old, new, index):
+    """Where the tab at `index`, from 1, of a window is after the user changed its tabs, from the marks of the tabs
+    before and after, or None if it is gone or can't be told. By id it is looked up. By address it is found when
+    tabs were only added or only removed, and it can be just one of those left."""
+    if not 1 <= index <= len(old):
+        return None
+    if isinstance(old[index - 1], int):
+        return new.index(old[index - 1]) + 1 if old[index - 1] in new else None
+    short, long = (old, new) if len(old) <= len(new) else (new, old)
+    left, right = places_in(short, long), places_in(short[::-1], long[::-1])
+    if left is None:
+        return None
+    right = [len(long) - 1 - place for place in reversed(right)]
+    if short is old:
+        return left[index - 1] + 1 if left[index - 1] == right[index - 1] else None
+    found = [place for place in range(len(new)) if left[place] == right[place] == index - 1]
+    return found[0] + 1 if found else None
+
+
 def window_picture(number, frame):
     """A window's picture for the agent, from the window server's number for it and its frame: without its shadow,
     as a JPEG, and picture_scale pixels to a point, so that a place in the picture is a place in the window."""
@@ -1097,7 +1192,6 @@ class Server:
         self.sessions = Sessions()
         self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker)
         self.browsers = {tool: BrowserWorkspace(self, tool) for tool in BROWSERS}
-        self.mirroring = False              # the user watches the agent's desktop, until the turn ends
         self.used_apps = set()              # apps this chat has driven, as app_key names
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
@@ -1210,8 +1304,6 @@ class Server:
             return self.browsers[name].run(arguments)
         if name == "move_to_desktop":
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
-        elif name == "mirror":
-            text, failed = self.mirror(arguments.get("show", True) is not False)
         else:
             text, failed = run_window_tool(name, arguments)
         if failed:
@@ -1319,24 +1411,6 @@ class Server:
             self.hidden_apps[app_key(app)] = app
             self.parked_apps.add(app_key(app))
         return f"{app} is on your private desktop.", False
-
-    def mirror(self, on):
-        """Show or close the user's live view of the agent's desktop. While it shows, Safari's window works on the
-        desktop too, as Chrome's always does, so the view has the agent's pages in it."""
-        self.mirroring = on
-        if not on:
-            self.windows.ask({"mirror": False}, SHOW_TIMEOUT)
-            return "The view of your desktop is closed.", False
-        self.windows.start()
-        reply = self.windows.ask({"mirror": True}, PARK_TIMEOUT)
-        if not reply or not reply.get("shown"):
-            self.mirroring = False
-            return (reply or {}).get("error") or "ucu-window didn't answer, so there is no view to show.", True
-        for workspace in self.browsers.values():
-            with workspace.lock:
-                workspace.reveal_quietly()
-        return ("The user sees your private desktop live, in a small window in a corner of their screen. It closes "
-                "when your turn ends."), False
 
     # --- look and act -----------------------------------------------------
     def window_id(self, app, title):
@@ -1687,7 +1761,6 @@ class Server:
 
     # --- turn ends and idle stops -----------------------------------------
     def hide_browsers(self):
-        self.mirroring = False  # the view goes with the turn
         for workspace in self.browsers.values():
             workspace.hide()
 

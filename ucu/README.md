@@ -199,14 +199,8 @@ While you are in an app a chat drives, one of the agent's windows out of sight c
 window when it is made or shown. Your window gets it back at once, so your typing lands where you can see it.
 
 When you ask to see what the agent is doing, or to be taken there, `focus_window` with `activate: true` brings that
-window from the private desktop to your screen and to the front, and the browser tools' `show` hands you the agent's
-tab. That is the only way UCU brings anything forward.
-
-To watch an agent work without taking anything over, ask it to show you: its `mirror` tool opens a small window in a
-corner of your screen with a live picture of the agent's private desktop, outlined in the chat's color. It never takes
-your focus or keyboard, so you keep working in your own apps and tabs, and it closes when the agent's turn ends or with
-its close button. While it shows, the agent's Safari window works on that desktop too, as its Chrome window always does.
-It needs Screen Recording for the app that runs the agent, such as Claude.
+window from the private desktop to your screen and to the front, and the browser tools' `show` brings you the agent's
+window, which you both use from then on. That is the only way UCU brings anything forward.
 
 Every time an app comes forward during agent work, `~/Library/Logs/ucu/focus.log` says what UCU did, naming the apps but
 no window titles, and `ucu doctor` sums up the last day.
@@ -240,9 +234,13 @@ works in a window of its own, so you can keep browsing, and several agents can w
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file
   input as if chosen there, or are dropped on a drop zone. Agents confirm with you first.
-- `show` hands you a copy of the agent's page when you ask to see it, as a new tab of the window you work in, in front.
-  The agent keeps working in its own tab, and never in yours. It is the same browser, so a sign-in in your copy reaches
-  the agent's tab once it reloads. What only lives in the page, such as a half-filled form, stays in the agent's tab.
+- `show` brings the agent's own window to your screen, in front, when you ask to see it or have to do something in
+  it, such as sign in. It is a normal window that you use, and the agent keeps working in the same one, so there is one
+  page and no copy. Your own windows and tabs stay yours. `hide` takes the window back out of sight; until then it
+  stays with you, also after the chat ends.
+- While you have that window, you can open tabs in it. The agent finds its own tab again before each step, is told
+  which tabs are there and which one you are on, and asks which to use when it can't tell. It closes only its own tab
+  there, and takes no screenshot that would switch the tab you are on.
 - `shot` takes a screenshot. Your window keeps the keyboard.
 - Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`. Agents are
   told to use those only if you asked.

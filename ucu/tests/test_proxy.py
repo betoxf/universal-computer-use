@@ -168,7 +168,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn("ucu rules:", rules)
         self.assertIn("confirmations", rules)
         names = [tool["name"] for tool in server.request("tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["look", "act", "list_windows", "focus_window", "move_to_desktop", "mirror", "safari", "chrome"])
+        self.assertEqual(names, ["look", "act", "list_windows", "focus_window", "move_to_desktop", "safari", "chrome"])
         # A client that reconnects after an update reads the tools again.
         self.assertIn({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}, server.notifications)
 
