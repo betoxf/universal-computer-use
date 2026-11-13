@@ -86,7 +86,12 @@ regexes = [
 # allowlisted on their own rules so they cannot suppress credential findings.
 # ---------------------------------------------------------------------------
 [allowlist]
-description = "Local generated artifacts"
+description = "Local generated artifacts, and the public key that pins UCU's Chrome extension id"
+# The manifest's "key" is the extension's public key, which Chrome derives its id from: not a secret. Only this
+# exact value is allowed, so any other key-shaped value is still found.
+regexes = [
+  '''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuCWBS2z2\+a3hnhKPrCDc\+\+Sh6cVRPIZsBTXiOFEG1mdbuTuR3RRK4FUrC9QbJcf67Alxl\+mBshBWFQagOuA4JOCpjee9FRmpVqqbDlA9MWbRfuFWJL80BPEizHX0Pfb9L\+pRmKfS3OYbeYB9WpMXkyAdcUe\+7pRA3HEIHnJo0HLVelFLg/AlRiaxao73U7dWcEAW53ZUxu0XhNJ5XxPH2/HLjp8L3XGqVxUUi7cNGmorhXUPasS5mLdP/kY8Np3QqKH2CgT72QBGvJUwk/ECYplz1QZ4OfbsldFvX3g7FTi\+wT4zvvdWBB83n/daYtLK4JpUA1HZLdoLuc6/kAJ7HQIDAQAB$''',
+]
 paths = [
   '''(^|/)target/''',
   '''(^|/)node_modules/''',
