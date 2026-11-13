@@ -31,7 +31,10 @@ def relay_reports():
         while True:
             line = handle.readline()
             if line:
-                send(json.loads(line))
+                try:
+                    send(json.loads(line))
+                except OSError:  # the proxy went away
+                    os._exit(0)
             else:
                 time.sleep(0.02)
 
@@ -80,10 +83,22 @@ def main():
         if "rest" in command and not opened:
             break
     log({"exited": True})
-    # The report thread may be writing: ending without Python's shutdown, which would flush stdout under it and abort.
-    with writing:
-        os._exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    # However it ends, even with the proxy gone and stdout broken, it skips Python's shutdown: that flushes stdout
+    # while the report thread may be writing, and aborts, which macOS reports as a Python crash.
+    code = 0
+    try:
+        main()
+    except SystemExit as error:
+        code = error.code if isinstance(error.code, int) else 0
+    except BaseException:
+        code = 1
+    finally:
+        try:
+            with writing:
+                sys.stdout.flush()
+        except BaseException:
+            pass
+        os._exit(code)
