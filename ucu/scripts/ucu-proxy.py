@@ -1127,6 +1127,9 @@ class Server:
             if not isinstance(message, dict):
                 continue
             method, request_id = message.get("method"), message.get("id")
+            if method == "notifications/initialized":
+                # A client reconnecting to a ucu that updated meanwhile still has the old tools: it reads them again.
+                self.write({"method": "notifications/tools/list_changed"})
             if request_id is None or method is None:
                 continue
             params = message.get("params") or {}
@@ -1134,7 +1137,7 @@ class Server:
                 self.client = params.get("clientInfo") or {}
                 self.write({"id": request_id, "result": {
                     "protocolVersion": params.get("protocolVersion") or "2025-06-18",
-                    "capabilities": {"tools": {}}, "serverInfo": {"name": "ucu", "version": "2"},
+                    "capabilities": {"tools": {"listChanged": True}}, "serverInfo": {"name": "ucu", "version": "2"},
                     "instructions": f"{USAGE_RULES}\n\n{POLICY_SUMMARY}"}})
             elif method == "tools/list":
                 self.write({"id": request_id, "result": {"tools": WINDOW_TOOLS}})
