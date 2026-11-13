@@ -14,8 +14,8 @@ server runs it once per action, and adds what makes it fit for working next to a
 * a deny list: ~/Library/Application Support/ucu/policy.json holds the apps agents can't touch, read at every call. Each
   app a chat starts using goes to ~/Library/Logs/ucu/approve.log with the client and folder. If the file can't be read,
   no app is used;
-* `list_windows`, `focus_window`, `move_to_desktop` and `mirror`, through ~/.local/bin/ucu-window, which `ucu install` builds from
-  native/ucu-window.swift;
+* `list_windows`, `focus_window`, `move_to_desktop` and `mirror`, through ~/.local/bin/ucu-window, which
+  `ucu install` builds from native/ucu-window.swift;
 * apps stay out of the user's way. `ucu-window watch` opens a closed app hidden. Actions work on a hidden app, and a
   click by position that needs a window on screen moves the app to the agent's desktop, a virtual display nobody sees.
   An app the chat drives can't take the user's focus: if it comes to the front by itself, or gives a window of its out
