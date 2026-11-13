@@ -18,7 +18,6 @@ const BROWSERS = {
       try { return w.document() !== null; } catch (e) { return false; }
     }),
     id: (w) => w.id(),
-    minimized: (w) => w.miniaturized(),
     currentIndex: (w) => w.currentTab.index(),
     select: (w, tab) => { w.currentTab = tab; },
     title: (tab) => tab.name(),
@@ -28,7 +27,7 @@ const BROWSERS = {
     app: () => Application("com.google.Chrome"),
     windows: (b) => b.windows(),
     id: (w) => Number(w.id()),
-    minimized: (w) => w.minimized(),
+    tabId: (tab) => Number(tab.id()),  // Safari's tabs have none
     currentIndex: (w) => w.activeTabIndex(),
     select: (w, tab, index) => { w.activeTabIndex = index; },
     title: (tab) => tab.title(),
@@ -85,22 +84,6 @@ function urlOf(tab) {
   try { return tab.url(); } catch (e) { return null; }
 }
 
-// A window the user can see: shown, not in the Dock, and on one of their screens, not on an agent's desktop.
-function onUsersScreen(win) {
-  try {
-    if (!win.visible() || B.minimized(win)) return false;
-    const at = win.bounds(), x = at.x + at.width / 2, y = at.y + 10;
-    const screens = $.NSScreen.screens, height = screens.objectAtIndex(0).frame.size.height;
-    for (let i = 0; i < screens.count; i++) {
-      const screen = screens.objectAtIndex(i), frame = screen.frame;
-      if (ObjC.unwrap(screen.localizedName) === "UCU Agent Desktop") continue;
-      const top = height - frame.origin.y - frame.size.height;
-      if (x >= frame.origin.x && x < frame.origin.x + frame.size.width && y >= top && y < top + frame.size.height) return true;
-    }
-  } catch (e) { /* window closing */ }
-  return false;
-}
-
 // The window the user is in, while the browser is the app in front, and null while it isn't.
 function usersWindow(except) {
   if (!browser.frontmost()) return null;
@@ -145,14 +128,23 @@ function describe(win, tab, index) {
 }
 
 const OPS = {
+  // With window_id, only that window, with where it is and its tabs' ids: for the agent's window while the user has
+  // it on their screen, where they move it and change its tabs.
   list(req) {
-    return B.windows(browser).map((w) => {
+    const one = req.window_id !== undefined;
+    return B.windows(browser).filter((w) => !one || B.id(w) === req.window_id).map((w) => {
       let current = null;
       try { current = B.currentIndex(w); } catch (e) {}
       const tabs = [];
       const count = w.tabs.length;
-      for (let i = 0; i < count; i++) tabs.push(describe(w, w.tabs[i], i + 1));
-      return { window_id: B.id(w), visible: w.visible(), current_tab_index: current, tabs };
+      for (let i = 0; i < count; i++) {
+        const tab = describe(w, w.tabs[i], i + 1);
+        if (one && B.tabId) tab.id = B.tabId(w.tabs[i]);
+        tabs.push(tab);
+      }
+      const found = { window_id: B.id(w), visible: w.visible(), current_tab_index: current, tabs };
+      if (one) found.bounds = w.bounds();
+      return found;
     });
   },
 
@@ -235,7 +227,8 @@ const OPS = {
     return { shown: true };
   },
 
-  // After a turn the window goes out of sight, unless it has left the agent's desktop: then the user has it.
+  // After a turn the window goes out of sight, unless it has left the agent's desktop: then the user has it. It also
+  // goes out of sight when the agent takes it back from the user's screen.
   hide_window(req) {
     const win = windowById(req.window_id);
     const at = win.bounds();
@@ -246,20 +239,10 @@ const OPS = {
     return { hidden: true };
   },
 
-  // The user asked to see the agent's tab. A copy of it opens as a new tab of the window they work in, which is theirs,
-  // while the agent keeps its own: a sign-in in theirs reaches it, as both are in this browser. Without a window of
-  // theirs, the agent's window comes to their screen, the one with the menu bar, in front.
+  // The user asked to see the agent's tab: its window comes to their screen, the one with the menu bar, in front.
+  // They can use it there, and the agent keeps working in it, as its tabs need no window in front.
   show_to_user(req) {
     const { win, tab } = tabOf(req);
-    const theirs = B.windows(browser).find((w) => B.id(w) !== req.window_id && onUsersScreen(w));
-    if (theirs) {
-      theirs.tabs.push(browser.Tab({ url: urlOf(tab) }));
-      const index = theirs.tabs.length, shown = theirs.tabs[index - 1];
-      B.select(theirs, shown, index);
-      theirs.index = 1;
-      browser.activate();
-      return Object.assign(describe(theirs, shown, index), { shown: true, in_their_window: true });
-    }
     if (B.currentIndex(win) !== req.tab_index) B.select(win, tab, req.tab_index);
     const screen = $.NSScreen.screens.objectAtIndex(0), full = screen.frame, area = screen.visibleFrame;
     const width = Math.min(1280, area.size.width - 80), height = Math.min(900, area.size.height - 80);

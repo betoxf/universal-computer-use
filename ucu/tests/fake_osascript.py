@@ -6,7 +6,9 @@ In Safari the user has window 51 with two tabs, and is viewing the second; in Ch
 ucu makes is 900 in Safari and 901 in Chrome. State between runs is kept in $FAKE_SAFARI_STATE. A URL containing
 "no-javascript" fails like the browser with JavaScript from Apple Events turned off, one containing "no-script" is
 a page Chrome can only reach by having its tab's address set, by ucu (`typed`) or by its extension (`sent`), and while
-$HOME/window-moved exists, ucu's window has left the agent's desktop.
+$HOME/window-moved exists, ucu's window has left the agent's desktop. $HOME/user-opened-tab makes the user open a tab
+in ucu's window, in front of its others, and go to it, and $HOME/user-closed-window makes them close that window, each
+once.
 """
 import json
 import os
@@ -32,10 +34,36 @@ def load():
                                                                   for name, window in USER_WINDOWS.items()}
 
 
+def happened(event):
+    """Whether the test asked for something the user does, which they then do once."""
+    flag = os.path.join(os.environ["HOME"], event)
+    if not os.path.exists(flag):
+        return False
+    os.remove(flag)
+    return True
+
+
+def user_acts(state, browser):
+    own = next((window for window in state["windows"] if window["window_id"] == NEW_WINDOW[browser]), None)
+    if own and happened("user-opened-tab"):
+        own["tabs"].insert(0, {"url": "https://user.test", "id": 7})
+        own["current_tab_index"] = 1
+    if own and happened("user-closed-window"):
+        state["windows"].remove(own)
+
+
 def answer(request, state):
     op, browser = request["op"], request["browser"]
     if str(request.get("url")).find("no-javascript") >= 0:
         raise RuntimeError(NO_JAVASCRIPT[browser])
+    user_acts(state, browser)
+    if op == "list" and "window_id" in request:  # ucu's window as the user has it: Chrome's tabs have ids
+        return [{"window_id": window["window_id"], "visible": True, "current_tab_index": window["current_tab_index"],
+                 "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800},
+                 "tabs": [{"window_id": window["window_id"], "tab_index": index, "url": tab["url"], "title": "T",
+                           **({"id": tab["id"]} if browser == "chrome" else {})}
+                          for index, tab in enumerate(window["tabs"], 1)]}
+                for window in state["windows"] if window["window_id"] == request["window_id"]]
     if op == "list":
         return state["windows"]
     if op == "create_window":
@@ -46,7 +74,7 @@ def answer(request, state):
     if op in ("open_tab", "navigate") and "no-script" in str(request.get("url")) and not set_already:
         window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
         if op == "open_tab":
-            window["tabs"].append({"url": "chrome://newtab/"})
+            window["tabs"].append({"url": "chrome://newtab/", "id": 100 + len(window["tabs"])})
         return {"window_id": request["window_id"], "tab_index": request.get("tab_index", len(window["tabs"])),
                 "typed": True}
     if op == "navigate" and set_already:
@@ -54,7 +82,7 @@ def answer(request, state):
                 "title": "T", "loaded": True}
     if op == "open_tab":
         window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
-        window["tabs"].append({"url": request["url"]})
+        window["tabs"].append({"url": request["url"], "id": 100 + len(window["tabs"])})
         return {"window_id": request["window_id"], "tab_index": len(window["tabs"]), "url": request["url"],
                 "title": "T", "loaded": True}
     if op == "close_window":
@@ -66,14 +94,6 @@ def answer(request, state):
             return {"closed": True, "blank": True}
         window["tabs"].pop(request["tab_index"] - 1)
         return {"closed": True}
-    if op == "show_to_user":
-        theirs = next((window for window in state["windows"]
-                       if window["window_id"] != request["window_id"] and window.get("visible")), None)
-        if theirs and not os.path.exists(os.path.join(os.environ["HOME"], "no-user-window")):
-            theirs["tabs"].append({"url": "https://a.test"})
-            return {"window_id": theirs["window_id"], "tab_index": len(theirs["tabs"]), "shown": True,
-                    "in_their_window": True}
-        return {"shown": True}
     if op == "select_tab":
         return {"changed": False}
     if op == "read" and request.get("what") == "interactive":
