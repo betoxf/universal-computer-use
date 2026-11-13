@@ -17,11 +17,13 @@ REPORTS = os.environ["FAKE_WINDOW_REPORTS"]
 OPEN_DELAY = 0.2  # opening an app takes a while, and the engine must not get the call before it is done
 parked = set()
 opened = set()  # apps it opened, which keep it running after `rest`
+writing = threading.Lock()
 
 
 def send(message):
-    sys.stdout.write(json.dumps(message) + "\n")
-    sys.stdout.flush()
+    with writing:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
 
 
 def relay_reports():
@@ -78,6 +80,9 @@ def main():
         if "rest" in command and not opened:
             break
     log({"exited": True})
+    # The report thread may be writing: ending without Python's shutdown, which would flush stdout under it and abort.
+    with writing:
+        os._exit(0)
 
 
 if __name__ == "__main__":
