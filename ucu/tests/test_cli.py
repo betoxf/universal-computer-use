@@ -20,6 +20,7 @@ OTHER_HOOK = {"hooks": [{"type": "command", "command": "afplay done.aiff"}]}
 OPENCODE = {"$schema": "https://opencode.ai/config.json", "model": "local/qwen",
             "mcp": {"github": {"type": "remote", "url": "https://example.com/mcp"}}}
 POLICY = "Library/Application Support/ucu/policy.json"
+CHROME_HOST = "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.ucu.companion.json"
 
 FAKE_CLAUDE = """
 config = Path.home() / ".claude.json"
@@ -90,6 +91,7 @@ class CliTest(unittest.TestCase):
 
     def test_install_doctor_uninstall(self):
         self.opencode()
+        (self.home / CHROME_HOST).parent.parent.mkdir(parents=True)  # Chrome is set up
         code, output = self.ucu("install", "--python", sys.executable)
         self.assertEqual(code, 0, output)
 
@@ -109,6 +111,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(json.loads((backup / "opencode.json").read_text()), OPENCODE)
         self.assertTrue((self.home / ".local/bin/ucu-window").exists())
         self.assertTrue((self.home / ".local/bin/ucu-engine").exists())
+        host = self.read_json(CHROME_HOST)
+        self.assertEqual((host["name"], host["allowed_origins"]),
+                         ("com.ucu.companion", ["chrome-extension://ddfnafenkalcehfggkpmlehmnamkonlp/"]))
+        self.assertTrue(os.access(host["path"], os.X_OK))
+        self.assertIn(str(ROOT / "scripts/ucu-chrome-host.py"), Path(host["path"]).read_text())
 
         edited = {"deny": ["Mail"]}
         (self.home / POLICY).write_text(json.dumps(edited))
@@ -138,6 +145,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.read_json(".claude/settings.json"), {"model": "opus", "hooks": {"Stop": [OTHER_HOOK]}})
         self.assertEqual(self.read_json(".config/opencode/opencode.json"), OPENCODE)
         self.assertFalse((self.home / ".local/bin/ucu-window").exists())
+        self.assertFalse((self.home / CHROME_HOST).exists())
+        self.assertFalse((self.home / ".local/bin/ucu-chrome-host").exists())
         self.assertEqual(self.read_json(POLICY), edited)
 
         code, output = self.ucu("doctor")
@@ -149,6 +158,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(len(self.stop_hooks()), 1)
         self.assertFalse((self.home / ".config/opencode").exists())
+        self.assertFalse((self.home / "Library/Application Support/Google").exists())  # nor Chrome
 
     def test_deny_allow_and_denied(self):
         self.assertEqual(self.ucu("denied")[1].strip(), "No apps are denied: every app is approved.")

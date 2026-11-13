@@ -430,7 +430,8 @@ const OPS = {
 // the user is, so it goes straight to the agent's desktop, or out of sight. Setting a tab's address brings Chrome
 // forward too, so a tab is made without one and goes to its page through the page itself, when the page lets ucu run
 // JavaScript. When it doesn't, the caller hears that the address has to be set, and asks for that with `typed` once
-// ucu-window knows Chrome is about to come forward.
+// ucu-window knows Chrome is about to come forward, or has ucu's extension set it, which keeps Chrome behind, and
+// says `sent`.
 function chromeGo(tab, url, typed) {
   const previous = urlOf(tab);
   if (typed) {
@@ -457,15 +458,16 @@ const CHROME_OPS = {
       index = win.tabs.length;
       tab = win.tabs[index - 1];
     }
-    if (!chromeGo(tab, req.url, false).went) return { window_id: req.window_id, tab_index: index, typed: true };
+    const { previous, went } = chromeGo(tab, req.url, false);
+    if (!went) return { window_id: req.window_id, tab_index: index, typed: true, previous };
     const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
     return Object.assign(describe(win, tab, index), { loaded: done });
   },
 
   navigate(req) {
     const { win, tab } = tabOf(req);
-    const { previous, went } = chromeGo(tab, req.url, req.typed);
-    if (!went) return { window_id: req.window_id, tab_index: req.tab_index, typed: true };
+    const { previous, went } = req.sent ? { previous: req.previous, went: true } : chromeGo(tab, req.url, req.typed);
+    if (!went) return { window_id: req.window_id, tab_index: req.tab_index, typed: true, previous };
     const done = req.wait === false ? null : loaded(tab, previous === req.url ? null : previous, req.timeout_seconds);
     return Object.assign(describe(win, tab, req.tab_index), { loaded: done });
   },

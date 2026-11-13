@@ -5,8 +5,8 @@ Chrome, whichever the request names.
 In Safari the user has window 51 with two tabs, and is viewing the second; in Chrome, window 61 with one tab. A window
 ucu makes is 900 in Safari and 901 in Chrome. State between runs is kept in $FAKE_SAFARI_STATE. A URL containing
 "no-javascript" fails like the browser with JavaScript from Apple Events turned off, one containing "no-script" is
-a page Chrome can only reach by having its tab's address set, and while $HOME/window-moved exists, ucu's window has
-left the agent's desktop.
+a page Chrome can only reach by having its tab's address set, by ucu (`typed`) or by its extension (`sent`), and while
+$HOME/window-moved exists, ucu's window has left the agent's desktop.
 """
 import json
 import os
@@ -42,13 +42,14 @@ def answer(request, state):
         state["windows"].append({"window_id": NEW_WINDOW[browser], "visible": False, "current_tab_index": 1,
                                  "tabs": []})
         return {"window_id": NEW_WINDOW[browser]}
-    if op in ("open_tab", "navigate") and "no-script" in str(request.get("url")) and not request.get("typed"):
+    set_already = request.get("typed") or request.get("sent")
+    if op in ("open_tab", "navigate") and "no-script" in str(request.get("url")) and not set_already:
         window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
         if op == "open_tab":
             window["tabs"].append({"url": "chrome://newtab/"})
         return {"window_id": request["window_id"], "tab_index": request.get("tab_index", len(window["tabs"])),
                 "typed": True}
-    if op == "navigate" and request.get("typed"):
+    if op == "navigate" and set_already:
         return {"window_id": request["window_id"], "tab_index": request["tab_index"], "url": request["url"],
                 "title": "T", "loaded": True}
     if op == "open_tab":

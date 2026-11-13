@@ -23,7 +23,10 @@ server runs it once per action, and adds what makes it fit for working next to a
   or their app going out of sight counts as the user switching apps themselves, but their typing doesn't. In a browser
   where the chat has its own window, the window that got the keyboard tells instead: the user can't choose one they
   don't see;
-* a Safari and a Chrome window of each chat's own through the `safari` and `chrome` tools (native/browser.js);
+* a Safari and a Chrome window of each chat's own through the `safari` and `chrome` tools (native/browser.js). With
+  ucu's Chrome extension loaded (chrome-extension/), Chrome's window is made, and a page that runs no JavaScript is
+  loaded, through it, which keeps Chrome behind: the server asks scripts/ucu-chrome-host.py over a socket, and does
+  those steps through AppleScript when nothing answers;
 * a note when another chat is using the app, through one small file per chat in
   ~/Library/Application Support/ucu/sessions;
 * a cursor color of each chat's own, kept in that same file, for the cursor `ucu-window watch` draws at each action;
@@ -50,6 +53,7 @@ import mimetypes
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -64,6 +68,8 @@ LOCAL_ERROR = -32603
 NO_METHOD = -32601
 REPO = Path(__file__).resolve().parent.parent
 BROWSER_BACKEND = REPO / "native/browser.js"
+COMPANION = Path.home() / "Library/Application Support/ucu/chrome.sock"  # where ucu's Chrome extension answers
+COMPANION_TIMEOUT = 12  # seconds; its host gives the extension 10
 # Each browser tool's app, the names that deny it, and where the user allows JavaScript from Apple Events.
 BROWSERS = {"safari": ("Safari", {"safari", "com.apple.safari"},
                        "Safari > Develop > Allow JavaScript from Apple Events"),
@@ -428,8 +434,9 @@ class BrowserWorkspace:
     role and the keyboard. Safari's stays hidden and its tabs work anyway, but Safari stops painting hidden windows
     after a few seconds, so a screenshot shows it on the agent's desktop until the turn ends. Chrome's is on that
     desktop whenever the chat works in it, where pages behave as on a screen and look and act reach it, and hidden
-    after the turn. Making a Chrome window brings Chrome forward, and ucu-window puts the user's app back, so the
-    window is made once and outlives its tabs."""
+    after the turn. Making a Chrome window through AppleScript brings Chrome forward, and ucu-window puts the user's
+    app back, so the window is made once and outlives its tabs. ucu's Chrome extension makes it with Chrome staying
+    behind, and AppleScript knows that window by the same id."""
 
     OPERATIONS = {"navigate": "navigate", "read": "read", "click": "click", "type": "type", "wait": "wait_for",
                   "eval": "eval", "upload": "upload"}
@@ -467,6 +474,21 @@ class BrowserWorkspace:
                     "Automation.")
         return message
 
+    def companion(self, request):
+        """Have ucu's Chrome extension do a step, and return its result, or None when it isn't there or couldn't:
+        the step is then done through AppleScript."""
+        if self.tool != "chrome":
+            return None
+        try:
+            with socket.socket(socket.AF_UNIX) as link:
+                link.settimeout(COMPANION_TIMEOUT)
+                link.connect(str(COMPANION))
+                link.sendall(encode(request))
+                reply = json.loads(link.makefile().readline())
+            return reply["result"] if reply.get("ok") else None
+        except (OSError, ValueError, KeyError, AttributeError):
+            return None
+
     def desktop_place(self):
         """Where the window goes on the agent's desktop, or None when there is none."""
         self.server.windows.start()
@@ -487,9 +509,15 @@ class BrowserWorkspace:
             if state in ("opened", "reopened"):
                 self.server.windows.ask({"park": [self.app]}, PARK_TIMEOUT)
             request["bounds"] = self.place = self.desktop_place()
-        # The agent needn't hear about the window it made, nor that making it brought Chrome forward.
-        self.server.windows.expect(self.app, "window", *(["focus"] if self.tool == "chrome" else []))
-        self.window = self.call(request)["window_id"]
+        # The agent needn't hear about the window it made, nor that making it brought Chrome forward, which the
+        # extension does without.
+        self.server.windows.expect(self.app, "window")
+        made = self.companion({"op": "create_window", "bounds": self.place}) if request.get("bounds") else None
+        if not (made and isinstance(made.get("window_id"), int)):
+            if self.tool == "chrome":
+                self.server.windows.expect(self.app, "focus")
+            made = self.call(request)
+        self.window = made["window_id"]
         self.shown = bool(request.get("bounds"))
         return self.window, True
 
@@ -648,14 +676,19 @@ class BrowserWorkspace:
         return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
 
     def go(self, request):
-        """Load a page in a tab. Chrome comes forward when a tab's address is set, which a page that runs no
-        JavaScript needs. Only then does the helper hear that the agent is bringing Chrome forward, since for that
-        moment it sends the user back from Chrome too, unless they clicked a window of it."""
+        """Load a page in a tab. A page that runs no JavaScript needs its tab's address set. The extension does that
+        with Chrome staying behind. Through AppleScript Chrome comes forward, and only then does the helper hear
+        that the agent is bringing it forward, since for that moment it sends the user back from Chrome too, unless
+        they clicked a window of it."""
         result = self.call(request)
         if result.get("typed"):
-            self.server.windows.expect(self.app, "focus")
-            result = self.call({**request, "op": "navigate", "window_id": result["window_id"],
-                                "tab_index": result["tab_index"], "typed": True})
+            tab = {"window_id": result["window_id"], "tab_index": result["tab_index"]}
+            if self.companion({"op": "navigate", **tab, "url": request["url"]}):
+                how = {"sent": True, "previous": result.get("previous")}
+            else:
+                self.server.windows.expect(self.app, "focus")
+                how = {"typed": True}
+            result = self.call({**request, "op": "navigate", **tab, **how})
         return result
 
     def reveal_quietly(self):

@@ -87,6 +87,7 @@ Accessibility**, and Screen Recording for screenshots.
 - registers the `ucu` server in `~/.claude.json`
 - adds a `Stop` hook to `~/.claude/settings.json`, so UCU knows when Claude's turn ends
 - registers `ucu` in `~/.config/opencode/opencode.json`, if opencode is set up
+- lets UCU's Chrome extension start its host, if Chrome is set up (see [Safari and Chrome](#safari-and-chrome))
 
 To make Claude Code prefer UCU over its built-in computer use, add this to your `~/.claude/CLAUDE.md`:
 
@@ -248,6 +249,20 @@ and go to their page through the page itself, which keeps Chrome behind, when Ch
 Events. A page that runs none, such as one of Chrome's own, brings Chrome forward for an instant as well. An extension's
 popup closes once Chrome loses focus, so agents open its page in their tab instead, at `chrome-extension://<id>/<page>`.
 
+With UCU's own extension, Chrome doesn't come forward for either. AppleScript, which UCU drives Chrome with, can't make
+a window or set a tab's address without that, and an extension can: it makes the agent's window unfocused, already on
+the private desktop, in your own Chrome and profile, so the agent has your logins as before. Set it up once:
+
+1. Run `./ucu install`, which lets Chrome start the extension's host, `scripts/ucu-chrome-host.py`.
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose this folder's
+   `chrome-extension`.
+
+The extension asks only for native messaging: it can't read your pages or history. It takes two requests from UCU, to
+make a window and to load an address in a tab; reading, clicking, typing and screenshots stay as they are. It connects
+when Chrome starts, or when you load it, so load it after `./ucu install`, or press its **Reload** afterwards. Whenever
+it doesn't answer, UCU does those two steps through AppleScript as before, with nothing to configure. To be rid of
+it, remove it at `chrome://extensions`.
+
 Safari needs **Safari > Settings > Advanced > Show features for web developers**, then **Develop > Allow JavaScript from
 Apple Events**. Chrome needs **View > Developer > Allow JavaScript from Apple Events** for everything that runs in a page.
 Both need permission for the app running Claude Code to control the browser, which macOS asks for the first time, and
@@ -303,8 +318,8 @@ touch ~/Library/Application\ Support/ucu/no-auto-update
 ./ucu uninstall
 ```
 
-This removes the server, hook, engine and `ucu-window`. Your policy, logs and backups stay in
-`~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
+This removes the server, hook, engine, `ucu-window` and the Chrome extension's host. Your policy, logs and backups
+stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
 
 ## How it works
 
@@ -314,6 +329,8 @@ This removes the server, hook, engine and `ucu-window`. Your policy, logs and ba
 | `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text and adds notes. |
 | `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows, holds the private desktop and draws each chat's cursor. |
 | `native/browser.js` | The browser side of the `safari` and `chrome` tools, run with `osascript`. |
+| `chrome-extension/` | UCU's Chrome extension, which makes the agent's window and loads addresses with Chrome staying behind. |
+| `scripts/ucu-chrome-host.py` | The extension's native messaging host. It relays between the extension and each chat's server over `~/Library/Application Support/ucu/chrome.sock`. |
 | `..` | agent-desktop, the engine. See `../FORK.md`. |
 
 ## Tests

@@ -17,11 +17,13 @@ REPORTS = os.environ["FAKE_WINDOW_REPORTS"]
 OPEN_DELAY = 0.2  # opening an app takes a while, and the engine must not get the call before it is done
 parked = set()
 opened = set()  # apps it opened, which keep it running after `rest`
+writing = threading.Lock()
 
 
 def send(message):
-    sys.stdout.write(json.dumps(message) + "\n")
-    sys.stdout.flush()
+    with writing:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
 
 
 def relay_reports():
@@ -29,7 +31,10 @@ def relay_reports():
         while True:
             line = handle.readline()
             if line:
-                send(json.loads(line))
+                try:
+                    send(json.loads(line))
+                except OSError:  # the proxy went away
+                    os._exit(0)
             else:
                 time.sleep(0.02)
 
@@ -81,4 +86,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # However it ends, even with the proxy gone and stdout broken, it skips Python's shutdown: that flushes stdout
+    # while the report thread may be writing, and aborts, which macOS reports as a Python crash.
+    code = 0
+    try:
+        main()
+    except SystemExit as error:
+        code = error.code if isinstance(error.code, int) else 0
+    except BaseException:
+        code = 1
+    finally:
+        try:
+            with writing:
+                sys.stdout.flush()
+        except BaseException:
+            pass
+        os._exit(code)

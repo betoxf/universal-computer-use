@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "UCU Companion",
+  "version": "0.1",
+  "description": "Lets UCU's agents open their own Chrome window and load pages in it without Chrome coming forward.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuCWBS2z2+a3hnhKPrCDc++Sh6cVRPIZsBTXiOFEG1mdbuTuR3RRK4FUrC9QbJcf67Alxl+mBshBWFQagOuA4JOCpjee9FRmpVqqbDlA9MWbRfuFWJL80BPEizHX0Pfb9L+pRmKfS3OYbeYB9WpMXkyAdcUe+7pRA3HEIHnJo0HLVelFLg/AlRiaxao73U7dWcEAW53ZUxu0XhNJ5XxPH2/HLjp8L3XGqVxUUi7cNGmorhXUPasS5mLdP/kY8Np3QqKH2CgT72QBGvJUwk/ECYplz1QZ4OfbsldFvX3g7FTi+wT4zvvdWBB83n/daYtLK4JpUA1HZLdoLuc6/kAJ7HQIDAQAB",
+  "permissions": ["nativeMessaging"],
+  "background": { "service_worker": "worker.js" }
+}
