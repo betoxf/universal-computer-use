@@ -246,9 +246,9 @@ const OPS = {
     return { hidden: true };
   },
 
-  // The user asked to see the agent's tab. It opens as a new tab of the window they work in, at the agent's page, so
-  // there is one place to look and a sign-in there is the one the agent sees. Without a window of theirs, the
-  // agent's window comes to their screen, the one with the menu bar, in front.
+  // The user asked to see the agent's tab. A copy of it opens as a new tab of the window they work in, which is theirs,
+  // while the agent keeps its own: a sign-in in theirs reaches it, as both are in this browser. Without a window of
+  // theirs, the agent's window comes to their screen, the one with the menu bar, in front.
   show_to_user(req) {
     const { win, tab } = tabOf(req);
     const theirs = B.windows(browser).find((w) => B.id(w) !== req.window_id && onUsersScreen(w));

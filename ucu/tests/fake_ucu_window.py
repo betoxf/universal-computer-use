@@ -53,6 +53,10 @@ def answer(command):
         else:
             state = "running"
         send({"id": command["id"], "state": state, "active": name in ("Safari", "Google Chrome")})
+    elif "mirror" in command and "id" in command:
+        denied = os.path.exists(os.path.join(os.environ["HOME"], "no-screen-recording"))
+        send({"id": command["id"], "shown": command["mirror"] and not denied,
+              "error": "macOS didn't let ucu see its desktop" if denied else None})
     elif "show" in command and "id" in command:
         send({"id": command["id"]})
     elif "park" in command and "id" in command:

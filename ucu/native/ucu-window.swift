@@ -19,6 +19,7 @@
 // Build: `ucu install` (swiftc -O native/ucu-window.swift -o ~/.local/bin/ucu-window)
 import AppKit
 import ApplicationServices
+import ScreenCaptureKit
 
 func fail(_ message: String, _ code: Int32 = 1) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -468,6 +469,97 @@ final class AgentCursor {
     }
 }
 
+// A live view of the agent's desktop on the user's screen, when they ask to watch the agent work. It floats in a corner
+// in the chat's color, never takes the keyboard or makes ucu the active app, and closes with its button or when the
+// helper goes at the end of the turn. A picture a few times a second is enough to follow along, and costs little.
+final class AgentMirror: NSObject, NSWindowDelegate {
+    static let size = NSSize(width: 480, height: 300), every = 0.25, margin: CGFloat = 16
+
+    var panel: NSPanel?
+    var timer: Timer?
+    var filter: SCContentFilter?
+    var capturing = false
+    let picture = NSImageView()
+
+    var isShown: Bool { panel?.isVisible == true }
+
+    // Calls back with nil once it shows, or with what kept it from showing.
+    func show(display: CGDirectDisplayID, title: String, color: NSColor?, slot: UInt32, then: @escaping (String?) -> Void) {
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+            DispatchQueue.main.async { [self] in
+                guard let screen = content?.displays.first(where: { $0.displayID == display }) else {
+                    return then(error.map { "macOS didn't let ucu see its desktop (\($0.localizedDescription)): the "
+                        + "user can allow Screen Recording for Claude in System Settings > Privacy & Security." }
+                        ?? "The agent's desktop isn't there to show.")
+                }
+                filter = SCContentFilter(display: screen, excludingWindows: [])
+                let panel = panel ?? makePanel(color: color, slot: slot)
+                panel.title = "\(title): agent's desktop"
+                panel.orderFrontRegardless()  // in front of the user's windows, without activating anything
+                timer?.invalidate()
+                timer = Timer.scheduledTimer(withTimeInterval: Self.every, repeats: true) { [self] _ in capture() }
+                capture()
+                then(nil)
+            }
+        }
+    }
+
+    func hide() {
+        timer?.invalidate()
+        timer = nil
+        panel?.orderOut(nil)
+    }
+
+    func capture() {
+        guard let filter, !capturing, isShown else { return }
+        capturing = true
+        let configuration = SCStreamConfiguration()
+        let scale = panel?.backingScaleFactor ?? 2
+        configuration.width = Int(picture.bounds.width * scale)
+        configuration.height = Int(picture.bounds.height * scale)
+        configuration.showsCursor = false
+        SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, _ in
+            DispatchQueue.main.async { [self] in
+                capturing = false
+                if let image { picture.image = NSImage(cgImage: image, size: .zero) }
+            }
+        }
+    }
+
+    func makePanel(color: NSColor?, slot: UInt32) -> NSPanel {
+        NSApplication.shared.setActivationPolicy(.accessory)  // no Dock icon, and it never becomes the active app
+        let area = NSScreen.screens.first?.visibleFrame ?? .zero  // the screen with the menu bar
+        let stagger = CGFloat(max(Int(slot) - 1, 0)) * 28  // several chats' views don't hide each other
+        let origin = NSPoint(x: area.maxX - Self.size.width - Self.margin - stagger, y: area.minY + Self.margin + stagger)
+        let panel = NSPanel(contentRect: NSRect(origin: origin, size: Self.size),
+                            styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isReleasedWhenClosed = false
+        panel.contentAspectRatio = NSSize(width: 16, height: 10)  // the desktop's own shape
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.delegate = self
+        picture.frame = NSRect(origin: .zero, size: Self.size)
+        picture.autoresizingMask = [.width, .height]
+        picture.imageScaling = .scaleProportionallyUpOrDown
+        picture.wantsLayer = true
+        picture.layer?.backgroundColor = NSColor.black.cgColor
+        picture.layer?.borderWidth = 2
+        picture.layer?.borderColor = (color ?? .gray).cgColor
+        panel.contentView = picture
+        self.panel = panel
+        return panel
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
 // Runs next to the server for as long as its stdin stays open, so it can't outlive the proxy. Commands come as one
 // JSON object per line on stdin; replies and reports go out the same way on stdout.
 //
@@ -485,6 +577,7 @@ final class AgentCursor {
 //   {"cursor": "#E5484D"}                               draw the agent's cursor in this color
 //   {"cursorTo": [640, 480]}                            move the cursor to this place on screen
 //   {"turnEnded": true}                                 the turn ended, so the cursor can go
+//   {"id": 5, "mirror": true}                           show the user a live view of the agent's desktop (false: close it)
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
@@ -507,6 +600,7 @@ final class Watcher {
     var keptHidden = Set<pid_t>()
     let desktop = AgentDesktop()
     let cursor = AgentCursor()
+    let mirror = AgentMirror()
     var parked = [pid_t: (app: NSRunningApplication, places: [(AXUIElement, CGPoint)], target: CGPoint)]()
     var busySince = Date.distantFuture
     var busyUntil = Date.distantPast
@@ -661,6 +755,7 @@ final class Watcher {
         if let names = command["park"] as? [String] {
             park(names, onlyHidden: command["onlyHidden"] as? Bool ?? false, id: command["id"])
         }
+        if let on = command["mirror"] as? Bool { showMirror(on, id: command["id"]) }
         if command["desktop"] != nil, let id = command["id"] {
             withDesktop { area in
                 let bounds = area.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] }
@@ -769,6 +864,26 @@ final class Watcher {
             if apps.allSatisfy({ !$0.isHidden && Self.isOnScreen($0) }) || -started.timeIntervalSinceNow > 2 {
                 timer.invalidate()
                 if let id { emit(["id": id]) }
+            }
+        }
+    }
+
+    func showMirror(_ on: Bool, id: Any?) {
+        func reply(_ problem: String?) {
+            guard let id else { return }
+            emit(["id": id, "shown": problem == nil && on, "error": problem as Any])
+        }
+        guard on else {
+            mirror.hide()
+            return reply(nil)
+        }
+        withDesktop { [self] area in
+            guard area != nil, let display = desktop.displayID else {
+                return reply("There is no agent desktop on this Mac to show.")
+            }
+            mirror.show(display: display, title: who, color: cursor.color, slot: desktop.slot ?? 1) { problem in
+                if problem == nil { self.log("the user watches the agent's desktop") }
+                reply(problem)
             }
         }
     }
