@@ -2,8 +2,9 @@
 //   osascript -l JavaScript browser.js '<json request>'   ->  prints a JSON reply
 // A request names its browser ("safari" or "chrome") and addresses a tab as {window_id, tab_index} (1-based index).
 // Nothing here activates the browser, except that Chrome comes forward when it makes a window: ucu-window puts the
-// user's app back. Operations that run in a page need Allow JavaScript from Apple Events (Safari: Develop menu; Chrome:
-// View > Developer), and every one needs Automation access to the browser.
+// user's app back. So a chat's window is made once, and stays when its tabs close. Operations that run in a page need
+// Allow JavaScript from Apple Events (Safari: Develop menu; Chrome: View > Developer), and every one needs Automation
+// access to the browser.
 ObjC.import("AppKit");
 
 const BLANK = /^(about:blank|favorites:|chrome:\/\/newtab)/;
@@ -17,6 +18,7 @@ const BROWSERS = {
       try { return w.document() !== null; } catch (e) { return false; }
     }),
     id: (w) => w.id(),
+    minimized: (w) => w.miniaturized(),
     currentIndex: (w) => w.currentTab.index(),
     select: (w, tab) => { w.currentTab = tab; },
     title: (tab) => tab.name(),
@@ -26,6 +28,7 @@ const BROWSERS = {
     app: () => Application("com.google.Chrome"),
     windows: (b) => b.windows(),
     id: (w) => Number(w.id()),
+    minimized: (w) => w.minimized(),
     currentIndex: (w) => w.activeTabIndex(),
     select: (w, tab, index) => { w.activeTabIndex = index; },
     title: (tab) => tab.title(),
@@ -80,6 +83,28 @@ function page(tab, fn, args) {
 
 function urlOf(tab) {
   try { return tab.url(); } catch (e) { return null; }
+}
+
+// A window the user can see: shown, not in the Dock, and on one of their screens, not on an agent's desktop.
+function onUsersScreen(win) {
+  try {
+    if (!win.visible() || B.minimized(win)) return false;
+    const at = win.bounds(), x = at.x + at.width / 2, y = at.y + 10;
+    const screens = $.NSScreen.screens, height = screens.objectAtIndex(0).frame.size.height;
+    for (let i = 0; i < screens.count; i++) {
+      const screen = screens.objectAtIndex(i), frame = screen.frame;
+      if (ObjC.unwrap(screen.localizedName) === "UCU Agent Desktop") continue;
+      const top = height - frame.origin.y - frame.size.height;
+      if (x >= frame.origin.x && x < frame.origin.x + frame.size.width && y >= top && y < top + frame.size.height) return true;
+    }
+  } catch (e) { /* window closing */ }
+  return false;
+}
+
+// The window the user is in, while the browser is the app in front, and null while it isn't.
+function usersWindow(except) {
+  if (!browser.frontmost()) return null;
+  return B.windows(browser).find((w) => w.visible() && B.id(w) !== except) || null;
 }
 
 function waitForLoad(tab, previousHref, timeoutSeconds) {
@@ -176,10 +201,20 @@ const OPS = {
     return Object.assign(describe(win, tab, req.tab_index), { loaded: done });
   },
 
+  // The agent's window outlives its last tab: making another shows for a moment, and brings Chrome forward.
   close_tab(req) {
-    const { tab } = tabOf(req);
+    const { win, tab } = tabOf(req);
+    if (req.keep_window && win.tabs.length === 1) return OPS.clear_window(req);
     tab.close();
     return { closed: true };
+  },
+
+  // Close the agent's tabs but keep its window, with one blank tab for the next page.
+  clear_window(req) {
+    const win = windowById(req.window_id);
+    win.tabs.push(B === BROWSERS.chrome ? browser.Tab() : browser.Tab({ url: "about:blank" }));
+    for (let i = win.tabs.length - 2; i >= 0; i--) win.tabs[i].close();
+    return { closed: true, blank: true };
   },
 
   close_window(req) {
@@ -188,11 +223,12 @@ const OPS = {
     return { closed: true };
   },
 
-  // Show a hidden window on the agent's desktop. Showing makes it the main window, which would take the user's
-  // keyboard, so the window they were in gets that back right away.
+  // Show a hidden window on the agent's desktop. While the user is in the browser, that takes their keyboard, so the
+  // window they are in gets it back right away. Behind another app there is no keyboard to take, and bringing their
+  // window forward would lift it over the other apps' windows.
   show_window(req) {
     const win = windowById(req.window_id);
-    const theirs = B.windows(browser).find((w) => w.visible() && B.id(w) !== req.window_id);
+    const theirs = usersWindow(req.window_id);
     win.bounds = req.bounds;
     win.visible = true;
     if (theirs) theirs.index = 1;
@@ -210,9 +246,20 @@ const OPS = {
     return { hidden: true };
   },
 
-  // The user asked to see the agent's tab: its window comes to their screen, the one with the menu bar, in front.
+  // The user asked to see the agent's tab. It opens as a new tab of the window they work in, at the agent's page, so
+  // there is one place to look and a sign-in there is the one the agent sees. Without a window of theirs, the
+  // agent's window comes to their screen, the one with the menu bar, in front.
   show_to_user(req) {
     const { win, tab } = tabOf(req);
+    const theirs = B.windows(browser).find((w) => B.id(w) !== req.window_id && onUsersScreen(w));
+    if (theirs) {
+      theirs.tabs.push(browser.Tab({ url: urlOf(tab) }));
+      const index = theirs.tabs.length, shown = theirs.tabs[index - 1];
+      B.select(theirs, shown, index);
+      theirs.index = 1;
+      browser.activate();
+      return Object.assign(describe(theirs, shown, index), { shown: true, in_their_window: true });
+    }
     if (B.currentIndex(win) !== req.tab_index) B.select(win, tab, req.tab_index);
     const screen = $.NSScreen.screens.objectAtIndex(0), full = screen.frame, area = screen.visibleFrame;
     const width = Math.min(1280, area.size.width - 80), height = Math.min(900, area.size.height - 80);
@@ -380,18 +427,22 @@ const OPS = {
 };
 
 // Where Chrome differs: its window ids are numbers in text, and making a window brings it forward and shows it where
-// the user is, so it goes straight to the agent's desktop, or out of sight. Showing it later doesn't take the user's
-// keyboard, so their window is left alone. Setting a tab's address brings Chrome forward too, so a tab is made without
-// one and goes to its page through the page itself, when the page lets ucu run JavaScript.
-function chromeGo(tab, url) {
+// the user is, so it goes straight to the agent's desktop, or out of sight. Setting a tab's address brings Chrome
+// forward too, so a tab is made without one and goes to its page through the page itself, when the page lets ucu run
+// JavaScript. When it doesn't, the caller hears that the address has to be set, and asks for that with `typed` once
+// ucu-window knows Chrome is about to come forward.
+function chromeGo(tab, url, typed) {
   const previous = urlOf(tab);
+  if (typed) {
+    tab.url = url;
+    return { previous, went: true };
+  }
   let asked = false;
   try { js(tab, `location.assign(${JSON.stringify(url)})`); asked = true; } catch (e) { /* no JavaScript here */ }
-  // A page can refuse, such as one of Chrome's own, and then the address is set after all.
+  // A page can refuse, such as one of Chrome's own.
   const until = Date.now() + 1500;
   while (asked && Date.now() < until && urlOf(tab) === previous && !tab.loading()) delay(0.05);
-  if (!asked || (urlOf(tab) === previous && !tab.loading() && previous !== url)) tab.url = url;
-  return previous;
+  return { previous, went: asked && !(urlOf(tab) === previous && !tab.loading() && previous !== url) };
 }
 
 const CHROME_OPS = {
@@ -406,20 +457,22 @@ const CHROME_OPS = {
       index = win.tabs.length;
       tab = win.tabs[index - 1];
     }
-    chromeGo(tab, req.url);
+    if (!chromeGo(tab, req.url, false).went) return { window_id: req.window_id, tab_index: index, typed: true };
     const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
     return Object.assign(describe(win, tab, index), { loaded: done });
   },
 
   navigate(req) {
     const { win, tab } = tabOf(req);
-    const previous = chromeGo(tab, req.url);
+    const { previous, went } = chromeGo(tab, req.url, req.typed);
+    if (!went) return { window_id: req.window_id, tab_index: req.tab_index, typed: true };
     const done = req.wait === false ? null : loaded(tab, previous === req.url ? null : previous, req.timeout_seconds);
     return Object.assign(describe(win, tab, req.tab_index), { loaded: done });
   },
 
   create_window(req) {
     const before = new Set(browser.windows().map((w) => w.id()));
+    const theirs = usersWindow(null);  // the new window takes their keyboard, so they get it back below
     // Given with the window, the place applies before Chrome draws it where the user is.
     let failure = null;
     try { browser.Window(req.bounds ? { bounds: req.bounds } : { visible: false }).make(); } catch (e) { failure = e; }
@@ -432,13 +485,7 @@ const CHROME_OPS = {
     if (!win) throw failure || new Error("Chrome did not create a window");
     if (req.bounds) win.bounds = req.bounds;
     else win.visible = false;
+    if (theirs) theirs.index = 1;
     return { window_id: Number(win.id()) };
-  },
-
-  show_window(req) {
-    const win = windowById(req.window_id);
-    win.bounds = req.bounds;
-    win.visible = true;
-    return { shown: true };
   },
 };

@@ -56,7 +56,8 @@ def answer(command):
         parked.update(command["park"])
         send({"id": command["id"], "state": "no desktop" if stuck else "parked", "moved": fresh})
     elif "desktop" in command:
-        send({"id": command["id"], "bounds": [-1920, -1200, 1920, 1200]})
+        moved = os.path.exists(os.path.join(os.environ["HOME"], "desktop-moved"))  # another chat's desktop left
+        send({"id": command["id"], "bounds": [-3840 if moved else -1920, -2400 if moved else -1200, 1920, 1200]})
 
 
 def log(entry):

@@ -181,18 +181,21 @@ Agents never need the front: every action works in the background, and a shortcu
 app's menu, which works even on a hidden app. The usage rules tell agents to bring an app forward only when you ask to
 see it or be taken there, never to make an action work, and to leave your clipboard alone.
 
-Apps still come forward by themselves, such as Chrome when it opens a window, a tab or an extension's popup. UCU puts
-your app back at once, usually within a hundredth of a second, and tells the agent: for an app it opened, whenever that
+Apps still come forward by themselves, such as Chrome when it opens a window or an extension's popup. UCU puts your app
+back at once, usually within a few hundredths of a second, and tells the agent: for an app it opened, whenever that
 happens while the chat runs; for an app you use too, while the chat works on it and for 10 seconds after. When the
-agent's own step is what brings it forward, such as making its Chrome window, that always happens. Otherwise UCU leaves
-the app in front if you clicked, pressed a modifier key, or hold Return just before, or if your app is no longer in
-sight, because you may have switched apps or Spaces yourself. Typing in your app doesn't count, since that is when a
-stolen focus hurts most. A new app that starts during a call is held back too, unless you did anything since just before
-it started.
+agent's own step is what brings it forward, such as making its Chrome window, that always happens, unless you clicked a
+window of that app just then. Otherwise UCU leaves the app in front if you clicked, pressed a modifier key, or hold
+Return just before, or if your app is no longer in sight, because you may have switched apps or Spaces yourself. Typing
+in your app doesn't count, since that is when a stolen focus hurts most. A new app that starts during a call is held
+back too, unless you did anything since just before it started.
 
-In an app a chat drives, one of the agent's windows out of sight can become the main window, such as its Chrome window
-when it shows or opens a popup. Your window gets the main role back, so your typing, or your next Command-Tab to that
-app, lands where you can see it.
+Safari and Chrome are yours while an agent works in them, because it works in a window of its own. When no step of the
+agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a
+link you clicked a few seconds ago, the Dock, a launcher or a script.
+
+While you are in an app a chat drives, one of the agent's windows out of sight can get the keyboard, such as its Chrome
+window when it is made or shown. Your window gets it back at once, so your typing lands where you can see it.
 
 When you ask to see what the agent is doing, or to be taken there, `focus_window` with `activate: true` brings that
 window from the private desktop to your screen and to the front, and the browser tools' `show` hands you the agent's
@@ -207,7 +210,8 @@ Each chat that needs one gets a virtual display, called UCU Agent Desktop, 1920 
 screen, so they keep rendering and take clicks, but nobody sees them. It touches your screens at one corner at most, so
 your pointer won't wander onto it, and it appears in System Settings > Displays while it exists.
 
-UCU creates it on first use and removes it 2 minutes after a turn ends, or when the chat closes. A chat whose apps UCU
+UCU creates it on first use and removes it 2 minutes after a turn ends, or when the chat closes. macOS moves the
+other chats' desktops when one goes, with their windows, and each chat follows its own. A chat whose apps UCU
 opened are still running keeps it between turns instead, with the guard that puts your app back, so none of them can
 come forward over you while the agent is away. When that chat closes, UCU quits the apps it opened and you never took
 over; one asking about unsaved changes stays open, hidden, until you look at it. If you click such an app in the Dock,
@@ -222,23 +226,27 @@ works in a window of its own, so you can keep browsing, and several agents can w
 
 - `list` shows every window and tab, yours too.
 - `open` loads a page in a new tab of the agent's own window. Each chat has its own, closed when the chat ends.
+- `close` closes a tab, or all the agent's tabs. Its window stays for the next page, since making a window is what
+  shows for a moment.
 - `navigate`, `read`, `click`, `type`, `wait` and `eval` work in those tabs, out of your sight.
 - `steps` runs several of these in one call, such as open, type, click, wait and read, and stops at the first that
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file
   input as if chosen there, or are dropped on a drop zone. Agents confirm with you first.
-- `show` hands you the agent's tab when you ask to see it: its window comes to your screen, in front, and stays yours.
+- `show` hands you the agent's page when you ask to see it, as a new tab of the window you work in, in front. The
+  agent's copy closes, so there is one tab to sign in or look at, and the agent keeps working in that one.
 - `shot` takes a screenshot. Your window keeps the keyboard.
 - Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`. Agents are
   told to use those only if you asked.
 
 Safari's window stays hidden, and moves to the private desktop for a screenshot until the turn ends, since Safari stops
 painting hidden windows. Chrome's window is on the private desktop whenever the agent works in it, where pages behave as
-on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls. It is hidden
-when the turn ends. Chrome comes forward for an instant when it makes the agent's window, once a chat, and UCU puts your
-app back at once. Tabs open blank and go to their page through the page itself, which keeps Chrome behind, when Chrome
-allows JavaScript from Apple Events. An extension's popup closes once Chrome loses focus, so agents open its page in
-their tab instead, at `chrome-extension://<id>/<page>`.
+on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls. It is
+hidden when the turn ends. Chrome comes forward for an instant when it makes the agent's window, once a chat, and UCU
+puts your app back at once. Safari's new window shows for an instant where yours are, once a chat too. Tabs open blank
+and go to their page through the page itself, which keeps Chrome behind, when Chrome allows JavaScript from Apple
+Events. A page that runs none, such as one of Chrome's own, brings Chrome forward for an instant as well. An extension's
+popup closes once Chrome loses focus, so agents open its page in their tab instead, at `chrome-extension://<id>/<page>`.
 
 Safari needs **Safari > Settings > Advanced > Show features for web developers**, then **Develop > Allow JavaScript from
 Apple Events**. Chrome needs **View > Developer > Allow JavaScript from Apple Events** for everything that runs in a page.
@@ -254,6 +262,7 @@ from the Reload button on `chrome://extensions`.
 Each chat has its own engine, so chats on different apps work at the same time. Each also keeps a small file in
 `~/Library/Application Support/ucu/sessions/`, and when an agent gets an app another agent used in the last 3 minutes, it
 gets a note saying who. Two agents on the same window still undo each other's work, so the note asks it to wait or ask you.
+Each chat's browser window is its own, on its own desktop, and a chat that ends leaves the others' windows alone.
 
 ### Cursors
 
