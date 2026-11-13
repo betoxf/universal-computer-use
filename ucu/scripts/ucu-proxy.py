@@ -203,8 +203,9 @@ WINDOW_TOOLS = [
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks and typing are synthetic, so some logins ignore "
                     "them. `upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
-                    "drops them on an element, with no picker: confirm with the user first. `show` brings your tab to "
-                    "the user, only when they asked to see it; the window is theirs after that. `steps` runs several "
+                    "drops them on an element, with no picker: confirm with the user first. `show` opens your page as "
+                    "a tab of the user's window and brings it to them, only when they asked to see it; that tab is "
+                    "theirs after that. When they say they did something in the browser, `list` shows the tab. `steps` runs several "
                     "operations in one call, each {op, ...}, and stops at the first that fails.",
      "inputSchema": {"type": "object", "properties": {
          "op": {"enum": ["list", "open", "navigate", "read", "click", "type", "wait", "eval", "upload", "shot",
@@ -623,7 +624,12 @@ class BrowserWorkspace:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.call({"op": "show_to_user", **target})
-                self.window, self.tab, self.shown, self.place = None, None, False, None  # the window is theirs now
+                if result.pop("in_their_window", False):
+                    self.clear_window()  # one copy of the page, the one they see; the window stays for the next page
+                    result["note"] = ("Your page is now a tab of the user's window, and theirs. Keep working there "
+                                      "with allow_user_tab and allow_current_tab, as they asked to see it.")
+                else:
+                    self.window, self.tab, self.shown, self.place = None, None, False, None  # the window is theirs
             elif op in self.OPERATIONS:
                 target = self.target(arguments)
                 if op in self.CHANGES:

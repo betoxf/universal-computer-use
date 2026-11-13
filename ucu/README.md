@@ -233,7 +233,8 @@ works in a window of its own, so you can keep browsing, and several agents can w
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file
   input as if chosen there, or are dropped on a drop zone. Agents confirm with you first.
-- `show` hands you the agent's tab when you ask to see it: its window comes to your screen, in front, and stays yours.
+- `show` hands you the agent's page when you ask to see it, as a new tab of the window you work in, in front. The
+  agent's copy closes, so there is one tab to sign in or look at, and the agent keeps working in that one.
 - `shot` takes a screenshot. Your window keeps the keyboard.
 - Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`. Agents are
   told to use those only if you asked.

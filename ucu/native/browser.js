@@ -18,6 +18,7 @@ const BROWSERS = {
       try { return w.document() !== null; } catch (e) { return false; }
     }),
     id: (w) => w.id(),
+    minimized: (w) => w.miniaturized(),
     currentIndex: (w) => w.currentTab.index(),
     select: (w, tab) => { w.currentTab = tab; },
     title: (tab) => tab.name(),
@@ -27,6 +28,7 @@ const BROWSERS = {
     app: () => Application("com.google.Chrome"),
     windows: (b) => b.windows(),
     id: (w) => Number(w.id()),
+    minimized: (w) => w.minimized(),
     currentIndex: (w) => w.activeTabIndex(),
     select: (w, tab, index) => { w.activeTabIndex = index; },
     title: (tab) => tab.title(),
@@ -81,6 +83,22 @@ function page(tab, fn, args) {
 
 function urlOf(tab) {
   try { return tab.url(); } catch (e) { return null; }
+}
+
+// A window the user can see: shown, not in the Dock, and on one of their screens, not on an agent's desktop.
+function onUsersScreen(win) {
+  try {
+    if (!win.visible() || B.minimized(win)) return false;
+    const at = win.bounds(), x = at.x + at.width / 2, y = at.y + 10;
+    const screens = $.NSScreen.screens, height = screens.objectAtIndex(0).frame.size.height;
+    for (let i = 0; i < screens.count; i++) {
+      const screen = screens.objectAtIndex(i), frame = screen.frame;
+      if (ObjC.unwrap(screen.localizedName) === "UCU Agent Desktop") continue;
+      const top = height - frame.origin.y - frame.size.height;
+      if (x >= frame.origin.x && x < frame.origin.x + frame.size.width && y >= top && y < top + frame.size.height) return true;
+    }
+  } catch (e) { /* window closing */ }
+  return false;
 }
 
 // The window the user is in, while the browser is the app in front, and null while it isn't.
@@ -228,9 +246,20 @@ const OPS = {
     return { hidden: true };
   },
 
-  // The user asked to see the agent's tab: its window comes to their screen, the one with the menu bar, in front.
+  // The user asked to see the agent's tab. It opens as a new tab of the window they work in, at the agent's page, so
+  // there is one place to look and a sign-in there is the one the agent sees. Without a window of theirs, the
+  // agent's window comes to their screen, the one with the menu bar, in front.
   show_to_user(req) {
     const { win, tab } = tabOf(req);
+    const theirs = B.windows(browser).find((w) => B.id(w) !== req.window_id && onUsersScreen(w));
+    if (theirs) {
+      theirs.tabs.push(browser.Tab({ url: urlOf(tab) }));
+      const index = theirs.tabs.length, shown = theirs.tabs[index - 1];
+      B.select(theirs, shown, index);
+      theirs.index = 1;
+      browser.activate();
+      return Object.assign(describe(theirs, shown, index), { shown: true, in_their_window: true });
+    }
     if (B.currentIndex(win) !== req.tab_index) B.select(win, tab, req.tab_index);
     const screen = $.NSScreen.screens.objectAtIndex(0), full = screen.frame, area = screen.visibleFrame;
     const width = Math.min(1280, area.size.width - 80), height = Math.min(900, area.size.height - 80);

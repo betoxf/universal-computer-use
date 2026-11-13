@@ -578,8 +578,24 @@ class ChromeTest(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn("Sign in", notes[0])
 
-    def test_brings_its_tab_to_the_user_who_asked_and_lets_them_keep_it(self):
+    def test_shows_its_page_as_a_tab_of_the_users_window(self):
         proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        shown = json.loads(proxy.chrome(op="show")["content"][0]["text"])
+        self.assertEqual((shown["window_id"], shown["tab_index"]), (61, 2))
+        self.assertIn("allow_user_tab", shown["note"])
+        self.assertEqual(len(proxy.chrome_calls("clear_window")), 1)  # one copy of the page, the user's
+        self.assertIn("Google Chrome", [command["allow"] for command in proxy.commands("allow")])
+        self.assertIn("call `open` first", proxy.chrome(op="read")["content"][0]["text"])
+        proxy.chrome(op="open", url="https://b.test")
+        self.assertEqual(len(proxy.chrome_calls("create_window")), 1)  # its own window stayed, out of sight
+        proxy.process.stdin.close()
+        proxy.process.wait(10)
+        self.assertEqual([call["window_id"] for call in proxy.chrome_calls("close_window")], [901])
+
+    def test_brings_its_window_to_a_user_without_one_and_lets_them_keep_it(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "no-user-window").touch()
         proxy.chrome(op="open", url="https://a.test")
         self.assertFalse(proxy.chrome(op="show")["isError"])
         self.assertEqual(proxy.chrome_calls("show_to_user")[0]["window_id"], 901)

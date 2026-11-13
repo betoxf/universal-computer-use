@@ -65,6 +65,14 @@ def answer(request, state):
             return {"closed": True, "blank": True}
         window["tabs"].pop(request["tab_index"] - 1)
         return {"closed": True}
+    if op == "show_to_user":
+        theirs = next((window for window in state["windows"]
+                       if window["window_id"] != request["window_id"] and window.get("visible")), None)
+        if theirs and not os.path.exists(os.path.join(os.environ["HOME"], "no-user-window")):
+            theirs["tabs"].append({"url": "https://a.test"})
+            return {"window_id": theirs["window_id"], "tab_index": len(theirs["tabs"]), "shown": True,
+                    "in_their_window": True}
+        return {"shown": True}
     if op == "select_tab":
         return {"changed": False}
     if op == "read" and request.get("what") == "interactive":
