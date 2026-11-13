@@ -61,6 +61,7 @@ class Proxy:
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, cwd=folder)
         self.messages = queue.Queue()
         self.ids = itertools.count(1)
+        self.notifications = []
         threading.Thread(target=self._read, daemon=True).start()
         test.addCleanup(self.close)
         if policy:
@@ -98,6 +99,9 @@ class Proxy:
         request_id = next(self.ids)
         self.send({"id": request_id, "method": method, "params": params or {}})
         reply = self.receive()
+        while "id" not in reply:  # a notification, such as that the tools may have changed
+            self.notifications.append(reply)
+            reply = self.receive()
         assert reply.get("id") == request_id, reply
         return reply
 
@@ -165,6 +169,8 @@ class ServerTest(unittest.TestCase):
         self.assertIn("confirmations", rules)
         names = [tool["name"] for tool in server.request("tools/list")["result"]["tools"]]
         self.assertEqual(names, ["look", "act", "list_windows", "focus_window", "move_to_desktop", "mirror", "safari", "chrome"])
+        # A client that reconnects after an update reads the tools again.
+        self.assertIn({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}, server.notifications)
 
     def test_keeps_tool_definitions_and_rules_small(self):
         tools = json.dumps(self.server.request("tools/list")["result"]["tools"])
