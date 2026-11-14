@@ -523,6 +523,7 @@ final class Watcher {
     var resting = false  // between turns, this runs only to keep ucu's apps out of sight
     var observers = [pid_t: AXObserver]()  // new windows of parked apps, which join the others on the desktop
     var who = "?"
+    var usersWindows = [Int: CGPoint]()  // the windows on the user's screens as the desktop was made, and where
 
     func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
@@ -541,6 +542,15 @@ final class Watcher {
             launchedFresh.remove($0.processIdentifier)
             if resting { restIfDone() }
         }
+        // Another chat's desktop coming or going has macOS arrange the displays again, and move windows with them.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.returnStrays(known: false)
+                self.rescueStranded()
+            }
+        }
+        rescueStranded()  // what an earlier chat's desktop left behind
         scanDialogs(reporting: false)
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
             if Date() < busyUntil { scan() }
@@ -586,15 +596,97 @@ final class Watcher {
             leaving.filter { !$0.isTerminated }.forEach {
                 log("\($0.localizedName ?? "?"), which ucu opened, didn't quit when the chat ended: left hidden")
             }
-            parked.values.filter { !$0.app.isTerminated }.forEach { $0.app.hide() }
+            // An app the user had open, which the agent moved to its desktop, is theirs again where it was. One that
+            // ucu opened has no place of the user's, so it hides.
+            for place in Array(parked.values) where !place.app.isTerminated {
+                if launchedHidden.contains(place.app.processIdentifier) { place.app.hide() } else { bringBack(place.app) }
+            }
+            returnStrays()
+            rescueStranded()
             let tucked = tuckAway()
             if parked.isEmpty && !tucked { exit(0) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(0) }
         }
     }
 
-    // A window of an app that isn't parked can still be on the desktop, such as an agent's own browser window when the
-    // server stopped before hiding it. Hiding its app would hide the user's windows too, so it goes to the Dock.
+    // The user's windows are theirs wherever macOS puts them. When a display comes or goes it moves windows about, and
+    // one of the user's can end up on the agent's desktop, where they can't see it and where it stays, on no screen at
+    // all, once the desktop is gone: they click the app's Dock icon and nothing comes. So what is on the desktop without
+    // ucu having put it there goes back. A window seen on the user's screen as the desktop was made goes where it was.
+    // Any other is of an app the chat neither opened, nor moved, nor works in with a window of its own, and goes to
+    // the same place on the user's main screen.
+    func noteUsersWindows() {
+        usersWindows = [:]
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for window in list where (window[kCGWindowLayer as String] as? Int) == 0 {
+            let origin = bounds(of: window).origin
+            if let number = window[kCGWindowNumber as String] as? Int, !AgentDesktop.isOutOfSight(origin) {
+                usersWindows[number] = origin
+            }
+        }
+    }
+
+    // `known` says the windows noted as the desktop was made still tell the user's from the chat's: later a browser
+    // window of the chat's own that the user had on their screen may be back on the desktop, where it belongs.
+    func returnStrays(known: Bool = true) {
+        guard let area = desktop.bounds else { return }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for window in list where (window[kCGWindowLayer as String] as? Int) == 0 {
+            let frame = bounds(of: window)
+            guard area.contains(CGPoint(x: frame.midX, y: frame.minY + 10)), frame.height > 60,
+                  let pid = (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init), pid != getpid(),
+                  parked[pid] == nil, !launchedHidden.contains(pid),
+                  let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            let was = (window[kCGWindowNumber as String] as? Int).flatMap { usersWindows[$0] }
+            guard !isOwn(app) || (known && was != nil) else { continue }  // the chat's own, in a browser it works in
+            let home = was ?? CGPoint(x: frame.minX - area.minX, y: max(frame.minY - area.minY, 30))
+            let all: [AXUIElement] = attribute(appElement(pid), kAXWindowsAttribute) ?? []
+            for stray in all where Self.frame(of: stray).map({ abs($0.minX - frame.minX) < 2 && abs($0.minY - frame.minY) < 2 })
+                ?? false {
+                move(stray, to: home)
+                log("a window of \(app.localizedName ?? "?") was on the agent's desktop without ucu having put it "
+                    + "there: back on the user's screen")
+            }
+        }
+    }
+
+    // A window can also be left where a desktop is or was without showing there: one that an earlier ucu sent to the
+    // Dock from its desktop, which comes out of the Dock where nobody sees it, or one that is placed there but still
+    // belongs to the user's screen. The user clicks the app's Dock icon and nothing comes. A window that an agent
+    // keeps on a desktop shows there, so it isn't one of these. Such a window gets a place on the user's main screen,
+    // as far from its corner as it was from the desktop's; one in the Dock stays there, and comes out in sight.
+    func rescueStranded(of only: NSRunningApplication? = nil) {
+        let shown = Set((CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []).compactMap { window -> String? in
+            guard let pid = window[kCGWindowOwnerPID as String] as? Int else { return nil }
+            let frame = bounds(of: window)
+            return "\(pid) \(Int(frame.minX)) \(Int(frame.minY))"
+        })
+        let apps = only.map { [$0] } ?? NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+        for app in apps where !app.isHidden && !app.isTerminated {
+            let pid = app.processIdentifier
+            guard pid != getpid(), parked[pid] == nil, !launchedHidden.contains(pid) else { continue }
+            let windows: [AXUIElement] = attribute(appElement(pid), kAXWindowsAttribute) ?? []
+            for window in windows where Self.isOutOfSight(window) {
+                var movable = DarwinBoolean(false)  // Finder's desktop on a display is a window too, and stays
+                AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &movable)
+                guard movable.boolValue, let frame = Self.frame(of: window), frame.height > 60,
+                      !shown.contains("\(pid) \(Int(frame.minX)) \(Int(frame.minY))") else { continue }
+                var display: CGDirectDisplayID = 0, count: UInt32 = 0
+                let on = CGGetDisplaysWithPoint(frame.origin, 1, &display, &count) == .success && count > 0
+                let corner = on ? CGDisplayBounds(display).origin : CGPoint(x: frame.minX - 120, y: frame.minY - 120)
+                move(window, to: CGPoint(x: max(frame.minX - corner.x, 0), y: max(frame.minY - corner.y, 30)))
+                log("a window of \(app.localizedName ?? "?") was out of the user's sight, where an agent's desktop is "
+                    + "or was: it has a place on their screen again")
+            }
+        }
+    }
+
+    // A window of the chat's own can still be on the desktop, in a browser it works in, when the server stopped before
+    // hiding it. Hiding its app would hide the user's windows too, so it goes to the Dock. Only the chat's own: a
+    // window of the user's that macOS moved here went back to their screen just before, and is never sent to the Dock.
     func tuckAway() -> Bool {
         guard let area = desktop.bounds else { return false }
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
@@ -602,7 +694,8 @@ final class Watcher {
         let owners = Set(list.compactMap { window -> pid_t? in
             guard let pid = (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init), parked[pid] == nil,
                   pid != getpid(), (window[kCGWindowLayer as String] as? Int) == 0,
-                  area.intersects(bounds(of: window)) else { return nil }
+                  area.intersects(bounds(of: window)),
+                  NSRunningApplication(processIdentifier: pid).map(isOwn) ?? false else { return nil }  // never the user's
             return pid
         })
         var tucked = false
@@ -775,12 +868,15 @@ final class Watcher {
 
     // macOS takes a moment to put a new display in place, and a window moved before that stays where it was.
     func withDesktop(_ action: @escaping (CGRect?) -> Void) {
+        let new = desktop.display == nil
+        if new { noteUsersWindows() }
         guard desktop.open() else { return action(nil) }
         let started = Date()
         if desktop.isReady { return action(desktop.bounds) }
         Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [self] timer in
             if desktop.isReady || -started.timeIntervalSinceNow > 3 {
                 timer.invalidate()
+                if new { returnStrays() }  // before anything of the agent's goes there
                 action(desktop.isReady ? desktop.bounds : nil)
             }
         }
@@ -1022,7 +1118,10 @@ final class Watcher {
         let ours = Date() < oursUntil[pid] ?? .distantPast
         let owned = launchedHidden.contains(pid), name = app.localizedName ?? "?"
         front = app
-        if !ours, Self.userSwitched() { bringBack(app) }  // they clicked its Dock icon: its windows can't stay hidden
+        if !ours, Self.userSwitched() {  // they clicked its Dock icon: its windows can't stay hidden, or out of sight
+            bringBack(app)
+            rescueStranded(of: app)
+        }
         guard let previous, previous.processIdentifier != pid, !previous.isTerminated,
               !(pid == allowed && Date() < allowedUntil) else { return }
         let over = "\(name) came forward over \(previous.localizedName ?? "?")"
