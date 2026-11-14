@@ -203,6 +203,7 @@ class WatchTest(unittest.TestCase):
     def test_marks_the_time_a_call_runs_and_the_apps_it_drives(self):
         proxy = WatchingProxy(self)
         proxy.look()
+        proxy.wait_until(lambda: len(proxy.commands("busy")) == 2)  # the helper logs a moment after the reply
         self.assertEqual([command["busy"] for command in proxy.commands("busy")], [True, False])
         self.assertEqual(proxy.commands("watch")[0]["watch"], ["calculator"])
 
@@ -318,14 +319,23 @@ class SharedMacTest(unittest.TestCase):
 
 
 class SafariTest(unittest.TestCase):
-    def test_opens_tabs_in_one_window_of_its_own(self):
+    def test_opens_its_tabs_in_the_users_window_behind_theirs(self):
         proxy = WatchingProxy(self)
         first = json.loads(proxy.safari(op="open", url="https://a.test")["content"][0]["text"])
-        proxy.safari(op="open", url="https://b.test")
-        self.assertEqual(first["window_id"], 900)
-        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
-        self.assertEqual([call["reuse_blank"] for call in proxy.safari_calls("open_tab")], [True, False])
+        second = json.loads(proxy.safari(op="open", url="https://b.test")["content"][0]["text"])
+        self.assertEqual([(tab["window_id"], tab["tab_index"]) for tab in (first, second)], [(51, 3), (51, 4)])
+        self.assertEqual(proxy.safari_calls("create_window"), [])  # no window of its own
+        opened = proxy.safari_calls("open_tab")
+        self.assertEqual(("near" in opened[0], opened[1]["near"]), (False, 51))  # the second joins the first
+        self.assertRegex(opened[0]["mark"], "^[0-9a-f]{8}-1$")
+        self.assertEqual(opened[1]["mark"], opened[0]["mark"][:-1] + "2")  # each tab its own mark, of this chat's
         self.assertEqual(proxy.engine_calls(), [])  # no need for the engine
+
+    def test_gets_safari_a_window_when_the_user_has_none(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "no-user-window").touch()
+        opened = json.loads(proxy.safari(op="open", url="https://a.test")["content"][0]["text"])
+        self.assertEqual((opened["window_id"], opened["tab_index"]), (900, 1))
 
     def test_keeps_chromes_window_when_its_tabs_close(self):
         proxy = WatchingProxy(self)
@@ -348,25 +358,26 @@ class SafariTest(unittest.TestCase):
         self.assertEqual(len(proxy.chrome_calls("create_window")), 1)
         self.assertEqual(proxy.chrome_calls("open_tab")[-1]["reuse_blank"], True)
 
-    def test_closes_safaris_window_with_its_last_tab(self):
-        # A blank Safari window, even a hidden one, takes the links the user opens from other apps.
+    def test_closes_its_tabs_and_none_of_the_users(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
-        self.assertEqual(json.loads(proxy.safari(op="close")["content"][0]["text"]), {"closed": True})
-        self.assertEqual([call["window_id"] for call in proxy.safari_calls("close_window")], [900])
         proxy.safari(op="open", url="https://b.test")
         proxy.safari(op="open", url="https://c.test")
-        proxy.safari(op="close", tab_index=2)
-        self.assertEqual(len(proxy.safari_calls("close_window")), 1)  # a tab of its own is left
-        proxy.safari(op="close", tab_index=1)
-        self.assertEqual(len(proxy.safari_calls("close_window")), 2)
-        proxy.safari(op="open", url="https://d.test")
-        self.assertEqual(len(proxy.safari_calls("create_window")), 3)
+        proxy.safari(op="close", tab_index=3)  # its first
+        marks = [call["mark"] for call in proxy.safari_calls("open_tab")]
+        self.assertEqual(proxy.safari_calls("close_tab")[0]["own"]["mark"], marks[0])
+        self.assertEqual(json.loads(proxy.safari(op="close")["content"][0]["text"]), {"closed": True})
+        self.assertEqual([call["own"]["mark"] for call in proxy.safari_calls("close_tab")],
+                         [marks[0], marks[1], marks[2]])
+        windows = json.loads(proxy.safari(op="list")["content"][0]["text"])
+        self.assertEqual([len(window["tabs"]) for window in windows], [2])  # the user's two are as they were
+        self.assertIn("call `open` first", proxy.safari(op="read")["content"][0]["text"])
 
     def test_closes_a_tab_of_the_users_as_it_is(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="close", window_id=51, tab_index=1, allow_user_tab=True)
-        self.assertEqual(proxy.safari_calls("close_tab")[0]["keep_window"], False)
+        call = proxy.safari_calls("close_tab")[0]
+        self.assertEqual((call["window_id"], call["tab_index"], "own" in call), (51, 1, False))
 
     def test_tells_the_helper_the_window_is_its_own(self):
         proxy = WatchingProxy(self)
@@ -379,9 +390,12 @@ class SafariTest(unittest.TestCase):
     def test_acts_on_its_last_tab_by_default(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="open", url="https://b.test")
         proxy.safari(op="read", what="links")
         call = proxy.safari_calls("read")[0]
-        self.assertEqual((call["window_id"], call["tab_index"], call["what"]), (900, 1, "links"))
+        self.assertEqual((call["own"]["window_id"], call["own"]["tab_index"], call["what"]), (51, 4, "links"))
+        proxy.safari(op="read", tab_index=3)  # its other tab, by where it is
+        self.assertEqual(proxy.safari_calls("read")[1]["own"]["mark"], proxy.safari_calls("open_tab")[0]["mark"])
 
     def test_stays_out_of_safari_when_it_is_denied(self):
         proxy = WatchingProxy(self)
@@ -391,10 +405,41 @@ class SafariTest(unittest.TestCase):
         self.assertIn("deny list", result["content"][0]["text"])
         self.assertEqual(proxy.safari_calls(), [])
 
-    def test_marks_the_window_it_makes(self):
+    def test_finds_its_tab_again_among_the_users(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
-        self.assertRegex(proxy.safari_calls("create_window")[0]["mark"], "^[0-9a-f]{32}$")
+        (Path(proxy.home.name) / "user-opened-tab").touch()  # in front of it, so it is the fourth tab now
+        self.assertFalse(proxy.safari(op="read")["isError"])
+        proxy.safari(op="read")
+        self.assertEqual([call["own"]["tab_index"] for call in proxy.safari_calls("read")], [3, 4])
+
+    def test_stops_when_the_user_closed_its_tab(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        (Path(proxy.home.name) / "user-closed-tab").touch()
+        gone = proxy.safari(op="click", selector="a")
+        self.assertTrue(gone["isError"])
+        self.assertIn("can't be found", gone["content"][0]["text"])
+        self.assertIn("call `open` first", proxy.safari(op="read")["content"][0]["text"])
+
+    def test_follows_its_tab_to_another_site_when_that_is_proven(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        (Path(proxy.home.name) / "page-left-site").write_text("referrer")  # it came there from the chat's page
+        self.assertFalse(proxy.safari(op="click", selector="a")["isError"])
+
+    def test_takes_the_agents_word_for_its_tab_when_nothing_proves_it(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        (Path(proxy.home.name) / "page-left-site").touch()
+        for _ in range(2):  # however often it asks
+            unproven = proxy.safari(op="click", selector="a")
+            self.assertTrue(unproven["isError"])
+            self.assertIn("pass tab_index 3", unproven["content"][0]["text"])
+        self.assertFalse(proxy.safari(op="click", selector="a", tab_index=3)["isError"])
+        self.assertEqual([call["own"].get("claim") for call in proxy.safari_calls("click")], [None, None, 3])
+        self.assertFalse(proxy.safari(op="click", selector="a")["isError"])  # marked again
+        self.assertNotIn("claim", proxy.safari_calls("click")[-1]["own"])
 
     def test_needs_a_tab_first(self):
         proxy = WatchingProxy(self)
@@ -402,11 +447,13 @@ class SafariTest(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertIn("call `open` first", result["content"][0]["text"])
 
-    def test_shows_every_window_and_marks_its_own(self):
+    def test_shows_every_tab_and_marks_its_own(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
         windows = json.loads(proxy.safari(op="list")["content"][0]["text"])
-        self.assertEqual([(window["window_id"], window["yours"]) for window in windows], [(51, False), (900, True)])
+        self.assertEqual([(tab["tab_index"], tab.get("yours", False)) for tab in windows[0]["tabs"]],
+                         [(1, False), (2, False), (3, True)])
+        self.assertNotIn("mark", windows[0]["tabs"][2])  # the mark is ucu's business
 
     def test_reads_the_users_tabs_but_changes_them_only_when_told(self):
         proxy = WatchingProxy(self)
@@ -420,28 +467,49 @@ class SafariTest(unittest.TestCase):
                                       allow_current_tab=True)["isError"])
         self.assertEqual(len(proxy.safari_calls("click")), 2)
 
-    def test_takes_a_screenshot_on_the_agents_desktop_and_hides_after_the_turn(self):
+    def test_takes_a_screenshot_of_a_copy_while_its_tab_is_behind_the_users(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
-        image = proxy.safari(op="shot")["content"][0]
+        image, note = proxy.safari(op="shot")["content"]
         self.assertEqual((image["type"], image["mimeType"], base64.b64decode(image["data"])),
                          ("image", "image/jpeg", b"picture"))
-        self.assertEqual(proxy.safari_calls("show_window")[0]["bounds"]["x"], -1900)
-        proxy.safari(op="shot")
-        self.assertEqual(len(proxy.safari_calls("show_window")), 1)
+        self.assertIn("fresh copy", note["text"])
+        self.assertEqual(proxy.safari_calls("show_window")[0]["bounds"]["x"], -1900)  # on the agent's desktop
+        copy = proxy.safari_calls("navigate")[0]
+        self.assertEqual((copy["window_id"], copy["tab_index"], copy["url"]), (900, 1, "https://a.test"))
+        self.assertEqual([call["window_id"] for call in proxy.safari_calls("close_window")], [900])  # and gone again
         proxy.end_turn()
-        proxy.wait_until(lambda: proxy.safari_calls("hide_window"))
+        time.sleep(0.5)
+        self.assertEqual(proxy.safari_calls("hide_window"), [])  # nothing of its own is left to hide
+
+    def test_takes_a_screenshot_of_the_users_window_while_it_shows_its_tab(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "tab-in-front").touch()
+        proxy.safari(op="open", url="https://a.test")
+        self.assertEqual([item["type"] for item in proxy.safari(op="shot")["content"]], ["image"])
+        self.assertEqual(proxy.safari_calls("create_window"), [])
+        self.assertIn("-l51", proxy.screencapture_args())
 
     def test_captures_only_its_own_window(self):
         proxy = WatchingProxy(self)
         self.assertTrue(proxy.safari(op="shot", window_id=51, tab_index=2)["isError"])
 
-    def test_closes_its_window_when_the_chat_ends(self):
+    def test_closes_its_tabs_when_the_chat_ends(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
         proxy.process.stdin.close()
         proxy.process.wait(10)
-        self.assertEqual(proxy.safari_calls("close_window")[0]["window_id"], 900)
+        self.assertEqual(proxy.safari_calls("close_tab")[0]["own"]["mark"], proxy.safari_calls("open_tab")[0]["mark"])
+        self.assertEqual(proxy.safari_calls("close_window"), [])
+
+    def test_brings_its_tab_to_the_front_when_the_user_asks(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertIn("in front of the user", proxy.safari(op="show")["content"][0]["text"])
+        self.assertEqual(proxy.safari_calls("show_tab")[0]["own"]["tab_index"], 3)
+        self.assertIn("Safari", [command["allow"] for command in proxy.commands("allow")])
+        self.assertIn("nothing to take back", proxy.safari(op="hide")["content"][0]["text"])
+        self.assertTrue(proxy.safari(op="show", window_id=51, tab_index=1)["isError"])  # the user's stay put
 
     def test_says_how_to_turn_on_what_safari_needs(self):
         proxy = WatchingProxy(self)
@@ -464,7 +532,7 @@ class SafariTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"])["uploaded"], ["My Report.pdf"])
         call = proxy.safari_calls("upload")[0]
         self.assertEqual(call["files"], [{"path": str(report), "name": "My Report.pdf", "type": "application/pdf"}])
-        self.assertEqual((call["window_id"], call["tab_index"], call["selector"]), (900, 1, "#file"))
+        self.assertEqual((call["own"]["window_id"], call["own"]["tab_index"], call["selector"]), (51, 3, "#file"))
         self.assertNotIn("paths", call)
 
     def test_uploads_only_files_it_can_find(self):
@@ -616,17 +684,17 @@ class ChromeTest(unittest.TestCase):
 
     def test_takes_its_window_back_from_the_user(self):
         proxy = WatchingProxy(self)
-        proxy.safari(op="open", url="https://a.test")
-        self.assertIn("false", proxy.safari(op="hide")["content"][0]["text"])  # it isn't with them
-        proxy.safari(op="show")
-        self.assertIn("true", proxy.safari(op="hide")["content"][0]["text"])
-        self.assertNotIn("only_at", proxy.safari_calls("hide_window")[0])
+        proxy.chrome(op="open", url="https://a.test")
+        self.assertIn("false", proxy.chrome(op="hide")["content"][0]["text"])  # it isn't with them
+        proxy.chrome(op="show")
+        self.assertIn("true", proxy.chrome(op="hide")["content"][0]["text"])
+        self.assertNotIn("only_at", proxy.chrome_calls("hide_window")[0])
         proxy.process.stdin.close()
         proxy.process.wait(10)
-        self.assertEqual([call["window_id"] for call in proxy.safari_calls("close_window")], [900])
+        self.assertEqual([call["window_id"] for call in proxy.chrome_calls("close_window")], [901])
 
     def test_finds_its_tab_again_after_the_user_opened_one_in_its_window(self):
-        for browser, calls in (("chrome", "chrome_calls"), ("safari", "safari_calls")):  # by id, and by address
+        for browser, calls in (("chrome", "chrome_calls"),):
             proxy = WatchingProxy(self)
             use = getattr(proxy, browser)
             use(op="open", url="https://a.test")
@@ -787,7 +855,7 @@ class CompanionTest(unittest.TestCase):
         proxy = CompanionProxy(self)
         proxy.safari(op="open", url="https://a.test")
         self.assertEqual(proxy.asked, [])
-        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
+        self.assertEqual(len(proxy.safari_calls("open_tab")), 1)
 
     def test_its_host_relays_between_the_chats_and_the_extension(self):
         home = tempfile.TemporaryDirectory(dir="/tmp")

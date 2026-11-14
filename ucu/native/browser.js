@@ -1,6 +1,9 @@
 // JXA backend for ucu's `safari` and `chrome` tools.
 //   osascript -l JavaScript browser.js '<json request>'   ->  prints a JSON reply
 // A request names its browser ("safari" or "chrome") and addresses a tab as {window_id, tab_index} (1-based index).
+// In Safari a chat's tabs are in the user's own windows, where indexes change as the user opens, closes and moves
+// tabs, so a request for one of them carries `own`: the tab's mark, where it last was, and what its window held.
+// The tab is found again first, and the reply's `own` says where it is now (see ownTab and settle).
 // Nothing here activates the browser, except that Chrome comes forward when it makes a window: ucu-window puts the
 // user's app back. So a chat's Chrome window is made once, and stays when its tabs close. Operations in a page need
 // Allow JavaScript from Apple Events (Safari: Develop menu; Chrome: View > Developer), and every one needs Automation
@@ -8,6 +11,8 @@
 ObjC.import("AppKit");
 
 const BLANK = /^(about:blank|favorites:|chrome:\/\/newtab)/;
+const MARK = "ucu-tab";  // where a page's session storage holds the mark of the chat whose tab it is in
+const BADGE = "🤖 ";     // what such a tab's title starts with, so the user sees which tab is an agent's
 const CHUNK = 1 << 20;  // characters of a file's base64 that go to a page at a time
 
 const BROWSERS = {
@@ -18,6 +23,7 @@ const BROWSERS = {
       try { return w.document() !== null; } catch (e) { return false; }
     }),
     id: (w) => w.id(),
+    minimized: (w) => w.miniaturized(),
     currentIndex: (w) => w.currentTab.index(),
     select: (w, tab) => { w.currentTab = tab; },
     title: (tab) => tab.name(),
@@ -27,6 +33,7 @@ const BROWSERS = {
     app: () => Application("com.google.Chrome"),
     windows: (b) => b.windows(),
     id: (w) => Number(w.id()),
+    minimized: (w) => w.minimized(),
     tabId: (tab) => Number(tab.id()),  // Safari's tabs have none
     currentIndex: (w) => w.activeTabIndex(),
     select: (w, tab, index) => { w.activeTabIndex = index; },
@@ -43,11 +50,21 @@ function run(argv) {
     B = BROWSERS[request.browser || "safari"];
     if (!B) throw new Error(`Unknown browser ${request.browser}`);
     browser = B.app();
-    const op = (request.browser === "chrome" && CHROME_OPS[request.op]) || OPS[request.op];
+    const op = (request.browser === "chrome" && CHROME_OPS[request.op])
+      || (request.browser === "safari" && SAFARI_OPS[request.op]) || OPS[request.op];
     if (!op) throw new Error(`Unknown operation ${request.op}`);
-    return JSON.stringify({ ok: true, result: op(request) });
+    if (request.own) {
+      request.at = ownTab(request.own);
+      request.window_id = B.id(request.at.win);
+      request.tab_index = request.at.index;
+    }
+    const reply = { ok: true, result: op(request) };
+    if (request.at) reply.own = settle(request);
+    return JSON.stringify(reply);
   } catch (error) {
-    return JSON.stringify({ ok: false, error: String(error && error.message || error) });
+    const reply = { ok: false, error: String(error && error.message || error) };
+    if (error && error.candidate !== undefined) reply.lost = { candidate: error.candidate };
+    return JSON.stringify(reply);
   }
 }
 
@@ -82,6 +99,126 @@ function page(tab, fn, args) {
 
 function urlOf(tab) {
   try { return tab.url(); } catch (e) { return null; }
+}
+
+function tabUrls(win) {
+  return win.tabs.url().map((url) => url || null);
+}
+
+// A mark lasts while its tab stays on one site: Safari gives each site its own session storage, and clears a
+// window's name too when its page goes to another site.
+function markOf(tab) {
+  try {
+    return js(tab, `(function(){try{return sessionStorage.getItem(${JSON.stringify(MARK)})}catch(e){return null}})()`) || null;
+  } catch (e) {
+    return null;  // a page that runs no script
+  }
+}
+
+function stamp(tab, mark) {
+  const put = `(function(m,b){try{sessionStorage.setItem(${JSON.stringify(MARK)},m)}catch(e){}`
+    + `if(document.title.indexOf(b)!==0)document.title=b+document.title})(${JSON.stringify(mark)},${JSON.stringify(BADGE)})`;
+  try { js(tab, put); } catch (e) { /* a page that runs no script */ }
+}
+
+function lostTab(message, home, candidate) {
+  const holds = home ? ` Its window now holds: ${OPS.list({ window_id: B.id(home) })[0].tabs.map((tab) =>
+    `${tab.tab_index} ${JSON.stringify(tab.title || "")} ${tab.url || ""}`).join("; ")}.` : "";
+  const error = new Error(message + holds);
+  error.candidate = candidate;
+  return error;
+}
+
+// The chat's tab, wherever the user moved it: where it was, or else among the tabs with the badge, by its mark. When
+// its page went to another site the mark is gone. Then it is the tab in its old place if every other tab of the
+// window is as it was, and it came there from the chat's page, or the agent says it is its own (`claim`). Anything
+// less proves nothing, and the step fails without touching a tab that may be the user's.
+function ownTab(own) {
+  const windows = B.windows(browser);
+  const home = windows.find((w) => B.id(w) === own.window_id) || null;
+  const marked = (w, index) => markOf(w.tabs[index - 1]) === own.mark;
+  if (home && own.tab_index <= home.tabs.length && marked(home, own.tab_index)) {
+    return { win: home, index: own.tab_index, before: tabUrls(home) };
+  }
+  for (const w of home ? [home].concat(windows.filter((other) => other !== home)) : windows) {
+    const names = w.tabs.name();
+    for (let index = 1; index <= names.length; index++) {
+      if (String(names[index - 1] || "").indexOf(BADGE) === 0 && marked(w, index)) {
+        return { win: w, index, before: tabUrls(w) };
+      }
+    }
+  }
+  if (!home) throw lostTab("Your tab can't be found, and its window is gone: `open` the page again.", null, null);
+  const urls = tabUrls(home), known = own.known || [];
+  const others = urls.length === known.length && urls.every((url, i) => i === own.tab_index - 1 || url === known[i]);
+  if (!others) {
+    throw lostTab("Your tab can't be found: the user may have closed it, or changed the window's tabs while its page "
+      + "went to another site. `open` the page again.", home, null);
+  }
+  let from = null;
+  try { from = js(home.tabs[own.tab_index - 1], "document.referrer"); } catch (e) { /* a page that runs no script */ }
+  if (own.claim !== own.tab_index && !(own.origin && from && from.indexOf(own.origin) === 0)) {
+    throw lostTab(`Your tab's page went to another site, and nothing proves which tab it is now. Tab ${own.tab_index} `
+      + `is where yours was, and shows ${urls[own.tab_index - 1] || "no page"}: if that is the page you expect, pass `
+      + `tab_index ${own.tab_index}; if not, it is the user's, and you \`open\` yours again.`, home, own.tab_index);
+  }
+  return { win: home, index: own.tab_index, before: urls, proven: true };
+}
+
+// After a step in a chat's tab, its mark and badge go back on where the page changed, and the reply says where the tab
+// is and what its window holds. A page the step itself loaded is the chat's if the window's other tabs stayed put
+// meanwhile, since an index means another tab once the user closes one before it.
+function settle(request) {
+  const { win, index, before } = request.at, mark = request.own ? request.own.mark : request.mark;
+  const tab = win.tabs[index - 1], urls = tabUrls(win);
+  let origin = request.own ? request.own.origin || null : null;
+  const steady = urls.length === before.length && urls.every((url, i) => i === index - 1 || url === before[i]);
+  if (markOf(tab) === mark || ((request.at.loaded || request.at.proven) && steady)) {
+    stamp(tab, mark);
+    try { origin = js(tab, "location.origin") || origin; } catch (e) { /* a page that runs no script */ }
+  }
+  return { mark, window_id: B.id(win), tab_index: index, known: urls, origin };
+}
+
+// Whether a window is on one of the user's screens, not on an agent's desktop, where a chat's window is for a moment.
+function onUsersScreen(win) {
+  try {
+    const at = win.bounds(), x = at.x + at.width / 2, y = at.y + 10;
+    const screens = $.NSScreen.screens, height = screens.objectAtIndex(0).frame.size.height;
+    for (let i = 0; i < screens.count; i++) {
+      const screen = screens.objectAtIndex(i), frame = screen.frame, top = height - frame.origin.y - frame.size.height;
+      if (x >= frame.origin.x && x < frame.origin.x + frame.size.width && y >= top && y < top + frame.size.height) {
+        return ObjC.unwrap(screen.localizedName) !== "UCU Agent Desktop";
+      }
+    }
+  } catch (e) { /* window closing */ }
+  return false;
+}
+
+// The user's windows a chat's tab can join: the one in front first, and those in the Dock last.
+function usersWindows() {
+  const open = [], docked = [];
+  for (const w of B.windows(browser)) {
+    let minimized = false, visible = false;
+    try { minimized = B.minimized(w); visible = w.visible(); } catch (e) { continue; }
+    if (minimized && onUsersScreen(w)) docked.push(w);
+    else if (visible && onUsersScreen(w)) open.push(w);
+  }
+  return open.concat(docked);
+}
+
+// A new window, found by a mark that tells it from one the user or another chat opens at the same moment.
+function newWindow(mark) {
+  const url = `about:blank#ucu-${mark}`;
+  browser.Document({ url }).make();
+  for (let i = 0; i < 200; i++) {
+    const win = browser.windows().find((w) => {
+      try { return w.currentTab.url() === url; } catch (e) { return false; }
+    });
+    if (win) return win;
+    delay(0.01);
+  }
+  throw new Error("Safari did not create a window");
 }
 
 // The window the user is in, while the browser is the app in front, and null while it isn't.
@@ -124,22 +261,28 @@ function loaded(tab, previousHref, timeoutSeconds) {
 function describe(win, tab, index) {
   let title = null;
   try { title = B.title(tab); } catch (e) {}
+  if (title && title.indexOf(BADGE) === 0) title = title.slice(BADGE.length);  // the badge is for the user's eyes
   return { window_id: B.id(win), tab_index: index, url: urlOf(tab), title };
 }
 
 const OPS = {
   // With window_id, only that window, with where it is and its tabs' ids: for the agent's window while the user has
-  // it on their screen, where they move it and change its tabs.
+  // it on their screen, where they move it and change its tabs. With `marks`, the tabs that carry one of them say so:
+  // a chat's own tabs among the user's.
   list(req) {
-    const one = req.window_id !== undefined;
+    const one = req.window_id !== undefined, marks = req.marks || [];
     return B.windows(browser).filter((w) => !one || B.id(w) === req.window_id).map((w) => {
       let current = null;
       try { current = B.currentIndex(w); } catch (e) {}
       const tabs = [];
-      const count = w.tabs.length;
+      const count = w.tabs.length, names = marks.length ? w.tabs.name() : [];
       for (let i = 0; i < count; i++) {
         const tab = describe(w, w.tabs[i], i + 1);
         if (one && B.tabId) tab.id = B.tabId(w.tabs[i]);
+        if (String(names[i] || "").indexOf(BADGE) === 0) {
+          const mark = markOf(w.tabs[i]);
+          if (marks.indexOf(mark) >= 0) Object.assign(tab, { yours: true, mark });
+        }
         tabs.push(tab);
       }
       const found = { window_id: B.id(w), visible: w.visible(), current_tab_index: current, tabs };
@@ -150,17 +293,7 @@ const OPS = {
 
   // Create a hidden window (no focus change; the window can flash for a moment when created).
   create_window(req) {
-    // The mark tells this window from one the user or another chat opens at the same moment.
-    const mark = `about:blank#ucu-${req.mark}`;
-    browser.Document({ url: mark }).make();
-    let win = null;
-    for (let i = 0; i < 200 && !win; i++) {
-      win = browser.windows().find((w) => {
-        try { return w.currentTab.url() === mark; } catch (e) { return false; }
-      }) || null;
-      if (!win) delay(0.01);
-    }
-    if (!win) throw new Error("Safari did not create a window");
+    const win = newWindow(req.mark);
     win.visible = false;
     return { window_id: win.id() };
   },
@@ -248,6 +381,24 @@ const OPS = {
     const width = Math.min(1280, area.size.width - 80), height = Math.min(900, area.size.height - 80);
     win.bounds = { x: area.origin.x + 40, y: full.size.height - area.origin.y - area.size.height + 40, width, height };
     win.visible = true;
+    win.index = 1;
+    browser.activate();
+    return { shown: true };
+  },
+
+  // Where a tab is and whether its window shows it now, which a screenshot of it needs.
+  locate(req) {
+    const { win, tab } = tabOf(req);
+    return Object.assign(describe(win, tab, req.tab_index), {
+      current: B.currentIndex(win) === req.tab_index, visible: win.visible(), minimized: B.minimized(win),
+      bounds: win.bounds() });
+  },
+
+  // The user asked to see a chat's tab in their window: it becomes the tab in front, of the window and app in front.
+  show_tab(req) {
+    const { win, tab } = tabOf(req);
+    if (B.minimized(win)) win.miniaturized = false;
+    if (B.currentIndex(win) !== req.tab_index) B.select(win, tab, req.tab_index);
     win.index = 1;
     browser.activate();
     return { shown: true };
@@ -428,6 +579,40 @@ function chromeGo(tab, url, typed) {
   while (asked && Date.now() < until && urlOf(tab) === previous && !tab.loading()) delay(0.05);
   return { previous, went: asked && !(urlOf(tab) === previous && !tab.loading() && previous !== url) };
 }
+
+const SAFARI_OPS = {
+  // Open a URL in a tab of the chat's own, at the end of a window of the user's and behind the tab they are on: the
+  // window the chat's last tab is in, or the one in front. With no window of theirs, Safari gets one, as it would at
+  // a click on a link in another app, but without coming forward.
+  open_tab(req) {
+    let win = (req.near !== undefined && B.windows(browser).find((w) => B.id(w) === req.near)) || usersWindows()[0];
+    let index = 1, before = [null];
+    if (win) {
+      before = tabUrls(win).concat([null]);
+      win.tabs.push(browser.Tab({ url: req.url }));
+      index = win.tabs.length;
+    } else {
+      win = newWindow(req.mark);
+      win.tabs[0].url = req.url;
+    }
+    const tab = win.tabs[index - 1];
+    const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
+    req.at = { win, index, before, loaded: true };
+    return Object.assign(describe(win, tab, index), { loaded: done });
+  },
+
+  navigate(req) {
+    if (req.at) req.at.loaded = true;
+    return OPS.navigate(req);
+  },
+
+  close_tab(req) {
+    const { tab } = tabOf(req);
+    tab.close();
+    req.at = null;  // nothing left to mark
+    return { closed: true };
+  },
+};
 
 const CHROME_OPS = {
   open_tab(req) {

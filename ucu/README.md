@@ -126,7 +126,7 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
 - `focus_window {app, title, unfullscreen?, activate?}`: makes a window the main window. With `activate: true`, the
   window comes to your screen and the front, only when you ask to see it.
 - `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
-- `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own window.
+- `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own tabs.
 
 A step is `{do, on, ...}`, where `on` is a number from `look`, or `{do, name, ...}` with the element's name, which needs
 no `look` first:
@@ -191,7 +191,7 @@ Return just before, or if your app is no longer in sight, because you may have s
 in your app doesn't count, since that is when a stolen focus hurts most. A new app that starts during a call is held
 back too, unless you did anything since just before it started.
 
-Safari and Chrome are yours while an agent works in them, because it works in a window of its own. When no step of the
+Safari and Chrome are yours while an agent works in them, because it works in tabs or a window of its own. When no step of the
 agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a
 link you clicked a few seconds ago, the Dock, a launcher or a script.
 
@@ -222,38 +222,54 @@ crash, goes to the Dock rather than onto your screen.
 
 ### Safari and Chrome
 
-Agents use the `safari` and `chrome` tools, and UCU tells them to if they name the browser while you are in it. Each chat
-works in a window of its own, so you can keep browsing, and several agents can work at once:
+Agents use the `safari` and `chrome` tools, and UCU tells them to if they name the browser while you are in it. Several
+agents can work at once, and you keep browsing:
 
-- `list` shows every window and tab, yours too.
-- `open` loads a page in a new tab of the agent's own window. Each chat has its own, closed when the chat ends.
-- `close` closes a tab, or all the agent's tabs. Chrome's window stays for the next page, since making one brings
-  Chrome forward for a moment. Safari's closes with its last tab: Safari opens the links you click in other apps in a
-  blank window, even a hidden one, and opens no window when you click its Dock icon while it has any.
-- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in those tabs, out of your sight.
+- `list` shows every window and tab, yours too, and which are the agent's.
+- `open` loads a page in a new tab of the agent's own.
+- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in the agent's tabs, in the background.
 - `steps` runs several of these in one call, such as open, type, click, wait and read, and stops at the first that
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file
   input as if chosen there, or are dropped on a drop zone. Agents confirm with you first.
-- `show` brings the agent's own window to your screen, in front, when you ask to see it or have to do something in
-  it, such as sign in. It is a normal window that you use, and the agent keeps working in the same one, so there is one
-  page and no copy. Your own windows and tabs stay yours. `hide` takes the window back out of sight; until then it
-  stays with you, also after the chat ends.
-- While you have that window, you can open tabs in it. The agent finds its own tab again before each step, is told
-  which tabs are there and which one you are on, and asks which to use when it can't tell. It closes only its own tab
-  there, and takes no screenshot that would switch the tab you are on.
-- `shot` takes a screenshot. Your window keeps the keyboard.
+- `shot` takes a screenshot.
+- `close` closes one of the agent's tabs, or all of them. They also close when the chat ends.
 - Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`. Agents are
   told to use those only if you asked.
 
-Safari's window stays hidden, and moves to the private desktop for a screenshot until the turn ends, since Safari stops
-painting hidden windows. Chrome's window is on the private desktop whenever the agent works in it, where pages behave as
-on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls. It is
-hidden when the turn ends. Chrome comes forward for an instant when it makes the agent's window, once a chat, and UCU
-puts your app back at once. Safari's new window shows for an instant where yours are, once a chat too. Tabs open blank
-and go to their page through the page itself, which keeps Chrome behind, when Chrome allows JavaScript from Apple
-Events. A page that runs none, such as one of Chrome's own, brings Chrome forward for an instant as well. An extension's
-popup closes once Chrome loses focus, so agents open its page in their tab instead, at `chrome-extension://<id>/<page>`.
+**In Safari the agent's tabs are in your own window**, at its end and behind the tab you are on, each with 🤖 in front
+of its title. Safari has no hidden window of an agent's to stumble over: its Dock icon and the links you click in other
+apps do what they always do, and to see what the agent is doing, or to sign in for it, you click its tab. `show` brings
+that tab to the front when you ask. If you have no Safari window, the agent's first page opens one, behind what you are
+using.
+
+Safari has no ids for tabs, and you open, close and move tabs around the agent's. So each of its tabs carries a mark in
+its page, and UCU finds the tab by it before every step. A page that goes to another site loses the mark, since Safari
+keeps such storage per site. UCU then takes the tab in the same place only if every other tab of the window is as it
+was and the page came there from the agent's page; without that proof the step fails, and the agent has to say which
+tab is its own, or open the page again. A step never runs in a tab that may be yours.
+
+A screenshot needs a tab that its window shows. While the agent's tab is behind yours, `shot` loads the same address
+in a window on the private desktop, takes the picture and closes that window again, so the picture is of a fresh copy:
+what the agent typed or opened in the page isn't in it. Safari's new window shows for an instant where yours are when
+it is made.
+
+**In Chrome each chat works in a window of its own**, on the private desktop whenever the agent works in it, where pages
+behave as on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls.
+It is hidden when the turn ends, stays for the next page when its tabs close, and closes when the chat ends.
+
+- `show` brings that window to your screen, in front, when you ask to see it or have to do something in it, such as
+  sign in. It is a normal window that you use, and the agent keeps working in the same one, so there is one page and no
+  copy. `hide` takes the window back out of sight; until then it stays with you, also after the chat ends.
+- While you have that window, you can open tabs in it. The agent finds its own tab again before each step, is told
+  which tabs are there and which one you are on, closes only its own tab there, and takes no screenshot that would
+  switch the tab you are on.
+
+Chrome comes forward for an instant when it makes the agent's window, once a chat, and UCU puts your app back at once.
+Tabs open blank and go to their page through the page itself, which keeps Chrome behind, when Chrome allows JavaScript
+from Apple Events. A page that runs none, such as one of Chrome's own, brings Chrome forward for an instant as well. An
+extension's popup closes once Chrome loses focus, so agents open its page in their tab instead, at
+`chrome-extension://<id>/<page>`.
 
 With UCU's own extension, Chrome doesn't come forward for either. AppleScript, which UCU drives Chrome with, can't make
 a window or set a tab's address without that, and an extension can: it makes the agent's window unfocused, already on
