@@ -2,7 +2,7 @@
 //   osascript -l JavaScript browser.js '<json request>'   ->  prints a JSON reply
 // A request names its browser ("safari" or "chrome") and addresses a tab as {window_id, tab_index} (1-based index).
 // Nothing here activates the browser, except that Chrome comes forward when it makes a window: ucu-window puts the
-// user's app back. So a chat's window is made once, and stays when its tabs close. Operations that run in a page need
+// user's app back. So a chat's Chrome window is made once, and stays when its tabs close. Operations in a page need
 // Allow JavaScript from Apple Events (Safari: Develop menu; Chrome: View > Developer), and every one needs Automation
 // access to the browser.
 ObjC.import("AppKit");

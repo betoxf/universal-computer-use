@@ -327,26 +327,41 @@ class SafariTest(unittest.TestCase):
         self.assertEqual([call["reuse_blank"] for call in proxy.safari_calls("open_tab")], [True, False])
         self.assertEqual(proxy.engine_calls(), [])  # no need for the engine
 
-    def test_keeps_its_window_when_its_tabs_close(self):
+    def test_keeps_chromes_window_when_its_tabs_close(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        self.assertEqual(json.loads(proxy.chrome(op="close")["content"][0]["text"]), {"closed": True})
+        self.assertIn("call `open` first", proxy.chrome(op="read")["content"][0]["text"])
+        proxy.chrome(op="open", url="https://b.test")
+        self.assertEqual((len(proxy.chrome_calls("create_window")), proxy.chrome_calls("close_window")), (1, []))
+        self.assertEqual([call["reuse_blank"] for call in proxy.chrome_calls("open_tab")], [True, True])
+
+    def test_keeps_chromes_window_when_its_last_tab_closes(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        proxy.chrome(op="open", url="https://b.test")
+        proxy.chrome(op="close", tab_index=2)
+        self.assertFalse(proxy.chrome(op="read", tab_index=1)["isError"])  # the other tab is still its own
+        self.assertEqual(json.loads(proxy.chrome(op="close", tab_index=1)["content"][0]["text"]), {"closed": True})
+        self.assertEqual([call["keep_window"] for call in proxy.chrome_calls("close_tab")], [True, True])
+        proxy.chrome(op="open", url="https://c.test")
+        self.assertEqual(len(proxy.chrome_calls("create_window")), 1)
+        self.assertEqual(proxy.chrome_calls("open_tab")[-1]["reuse_blank"], True)
+
+    def test_closes_safaris_window_with_its_last_tab(self):
+        # A blank Safari window, even a hidden one, takes the links the user opens from other apps.
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
         self.assertEqual(json.loads(proxy.safari(op="close")["content"][0]["text"]), {"closed": True})
-        self.assertIn("call `open` first", proxy.safari(op="read")["content"][0]["text"])
+        self.assertEqual([call["window_id"] for call in proxy.safari_calls("close_window")], [900])
         proxy.safari(op="open", url="https://b.test")
-        self.assertEqual((len(proxy.safari_calls("create_window")), proxy.safari_calls("close_window")), (1, []))
-        self.assertEqual([call["reuse_blank"] for call in proxy.safari_calls("open_tab")], [True, True])
-
-    def test_keeps_its_window_when_its_last_tab_closes(self):
-        proxy = WatchingProxy(self)
-        proxy.safari(op="open", url="https://a.test")
-        proxy.safari(op="open", url="https://b.test")
-        proxy.safari(op="close", tab_index=2)
-        self.assertFalse(proxy.safari(op="read", tab_index=1)["isError"])  # the other tab is still its own
-        self.assertEqual(json.loads(proxy.safari(op="close", tab_index=1)["content"][0]["text"]), {"closed": True})
-        self.assertEqual([call["keep_window"] for call in proxy.safari_calls("close_tab")], [True, True])
         proxy.safari(op="open", url="https://c.test")
-        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
-        self.assertEqual(proxy.safari_calls("open_tab")[-1]["reuse_blank"], True)
+        proxy.safari(op="close", tab_index=2)
+        self.assertEqual(len(proxy.safari_calls("close_window")), 1)  # a tab of its own is left
+        proxy.safari(op="close", tab_index=1)
+        self.assertEqual(len(proxy.safari_calls("close_window")), 2)
+        proxy.safari(op="open", url="https://d.test")
+        self.assertEqual(len(proxy.safari_calls("create_window")), 3)
 
     def test_closes_a_tab_of_the_users_as_it_is(self):
         proxy = WatchingProxy(self)

@@ -227,8 +227,9 @@ works in a window of its own, so you can keep browsing, and several agents can w
 
 - `list` shows every window and tab, yours too.
 - `open` loads a page in a new tab of the agent's own window. Each chat has its own, closed when the chat ends.
-- `close` closes a tab, or all the agent's tabs. Its window stays for the next page, since making a window is what
-  shows for a moment.
+- `close` closes a tab, or all the agent's tabs. Chrome's window stays for the next page, since making one brings
+  Chrome forward for a moment. Safari's closes with its last tab: Safari opens the links you click in other apps in a
+  blank window, even a hidden one, and opens no window when you click its Dock icon while it has any.
 - `navigate`, `read`, `click`, `type`, `wait` and `eval` work in those tabs, out of your sight.
 - `steps` runs several of these in one call, such as open, type, click, wait and read, and stops at the first that
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.

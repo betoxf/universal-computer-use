@@ -659,8 +659,9 @@ class BrowserWorkspace:
                 target = self.target(arguments)
                 self.guard(target, arguments)
                 result = self.call({"op": "close_tab", **target, "keep_window": target["window_id"] == self.window})
-                if result.pop("blank", False) or (self.shared and target == {"window_id": self.window,
-                                                                             "tab_index": self.tab}):
+                if result.pop("blank", False):  # its last tab
+                    self.clear_window()
+                elif self.shared and target == {"window_id": self.window, "tab_index": self.tab}:
                     self.tab = None
             elif op == "shot":
                 return self.shot(self.target(arguments)) + ([{"type": "text", "text": note}] if note else [])
@@ -766,10 +767,13 @@ class BrowserWorkspace:
                 pass
 
     def clear_window(self):
-        """Close the chat's tabs. Its window stays, blank, for the next page: a new one would show for a moment as it
-        is made, and bring Chrome forward."""
+        """Close the chat's tabs. Chrome's window stays, blank, for the next page: making a new one brings Chrome
+        forward. Safari's goes with them: Safari opens the links the user clicks in other apps in a blank window, even
+        a hidden one, and opens no window at a click on its Dock icon while it has any."""
         if self.window is None:
             return False
+        if self.tool == "safari":
+            return self.close_window()
         self.tab = None
         try:
             self.call({"op": "clear_window", "window_id": self.window}, timeout=15)
