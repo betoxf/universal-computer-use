@@ -479,6 +479,13 @@ class BrowserWorkspace:
             raise RuntimeError(self.explain(str(reply.get("error"))))
         return reply["result"]
 
+    def point_out(self, result):
+        """Send the chat's cursor to where a step in a page landed, which the page says while it is in sight.
+        ucu-window draws it only over a window of the browser's that the user can see."""
+        point = result.pop("point", None) if isinstance(result, dict) else None
+        if point:
+            self.server.windows.send({"cursorTo": point})
+
     def explain(self, message):
         if "JavaScript from Apple Events" in message or "JavaScript through AppleScript" in message:
             return f"{message} It is the user's setting: ask them to turn on {self.setting}."
@@ -693,6 +700,7 @@ class BrowserWorkspace:
                     timeout += size / 1_000_000
                 request = {**allowed, **target, "op": self.OPERATIONS[op]}
                 result = self.go(request) if op == "navigate" else self.call(request, timeout=timeout)
+                self.point_out(result)
                 if op == "read" and isinstance(result.get("content"), list) and arguments.get("what") == "interactive":
                     result["content"] = interactive_lines(result["content"], result.get("url"))
             else:
@@ -936,6 +944,7 @@ class SafariWorkspace(BrowserWorkspace):
                     if op == "close" or op in self.CHANGES:
                         self.guard(theirs, arguments)
                     result = self.call({**request, **theirs}, timeout=timeout)
+                self.point_out(result)
                 if op == "read" and isinstance(result.get("content"), list) and arguments.get("what") == "interactive":
                     result["content"] = interactive_lines(result["content"], result.get("url"))
             else:

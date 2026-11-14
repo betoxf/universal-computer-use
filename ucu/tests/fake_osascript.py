@@ -216,6 +216,9 @@ def answer(request, state, reply):
             {"ref": "c3", "tag": "a", "text": "Elsewhere", "href": "https://b.test/x"}]}
     if op == "upload":
         return {"uploaded": [file["name"] for file in request["files"]], "into": "input"}
+    if op in ("click", "type"):  # the page says where that was on screen while it is in sight
+        in_sight = os.path.exists(os.path.join(os.environ["HOME"], "page-in-sight"))
+        return {"op": op, "point": [640, 480] if in_sight else None}
     if op == "hide_window" and os.path.exists(os.path.join(os.environ["HOME"], "window-moved")):
         return {"hidden": False, "moved": True}
     return {"op": op}

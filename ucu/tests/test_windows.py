@@ -539,6 +539,17 @@ class SafariTest(unittest.TestCase):
         proxy.act({"do": "click", "on": 1}, app="Safari")
         self.assertEqual([command["ours"] for command in proxy.commands("ours")], ["Safari"])
 
+    def test_draws_its_cursor_where_a_step_lands_in_a_page_the_user_sees(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="click", selector="a")  # behind the user's tab: nowhere to point
+        self.assertEqual(proxy.commands("cursorTo"), [])
+        (Path(proxy.home.name) / "page-in-sight").touch()
+        clicked = proxy.safari(op="click", selector="a")["content"][0]["text"]
+        proxy.safari(op="type", selector="input", text="x")
+        self.assertEqual([command["cursorTo"] for command in proxy.commands("cursorTo")], [[640, 480], [640, 480]])
+        self.assertNotIn("point", clicked)  # the agent has no use for it
+
     def test_brings_its_tab_to_the_front_when_the_user_asks(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")

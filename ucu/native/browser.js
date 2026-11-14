@@ -275,6 +275,18 @@ function loaded(tab, previousHref, timeoutSeconds) {
   return B === BROWSERS.chrome ? chromeLoaded(tab, previousHref, timeoutSeconds) : waitForLoad(tab, previousHref, timeoutSeconds);
 }
 
+// A step's `spot` in its window becomes its `point` on the screen. The page's own idea of where its window is can't
+// be used: Safari counts a window's top from the top of the screen it is on, not from the main screen's.
+function onScreen(win, done) {
+  const spot = done.spot;
+  delete done.spot;
+  if (spot) {
+    const at = win.bounds();
+    done.point = [at.x + spot[0], at.y + spot[1]];
+  }
+  return done;
+}
+
 function describe(win, tab, index) {
   let title = null;
   try { title = B.title(tab); } catch (e) {}
@@ -467,8 +479,8 @@ const OPS = {
   },
 
   click(req) {
-    const { tab } = tabOf(req);
-    return page(tab, function (a) {
+    const { win, tab } = tabOf(req);
+    return onScreen(win, page(tab, function (a) {
       let el = null;
       if (a.ref) el = document.querySelector(`[data-ucu-ref="${a.ref}"]`);
       else if (a.selector) el = document.querySelector(a.selector);
@@ -486,13 +498,18 @@ const OPS = {
         el.dispatchEvent(type.startsWith("pointer") ? new PointerEvent(type, at) : new MouseEvent(type, at));
       }
       el.click();
-      return { clicked: el.tagName.toLowerCase(), text: (el.innerText || el.value || "").trim().slice(0, 100) };
-    }, { ref: req.ref || null, selector: req.selector || null, text: req.text || null });
+      // Where that was in the window, while the page is in sight, for the chat's cursor: below the window's toolbar
+      // and right of its sidebar.
+      const spot = document.visibilityState !== "visible" ? null
+        : [Math.max(0, window.outerWidth - window.innerWidth) + r.x + r.width / 2,
+           window.outerHeight - window.innerHeight + r.y + r.height / 2];
+      return { clicked: el.tagName.toLowerCase(), text: (el.innerText || el.value || "").trim().slice(0, 100), spot };
+    }, { ref: req.ref || null, selector: req.selector || null, text: req.text || null }));
   },
 
   type(req) {
-    const { tab } = tabOf(req);
-    return page(tab, function (a) {
+    const { win, tab } = tabOf(req);
+    return onScreen(win, page(tab, function (a) {
       const el = a.ref ? document.querySelector(`[data-ucu-ref="${a.ref}"]`) : document.querySelector(a.selector);
       if (!el) throw new Error("No element found for " + (a.ref || a.selector));
       el.focus();
@@ -513,8 +530,12 @@ const OPS = {
         el.dispatchEvent(new KeyboardEvent("keyup", key));
         if (proceed && el.form) { el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit(); }
       }
-      return { typed: a.text.length, value: el.isContentEditable ? el.textContent.slice(0, 200) : String(el.value).slice(0, 200) };
-    }, { ref: req.ref || null, selector: req.selector || null, text: req.text, clear: req.clear !== false, submit: !!req.submit });
+      const r = el.getBoundingClientRect();
+      const spot = document.visibilityState !== "visible" ? null
+        : [Math.max(0, window.outerWidth - window.innerWidth) + r.x + r.width / 2,
+           window.outerHeight - window.innerHeight + r.y + r.height / 2];
+      return { typed: a.text.length, value: el.isContentEditable ? el.textContent.slice(0, 200) : String(el.value).slice(0, 200), spot };
+    }, { ref: req.ref || null, selector: req.selector || null, text: req.text, clear: req.clear !== false, submit: !!req.submit }));
   },
 
   // Give a page local files without its file picker, which needs the browser in front: they go into a file input as

@@ -314,7 +314,9 @@ Each chat's browser window is its own, on its own desktop, and a chat that ends 
 Each chat has a cursor with a soft shadow, in a color no other chat is using. A chat in the same folder gets the same
 color when it is free. The cursor takes a curved path to each action, leans into the move, stays just above the window it
 is working on, and fades out when the turn ends. It takes no clicks and never moves your pointer. An agent working on a
-hidden app or on the private desktop shows no cursor, because nobody could see it.
+hidden app or on the private desktop shows no cursor, because nobody could see it. In Safari and Chrome a click or
+typing in a page shows the cursor where it lands while that page is in sight, such as the agent's tab when you are
+looking at it. In a tab behind another there is nothing to point at.
 
 ## Other MCP clients
 
