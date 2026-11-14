@@ -217,8 +217,15 @@ opened are still running keeps it between turns instead, with the guard that put
 come forward over you while the agent is away. When that chat closes, UCU quits the apps it opened and you never took
 over; one asking about unsaved changes stays open, hidden, until you look at it. If you click such an app in the Dock,
 its windows come back to your screen, and the app is yours from then on. If virtual displays are not available, apps are
-shown behind your windows instead. A window left there when the desktop goes, such as an agent's browser window after a
-crash, goes to the Dock rather than onto your screen.
+shown behind your windows instead. A window of an agent's own left there when the desktop goes, such as its browser
+window after a crash, goes to the Dock rather than onto your screen.
+
+Your windows come first. An app you had open that an agent moves to its desktop is back where it was when the chat's
+turn ends, as it is when you click it in the Dock. macOS moves windows about when a display comes or goes, so a window
+of yours can land on an agent's desktop without anyone putting it there: UCU sends it back to your screen when it makes
+the desktop, when the displays change, and before the desktop goes, and never sends a window to the Dock that isn't the
+agent's own. A window that an earlier version left in the Dock with its place on a desktop that is gone gets a place on
+your screen again, so it comes out of the Dock where you can see it.
 
 ### Safari and Chrome
 
