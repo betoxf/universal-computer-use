@@ -214,11 +214,13 @@ WINDOW_TOOLS = [
                     "them. `upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
                     "drops them on an element, with no picker: confirm with the user first. `show` brings your tab to "
                     "the front for the user, only when they ask to see it or must act in it, such as to sign in. "
-                    "`steps` runs several "
+                    "`away` moves it to a window on your private desktop until your turn ends, for a page that "
+                    "stalls in the background or ignores your clicks: look and act reach it there. `steps` runs "
+                    "several "
                     "operations in one call, each {op, ...}, and stops at the first that fails.",
      "inputSchema": {"type": "object", "properties": {
          "op": {"enum": ["list", "open", "navigate", "read", "click", "type", "wait", "eval", "upload", "shot",
-                         "show", "hide", "close"]},
+                         "show", "hide", "away", "close"]},
          "url": {"type": "string"}, "window_id": {"type": "integer"}, "tab_index": {"type": "integer"},
          "what": {"enum": ["text", "html", "links", "interactive"]}, "selector": {"type": "string"},
          "ref": {"type": "string"}, "text": {"type": "string"}, "clear": {"type": "boolean"},
@@ -454,6 +456,7 @@ class BrowserWorkspace:
         self.app, self.keys, self.setting = BROWSERS[tool]
         self.window, self.tab, self.shown, self.place = None, None, False, None
         self.reply = {}      # browser.js's last reply, whole
+        self.used = False    # the chat used this tool, so ucu-window treats the browser as one it works in
         self.shared = False  # the window is on the user's screen, for them to use too
         self.known = None    # what told its tabs apart when the chat last looked, while it is shared
         self.lock = threading.Lock()
@@ -624,6 +627,7 @@ class BrowserWorkspace:
             raise RuntimeError(f"{self.app} is on the user's deny list, or the list can't be read. Tell the user.")
         # So it can't take the user's focus, while the user can still go to their own windows of it.
         self.server.windows.send({"watch": [app_key(self.app)], "own": True})
+        self.used = True
         steps = arguments.get("steps")
         if steps is None:
             return self.run_one(arguments)
@@ -811,12 +815,20 @@ class SafariWorkspace(BrowserWorkspace):
     work in the background of the user's, and a screenshot of one that isn't in front is taken of a copy of the
     page, in a window that is on the agent's desktop for just that long.
 
+    Safari gives a page that isn't in sight no animation frames and one timer tick a second, so an app that draws in
+    them stands still, and some pages act only on input the browser vouches for, which a click made by script
+    isn't. For those the agent takes its tab `away`: the page loads in a window on the agent's desktop, where it is
+    in sight and look and act click it for real, and goes back to the user's window when the turn ends.
+
     The user opens, closes and moves tabs around the chat's, and Safari has no ids for tabs. Each of the chat's
     carries a mark, and browser.js finds it again before every step and says where it is afterwards: a `page` here
     is what it said last. A tab it can't prove to be the chat's is not touched, and the step fails."""
 
     COPY_NOTE = ("[ucu: your tab is behind another in the user's window, so this is a picture of a fresh copy of "
                  "its page, at the same address: what you typed or opened in the page isn't in it.]")
+    AWAY_NOTE = ("Your tab is now in a window of its own on your private desktop, where its page runs at full speed. "
+                 "look and act reach it with its title as `window`, and a click there by position (`xy`) is one the "
+                 "page trusts. It goes back to the user's window when your turn ends.")
 
     def __init__(self, server, tool):
         super().__init__(server, tool)
@@ -844,6 +856,9 @@ class SafariWorkspace(BrowserWorkspace):
     def in_tab(self, request, page, named=False, timeout=SAFARI_TIMEOUT):
         """Do a step in one of the chat's tabs. `named` says the agent gave its tab_index, which after ucu lost the
         tab's mark is its word that the tab there is its own."""
+        if page.get("away"):  # in a window of its own, where nothing moves it
+            return self.call({**request, "window_id": page["window_id"], "tab_index": 1, "away": True},
+                             timeout=timeout)
         own = {**page, "claim": page["tab_index"]} if named and self.claimable is page else page
         try:
             result = self.call({**request, "own": own}, timeout=timeout)
@@ -861,17 +876,23 @@ class SafariWorkspace(BrowserWorkspace):
         op = arguments.get("op")
         with self.lock:
             if op == "list":
-                result = self.call({"op": "list", "marks": [page["mark"] for page in self.pages]})
+                here = [page for page in self.pages if not page.get("away")]
+                result = self.call({"op": "list", "marks": [page["mark"] for page in here],
+                                    "homes": sorted({page["window_id"] for page in here})})
+                away = {page["window_id"] for page in self.pages if page.get("away")}
                 for tab in (tab for window in result for tab in window["tabs"]):
-                    for page in self.pages:
+                    for page in here:
                         if page["mark"] == tab.get("mark"):
                             page.update(window_id=tab["window_id"], tab_index=tab["tab_index"])
                     tab.pop("mark", None)
+                    if tab["window_id"] in away:
+                        tab["yours"] = True
             elif op == "open":
                 self.server.open_hidden(self.app, quiet=True)
                 self.server.windows.expect(self.app, "window")  # with no window of the user's, Safari gets one
                 request = {key: value for key, value in arguments.items() if key not in ("window_id", "tab_index")}
-                near = {"near": self.pages[-1]["window_id"]} if self.pages else {}
+                here = [page for page in self.pages if not page.get("away")]
+                near = {"near": here[-1]["window_id"]} if here else {}
                 result = self.call({**request, **near, "op": "open_tab",
                                     "mark": f"{self.token}-{next(self.numbers)}"})
                 self.pages.append(self.reply["own"])
@@ -879,13 +900,19 @@ class SafariWorkspace(BrowserWorkspace):
                 result = {"closed": self.close_window()}
             elif op == "hide":
                 result = {"hidden": False, "note": "In Safari your tabs are in the user's own window: there is "
-                                                   "nothing to take back."}
+                                                   "nothing to take back. `away` takes one to your desktop."}
+            elif op == "away":
+                page, _theirs = self.aim(arguments)
+                if page is None:
+                    raise RuntimeError("`away` takes your own tab to your private desktop. The user's stay put.")
+                result = self.send_away(page, "tab_index" in arguments)
             elif op == "shot":
                 return self.shot(arguments)
             elif op == "show":
                 page, _theirs = self.aim(arguments)
                 if page is None:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
+                self.come_back(page)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.in_tab({"op": "show_tab"}, page, "tab_index" in arguments)
                 result["note"] = "Your tab is in front of the user now, in their own window. Keep working in it."
@@ -897,7 +924,11 @@ class SafariWorkspace(BrowserWorkspace):
                 if op == "upload":
                     request["files"], size = self.files(request.pop("paths", None))
                     timeout += size / 1_000_000
-                if page:
+                if page and page.get("away") and op == "close":
+                    self.close_away(page)
+                    self.pages.remove(page)
+                    result = {"closed": True}
+                elif page:
                     result = self.in_tab(request, page, "tab_index" in arguments, timeout)
                     if op == "close":
                         self.pages.remove(page)
@@ -915,6 +946,8 @@ class SafariWorkspace(BrowserWorkspace):
         page, _theirs = self.aim(arguments)
         if page is None:
             raise RuntimeError("A screenshot works on your own tab only.")
+        if page.get("away"):
+            return [window_picture(page["window_id"], self.desktop_place() or page["place"])]
         at = self.in_tab({"op": "locate"}, page, "tab_index" in arguments)
         if at["current"] and at["visible"] and not at["minimized"]:  # its window shows it
             return [window_picture(at["window_id"], at["bounds"])]
@@ -940,10 +973,58 @@ class SafariWorkspace(BrowserWorkspace):
             except RuntimeError:
                 pass
 
+    def send_away(self, page, named):
+        """Load a tab's page in a window on the agent's desktop, and close the tab in the user's window. Safari
+        loads a tab again when it moves to another window, so nothing is lost by opening the address there."""
+        if page.get("away"):
+            return {"away": True}
+        at = self.in_tab({"op": "locate"}, page, named)
+        place = self.desktop_place()
+        if not place:
+            raise RuntimeError("There is no agent desktop on this Mac to take the tab to.")
+        self.server.windows.expect(self.app, "window")
+        window = self.call({"op": "create_window", "mark": uuid.uuid4().hex})["window_id"]
+        try:
+            self.call({"op": "show_window", "window_id": window, "bounds": place})
+            result = self.call({"op": "navigate", "window_id": window, "tab_index": 1, "url": at["url"]})
+        except RuntimeError:
+            self.close_away({"window_id": window})
+            raise
+        try:
+            self.call({"op": "close_tab", "own": page}, timeout=15)
+        except RuntimeError:
+            pass
+        mark = page["mark"]
+        page.clear()
+        page.update(away=True, mark=mark, window_id=window, tab_index=1, place=place)
+        return {**result, "note": self.AWAY_NOTE}
+
+    def come_back(self, page):
+        """Put a page that is away back in the user's window, as a tab of the chat's behind theirs."""
+        if not page.get("away"):
+            return
+        window = page["window_id"]
+        try:
+            url = self.call({"op": "locate", "window_id": window, "tab_index": 1})["url"]
+            self.call({"op": "open_tab", "url": url, "mark": page["mark"]})
+            page.clear()
+            page.update(self.reply["own"])
+        finally:
+            self.close_away({"window_id": window})
+
+    def close_away(self, page):
+        try:
+            self.call({"op": "close_window", "window_id": page["window_id"]}, timeout=15)
+        except RuntimeError:
+            pass
+
     def close_window(self):
         """Close the chat's tabs, those it can still find. Nothing else in the user's windows is touched."""
         pages, self.pages, self.claimable = self.pages, [], None
         for page in pages:
+            if page.get("away"):
+                self.close_away(page)
+                continue
             try:
                 self.call({"op": "close_tab", "own": page}, timeout=15)
             except RuntimeError:
@@ -951,7 +1032,14 @@ class SafariWorkspace(BrowserWorkspace):
         return bool(pages)
 
     def hide(self):
-        """Nothing of the chat's is on the agent's desktop between its steps."""
+        """After the turn nothing of the chat's stays on the agent's desktop, which goes: a page that was away is a
+        tab in the user's window again."""
+        with self.lock:
+            for page in [page for page in self.pages if page.get("away")]:
+                try:
+                    self.come_back(page)
+                except RuntimeError:
+                    self.pages.remove(page)
 
 
 class WindowWatcher:
@@ -1622,7 +1710,7 @@ class Server:
         index = 0
         workspace = self.browser_of(app_key(app))
         while index < len(steps):
-            if workspace and workspace.window is not None:  # a step in a page can bring its browser forward
+            if workspace and workspace.used:  # a step in a page can bring its browser forward
                 self.windows.send({"ours": app})
             ending = next((at for at in range(index, len(steps)) if self.runs_alone(steps[at])), len(steps))
             step, fresh = steps[index], None

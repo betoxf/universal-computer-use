@@ -121,7 +121,14 @@ def answer_safari(request, state, reply):
         reply["own"] = where(window, tab, None)
         return {"window_id": window["window_id"], "tab_index": len(window["tabs"]), "url": request["url"],
                 "title": "T", "loaded": True}
-    if "own" not in request:
+    if "own" not in request:  # a window of the chat's own, on the agent's desktop: a copy of a page, or one away
+        window = next((window for window in state["windows"] if window["window_id"] == request.get("window_id")), None)
+        if window and op == "navigate":
+            window["tabs"] = [{"url": request["url"]}]
+            return {"window_id": window["window_id"], "tab_index": 1, "url": request["url"], "title": "T",
+                    "loaded": True}
+        if window and op == "locate":
+            return {"window_id": window["window_id"], "tab_index": 1, "url": window["tabs"][0]["url"], "title": "T"}
         return None
     window, tab = own_tab(state, request["own"])
     index = window["tabs"].index(tab) + 1

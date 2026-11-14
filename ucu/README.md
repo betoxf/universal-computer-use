@@ -237,22 +237,30 @@ agents can work at once, and you keep browsing:
 - Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`. Agents are
   told to use those only if you asked.
 
-**In Safari the agent's tabs are in your own window**, at its end and behind the tab you are on, each with 🤖 in front
-of its title. Safari has no hidden window of an agent's to stumble over: its Dock icon and the links you click in other
-apps do what they always do, and to see what the agent is doing, or to sign in for it, you click its tab. `show` brings
-that tab to the front when you ask. If you have no Safari window, the agent's first page opens one, behind what you are
-using.
+**In Safari the agent's tabs are in your own window**, at its end and behind the tab you are on. Nothing marks them:
+they look like any tab. Safari has no hidden window of an agent's to stumble over: its Dock icon and the links you click
+in other apps do what they always do, and to see what the agent is doing, or to sign in for it, you click its tab.
+`show` brings that tab to the front when you ask. If you have no Safari window, the agent's first page opens one, behind
+what you are using.
 
 Safari has no ids for tabs, and you open, close and move tabs around the agent's. So each of its tabs carries a mark in
-its page, and UCU finds the tab by it before every step. A page that goes to another site loses the mark, since Safari
-keeps such storage per site. UCU then takes the tab in the same place only if every other tab of the window is as it
-was and the page came there from the agent's page; without that proof the step fails, and the agent has to say which
-tab is its own, or open the page again. A step never runs in a tab that may be yours.
+its page's storage, which you don't see, and UCU finds the tab by it before every step. A page that goes to another
+site loses the mark, since Safari keeps such storage per site. UCU then takes the tab in the same place only if every
+other tab of the window is as it was and the page came there from the agent's page; without that proof the step fails,
+and the agent has to say which tab is its own, or open the page again. A step never runs in a tab that may be yours.
 
 A screenshot needs a tab that its window shows. While the agent's tab is behind yours, `shot` loads the same address
 in a window on the private desktop, takes the picture and closes that window again, so the picture is of a fresh copy:
 what the agent typed or opened in the page isn't in it. Safari's new window shows for an instant where yours are when
 it is made.
+
+Safari gives a page that isn't in sight, in a tab behind another or a window behind others, no animation frames and one
+timer tick a second, so an app that draws in them, such as Google's admin console, stands still. Some pages also act
+only on input the browser vouches for, which a click made by script isn't. For those the agent takes its tab `away`:
+the page loads in a window on the private desktop, where it is in sight and runs at full speed, and where `look` and
+`act` reach it by its title and click it for real. When the turn ends the page is a tab in your window again. While it
+is away Safari has a window you don't see, so a link you click in another app can open there: UCU moves such a tab to
+your window at the agent's next step.
 
 **In Chrome each chat works in a window of its own**, on the private desktop whenever the agent works in it, where pages
 behave as on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls.

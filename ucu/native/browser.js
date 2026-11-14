@@ -12,7 +12,6 @@ ObjC.import("AppKit");
 
 const BLANK = /^(about:blank|favorites:|chrome:\/\/newtab)/;
 const MARK = "ucu-tab";  // where a page's session storage holds the mark of the chat whose tab it is in
-const BADGE = "🤖 ";     // what such a tab's title starts with, so the user sees which tab is an agent's
 const CHUNK = 1 << 20;  // characters of a file's base64 that go to a page at a time
 
 const BROWSERS = {
@@ -60,6 +59,7 @@ function run(argv) {
     }
     const reply = { ok: true, result: op(request) };
     if (request.at) reply.own = settle(request);
+    if (request.away) handBack(windowById(request.window_id));
     return JSON.stringify(reply);
   } catch (error) {
     const reply = { ok: false, error: String(error && error.message || error) };
@@ -123,8 +123,7 @@ function markOf(tab) {
 }
 
 function stamp(tab, mark) {
-  const put = `(function(m,b){try{sessionStorage.setItem(${literal(MARK)},m)}catch(e){}`
-    + `if(document.title.indexOf(b)!==0)document.title=b+document.title})(${literal(mark)},${literal(BADGE)})`;
+  const put = `(function(m){try{sessionStorage.setItem(${literal(MARK)},m)}catch(e){}})(${literal(mark)})`;
   try { js(tab, put); } catch (e) { /* a page that runs no script */ }
 }
 
@@ -136,10 +135,11 @@ function lostTab(message, home, candidate) {
   return error;
 }
 
-// The chat's tab, wherever the user moved it: where it was, or else among the tabs with the badge, by its mark. When
-// its page went to another site the mark is gone. Then it is the tab in its old place if every other tab of the
-// window is as it was, and it came there from the chat's page, or the agent says it is its own (`claim`). Anything
-// less proves nothing, and the step fails without touching a tab that may be the user's.
+// The chat's tab, wherever the user moved it: where it was, or else the tab of its window, or one elsewhere with the
+// address it had, that carries its mark. Nothing in the tab shows the user that it is an agent's. When its page went
+// to another site the mark is gone. Then it is the tab in its old place if every other tab of the window is as it
+// was, and it came there from the chat's page, or the agent says it is its own (`claim`). Anything less proves
+// nothing, and the step fails without touching a tab that may be the user's.
 function ownTab(own) {
   const windows = B.windows(browser);
   const home = windows.find((w) => B.id(w) === own.window_id) || null;
@@ -147,12 +147,11 @@ function ownTab(own) {
   if (home && own.tab_index <= home.tabs.length && marked(home, own.tab_index)) {
     return { win: home, index: own.tab_index, before: tabUrls(home) };
   }
+  const last = (own.known || [])[own.tab_index - 1] || null;
   for (const w of home ? [home].concat(windows.filter((other) => other !== home)) : windows) {
-    const names = w.tabs.name();
-    for (let index = 1; index <= names.length; index++) {
-      if (String(names[index - 1] || "").indexOf(BADGE) === 0 && marked(w, index)) {
-        return { win: w, index, before: tabUrls(w) };
-      }
+    const urls = tabUrls(w);
+    for (let index = 1; index <= urls.length; index++) {
+      if ((w === home || (last && urls[index - 1] === last)) && marked(w, index)) return { win: w, index, before: urls };
     }
   }
   if (!home) throw lostTab("Your tab can't be found, and its window is gone: `open` the page again.", null, null);
@@ -172,7 +171,7 @@ function ownTab(own) {
   return { win: home, index: own.tab_index, before: urls, proven: true };
 }
 
-// After a step in a chat's tab, its mark and badge go back on where the page changed, and the reply says where the tab
+// After a step in a chat's tab, its mark goes back on where the page changed, and the reply says where the tab
 // is and what its window holds. A page the step itself loaded is the chat's if the window's other tabs stayed put
 // meanwhile, since an index means another tab once the user closes one before it.
 function settle(request) {
@@ -212,6 +211,17 @@ function usersWindows() {
     else if (visible && onUsersScreen(w)) open.push(w);
   }
   return open.concat(docked);
+}
+
+// While a chat's page is in a window of its own on the agent's desktop, Safari can put a link the user clicks in
+// another app there, as a tab beside it, where they would never see it. Such a tab goes to a window of theirs.
+function handBack(win) {
+  for (let index = win.tabs.length; index >= 2; index--) {
+    const url = urlOf(win.tabs[index - 1]), theirs = usersWindows()[0];
+    if (url && theirs) theirs.tabs.push(browser.Tab({ url }));
+    else if (url) browser.Document({ url }).make();
+    win.tabs[index - 1].close();
+  }
 }
 
 // A new window, found by a mark that tells it from one the user or another chat opens at the same moment.
@@ -268,28 +278,25 @@ function loaded(tab, previousHref, timeoutSeconds) {
 function describe(win, tab, index) {
   let title = null;
   try { title = B.title(tab); } catch (e) {}
-  if (title && title.indexOf(BADGE) === 0) title = title.slice(BADGE.length);  // the badge is for the user's eyes
   return { window_id: B.id(win), tab_index: index, url: urlOf(tab), title };
 }
 
 const OPS = {
   // With window_id, only that window, with where it is and its tabs' ids: for the agent's window while the user has
   // it on their screen, where they move it and change its tabs. With `marks`, the tabs that carry one of them say so:
-  // a chat's own tabs among the user's.
+  // a chat's own tabs among the user's, looked for in the windows it knows them in (`homes`).
   list(req) {
-    const one = req.window_id !== undefined, marks = req.marks || [];
+    const one = req.window_id !== undefined, marks = req.marks || [], homes = req.homes || [];
     return B.windows(browser).filter((w) => !one || B.id(w) === req.window_id).map((w) => {
       let current = null;
       try { current = B.currentIndex(w); } catch (e) {}
       const tabs = [];
-      const count = w.tabs.length, names = marks.length ? w.tabs.name() : [];
+      const count = w.tabs.length, home = marks.length > 0 && homes.indexOf(B.id(w)) >= 0;
       for (let i = 0; i < count; i++) {
         const tab = describe(w, w.tabs[i], i + 1);
         if (one && B.tabId) tab.id = B.tabId(w.tabs[i]);
-        if (String(names[i] || "").indexOf(BADGE) === 0) {
-          const mark = markOf(w.tabs[i]);
-          if (marks.indexOf(mark) >= 0) Object.assign(tab, { yours: true, mark });
-        }
+        const mark = home ? markOf(w.tabs[i]) : null;
+        if (marks.indexOf(mark) >= 0) Object.assign(tab, { yours: true, mark });
         tabs.push(tab);
       }
       const found = { window_id: B.id(w), visible: w.visible(), current_tab_index: current, tabs };
