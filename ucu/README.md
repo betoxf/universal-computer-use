@@ -227,7 +227,8 @@ agents can work at once, and you keep browsing:
 
 - `list` shows every window and tab, yours too, and which are the agent's.
 - `open` loads a page in a new tab of the agent's own.
-- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in the agent's tabs, in the background.
+- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in the agent's tabs, in the background. `type` puts text
+  in through the browser's own text insertion, so the page gets input events the browser vouches for.
 - `steps` runs several of these in one call, such as open, type, click, wait and read, and stops at the first that
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file
@@ -237,22 +238,32 @@ agents can work at once, and you keep browsing:
 - Changing one of your tabs needs `allow_user_tab`, and the tab you are viewing also needs `allow_current_tab`. Agents are
   told to use those only if you asked.
 
-**In Safari the agent's tabs are in your own window**, at its end and behind the tab you are on, each with 🤖 in front
-of its title. Safari has no hidden window of an agent's to stumble over: its Dock icon and the links you click in other
-apps do what they always do, and to see what the agent is doing, or to sign in for it, you click its tab. `show` brings
-that tab to the front when you ask. If you have no Safari window, the agent's first page opens one, behind what you are
-using.
+**In Safari the agent's tabs are in your own window**, at its end and behind the tab you are on. Nothing marks them:
+they look like any tab. Safari has no hidden window of an agent's to stumble over: its Dock icon and the links you click
+in other apps do what they always do, and to see what the agent is doing, or to sign in for it, you click its tab.
+`show` brings that tab to the front when you ask. If you have no Safari window, the agent's first page opens one, behind
+what you are using.
 
 Safari has no ids for tabs, and you open, close and move tabs around the agent's. So each of its tabs carries a mark in
-its page, and UCU finds the tab by it before every step. A page that goes to another site loses the mark, since Safari
-keeps such storage per site. UCU then takes the tab in the same place only if every other tab of the window is as it
-was and the page came there from the agent's page; without that proof the step fails, and the agent has to say which
-tab is its own, or open the page again. A step never runs in a tab that may be yours.
+its page's storage, which you don't see, and UCU finds the tab by it before every step. A page that goes to another
+site loses the mark, since Safari keeps such storage per site. UCU then takes the tab in the same place only if every
+other tab of the window is as it was and the page came there from the agent's page; without that proof the step fails,
+and the agent has to say which tab is its own, or open the page again. A step never runs in a tab that may be yours.
 
 A screenshot needs a tab that its window shows. While the agent's tab is behind yours, `shot` loads the same address
 in a window on the private desktop, takes the picture and closes that window again, so the picture is of a fresh copy:
 what the agent typed or opened in the page isn't in it. Safari's new window shows for an instant where yours are when
 it is made.
+
+Safari gives a page that isn't in sight, in a tab behind another or a window behind others, no animation frames and one
+timer tick a second, so an app that draws in them, such as Google's admin console, stands still. Some pages also act
+only on input the browser vouches for, which a click made by script isn't. For those the agent takes its tab `away`:
+the page loads in a window on the private desktop, where it is in sight and runs at full speed, and where `click` with
+`real` presses an element as you would: UCU finds where it is on that screen and clicks there. When a step waits in
+vain on a page that is paused, UCU tells the agent so, since from the page it only looks slow. When the turn ends the
+page is a tab in your window again. While it
+is away Safari has a window you don't see, so a link you click in another app can open there: UCU moves such a tab to
+your window at the agent's next step.
 
 **In Chrome each chat works in a window of its own**, on the private desktop whenever the agent works in it, where pages
 behave as on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls.
@@ -306,7 +317,9 @@ Each chat's browser window is its own, on its own desktop, and a chat that ends 
 Each chat has a cursor with a soft shadow, in a color no other chat is using. A chat in the same folder gets the same
 color when it is free. The cursor takes a curved path to each action, leans into the move, stays just above the window it
 is working on, and fades out when the turn ends. It takes no clicks and never moves your pointer. An agent working on a
-hidden app or on the private desktop shows no cursor, because nobody could see it.
+hidden app or on the private desktop shows no cursor, because nobody could see it. In Safari and Chrome a click or
+typing in a page shows the cursor where it lands while that page is in sight, such as the agent's tab when you are
+looking at it. In a tab behind another there is nothing to point at.
 
 ## Other MCP clients
 

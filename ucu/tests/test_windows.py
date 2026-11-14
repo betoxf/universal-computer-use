@@ -502,6 +502,89 @@ class SafariTest(unittest.TestCase):
         self.assertEqual(proxy.safari_calls("close_tab")[0]["own"]["mark"], proxy.safari_calls("open_tab")[0]["mark"])
         self.assertEqual(proxy.safari_calls("close_window"), [])
 
+    def test_takes_its_tab_away_to_the_agents_desktop_and_back_after_the_turn(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        away = proxy.safari(op="away")["content"][0]["text"]
+        self.assertIn("private desktop", away)
+        self.assertEqual(proxy.safari_calls("show_window")[0]["bounds"]["x"], -1900)  # in sight there, so awake
+        there = proxy.safari_calls("navigate")[0]
+        self.assertEqual((there["window_id"], there["tab_index"], there["url"]), (900, 1, "https://a.test"))
+        self.assertEqual(len(proxy.safari_calls("close_tab")), 1)  # it left the user's window
+        proxy.safari(op="click", selector="a")
+        step = proxy.safari_calls("click")[0]
+        self.assertEqual((step["window_id"], step["tab_index"], step["away"], "own" in step), (900, 1, True, False))
+        self.assertEqual([item["type"] for item in proxy.safari(op="shot")["content"]], ["image"])  # as it is
+        self.assertEqual(len(proxy.safari_calls("create_window")), 1)
+        proxy.end_turn()
+        proxy.wait_until(lambda: proxy.safari_calls("close_window"))
+        back = proxy.safari_calls("open_tab")[-1]
+        self.assertEqual((back["url"], back["mark"]), ("https://a.test", proxy.safari_calls("open_tab")[0]["mark"]))
+        proxy.safari(op="click", selector="a")
+        self.assertIn("own", proxy.safari_calls("click")[-1])  # a tab of the user's window again
+
+    def test_closes_a_page_that_is_away_with_the_chat(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="away")
+        self.assertTrue(proxy.safari(op="away", window_id=51, tab_index=1)["isError"])  # the user's stay put
+        proxy.process.stdin.close()
+        proxy.process.wait(10)
+        self.assertEqual([call["window_id"] for call in proxy.safari_calls("close_window")], [900])
+
+    def test_has_the_helper_undo_the_focus_a_step_in_safari_takes(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="list")
+        proxy.look("Safari")
+        proxy.act({"do": "click", "on": 1}, app="Safari")
+        self.assertEqual([command["ours"] for command in proxy.commands("ours")], ["Safari"])
+
+    def test_tells_the_agent_when_the_page_it_waits_on_is_asleep(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        self.assertEqual(len(proxy.safari(op="wait", text="Done")["content"]), 1)  # it came: nothing to say
+        (Path(proxy.home.name) / "page-asleep").touch()
+        own = proxy.safari(op="wait", text="Done")["content"]
+        self.assertIn("paused", own[1]["text"])
+        self.assertIn("`away` runs your tab", own[1]["text"])
+        theirs = proxy.safari(op="wait", text="Done", window_id=51, tab_index=1)["content"]
+        self.assertIn("the user's tab", theirs[1]["text"])
+        self.assertEqual(len(proxy.safari(op="read")["content"]), 1)  # a step that waited for nothing says nothing
+        self.assertEqual(proxy.safari(op="eval", script="return 'text'")["content"][0]["text"], '"text"')
+
+    def test_presses_an_element_for_real_on_the_agents_desktop(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        refused = proxy.safari(op="click", selector="button", real=True)
+        self.assertIn("take your tab `away` first", refused["content"][0]["text"])
+        proxy.safari(op="away")
+        (Path(proxy.home.name) / "page-in-sight").touch()
+        pressed = json.loads(proxy.safari(op="click", selector="button", real=True)["content"][0]["text"])
+        self.assertEqual((pressed["real"], "point" in pressed), (True, False))
+        self.assertEqual(proxy.safari_calls("click")[-1]["real"], True)  # the page only finds the element
+        self.assertEqual(proxy.batched()[-1], {"command": "mouse-click", "args": {"xy": "640,480", "app": "Safari"}})
+        self.assertEqual(proxy.commands("ours")[-1]["ours"], "Safari")  # the press may bring Safari forward
+
+    def test_presses_for_real_in_chromes_window_too(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        (Path(proxy.home.name) / "page-in-sight").touch()
+        self.assertFalse(proxy.chrome(op="click", selector="button", real=True)["isError"])
+        self.assertEqual(proxy.batched()[-1]["args"], {"xy": "640,480", "app": "Google Chrome"})
+        self.assertTrue(proxy.chrome(op="click", window_id=61, tab_index=1, selector="a", real=True,
+                                     allow_user_tab=True, allow_current_tab=True)["isError"])  # not in the user's
+
+    def test_draws_its_cursor_where_a_step_lands_in_a_page_the_user_sees(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="click", selector="a")  # behind the user's tab: nowhere to point
+        self.assertEqual(proxy.commands("cursorTo"), [])
+        (Path(proxy.home.name) / "page-in-sight").touch()
+        clicked = proxy.safari(op="click", selector="a")["content"][0]["text"]
+        proxy.safari(op="type", selector="input", text="x")
+        self.assertEqual([command["cursorTo"] for command in proxy.commands("cursorTo")], [[640, 480], [640, 480]])
+        self.assertNotIn("point", clicked)  # the agent has no use for it
+
     def test_brings_its_tab_to_the_front_when_the_user_asks(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")

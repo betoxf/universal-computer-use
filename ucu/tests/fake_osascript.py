@@ -121,7 +121,14 @@ def answer_safari(request, state, reply):
         reply["own"] = where(window, tab, None)
         return {"window_id": window["window_id"], "tab_index": len(window["tabs"]), "url": request["url"],
                 "title": "T", "loaded": True}
-    if "own" not in request:
+    if "own" not in request:  # a window of the chat's own, on the agent's desktop: a copy of a page, or one away
+        window = next((window for window in state["windows"] if window["window_id"] == request.get("window_id")), None)
+        if window and op == "navigate":
+            window["tabs"] = [{"url": request["url"]}]
+            return {"window_id": window["window_id"], "tab_index": 1, "url": request["url"], "title": "T",
+                    "loaded": True}
+        if window and op == "locate":
+            return {"window_id": window["window_id"], "tab_index": 1, "url": window["tabs"][0]["url"], "title": "T"}
         return None
     window, tab = own_tab(state, request["own"])
     index = window["tabs"].index(tab) + 1
@@ -209,6 +216,13 @@ def answer(request, state, reply):
             {"ref": "c3", "tag": "a", "text": "Elsewhere", "href": "https://b.test/x"}]}
     if op == "upload":
         return {"uploaded": [file["name"] for file in request["files"]], "into": "input"}
+    if op in ("click", "type"):  # the page says where that was on screen while it is in sight
+        in_sight = os.path.exists(os.path.join(os.environ["HOME"], "page-in-sight"))
+        return {"op": op, "point": [640, 480] if in_sight else None}
+    if op == "eval" and request.get("script") == "return 'text'":
+        return "text"
+    if op == "wait_for":  # a page that isn't in sight stands still, so what it waits for never comes
+        return {"found": not os.path.exists(os.path.join(os.environ["HOME"], "page-asleep"))}
     if op == "hide_window" and os.path.exists(os.path.join(os.environ["HOME"], "window-moved")):
         return {"hidden": False, "moved": True}
     return {"op": op}
@@ -220,6 +234,8 @@ def main():
         handle.write(json.dumps({"at": time.time(), "osascript": request}) + "\n")
     state = load()
     reply = {"ok": True}
+    if request.get("vigil") and os.path.exists(os.path.join(os.environ["HOME"], "page-asleep")):
+        reply["asleep"] = True
     try:
         reply["result"] = answer(request, state[request["browser"]], reply)
     except LostTab as error:
