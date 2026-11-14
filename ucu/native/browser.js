@@ -105,19 +105,26 @@ function tabUrls(win) {
   return win.tabs.url().map((url) => url || null);
 }
 
+// A value as it is written in script source: JSON, with the characters escaped that JSON leaves alone but that end a
+// line or a script there.
+const UNSAFE = { "<": "\\u003C", ">": "\\u003E", "/": "\\u002F", "\u2028": "\\u2028", "\u2029": "\\u2029" };
+function literal(value) {
+  return JSON.stringify(value).replace(/[<>\/\u2028\u2029]/g, (char) => UNSAFE[char]);
+}
+
 // A mark lasts while its tab stays on one site: Safari gives each site its own session storage, and clears a
 // window's name too when its page goes to another site.
 function markOf(tab) {
   try {
-    return js(tab, `(function(){try{return sessionStorage.getItem(${JSON.stringify(MARK)})}catch(e){return null}})()`) || null;
+    return js(tab, `(function(){try{return sessionStorage.getItem(${literal(MARK)})}catch(e){return null}})()`) || null;
   } catch (e) {
     return null;  // a page that runs no script
   }
 }
 
 function stamp(tab, mark) {
-  const put = `(function(m,b){try{sessionStorage.setItem(${JSON.stringify(MARK)},m)}catch(e){}`
-    + `if(document.title.indexOf(b)!==0)document.title=b+document.title})(${JSON.stringify(mark)},${JSON.stringify(BADGE)})`;
+  const put = `(function(m,b){try{sessionStorage.setItem(${literal(MARK)},m)}catch(e){}`
+    + `if(document.title.indexOf(b)!==0)document.title=b+document.title})(${literal(mark)},${literal(BADGE)})`;
   try { js(tab, put); } catch (e) { /* a page that runs no script */ }
 }
 
