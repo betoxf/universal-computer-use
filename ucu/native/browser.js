@@ -59,6 +59,9 @@ function run(argv) {
     }
     const reply = { ok: true, result: op(request) };
     if (request.at) reply.own = settle(request);
+    if (request.vigil) {  // whether the page is out of sight, where Safari gives it no frames and slow timers
+      try { reply.asleep = js(tabOf(request).tab, "document.visibilityState") === "hidden"; } catch (e) { /* gone */ }
+    }
     if (request.away) handBack(windowById(request.window_id));
     return JSON.stringify(reply);
   } catch (error) {
@@ -490,21 +493,23 @@ const OPS = {
         el = Array.from(candidates).find((c) => (c.innerText || c.value || "").trim().toLowerCase() === want)
           || Array.from(candidates).find((c) => (c.innerText || c.value || "").trim().toLowerCase().includes(want));
       }
-      if (!el) throw new Error("No element found for " + JSON.stringify(a));
-      el.scrollIntoView({ block: "center" });
+      if (!el) throw new Error("No element found for " + JSON.stringify({ ref: a.ref, selector: a.selector, text: a.text }));
+      el.scrollIntoView({ block: "center", behavior: "instant" });
       const r = el.getBoundingClientRect();
       const at = { bubbles: true, cancelable: true, view: window, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      // A click made here is one the page can tell from the user's. With `real` the element is only found: ucu
+      // presses it where it is on the screen, which the page can't tell.
+      for (const type of a.real ? [] : ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
         el.dispatchEvent(type.startsWith("pointer") ? new PointerEvent(type, at) : new MouseEvent(type, at));
       }
-      el.click();
+      if (!a.real) el.click();
       // Where that was in the window, while the page is in sight, for the chat's cursor: below the window's toolbar
       // and right of its sidebar.
       const spot = document.visibilityState !== "visible" ? null
         : [Math.max(0, window.outerWidth - window.innerWidth) + r.x + r.width / 2,
            window.outerHeight - window.innerHeight + r.y + r.height / 2];
       return { clicked: el.tagName.toLowerCase(), text: (el.innerText || el.value || "").trim().slice(0, 100), spot };
-    }, { ref: req.ref || null, selector: req.selector || null, text: req.text || null }));
+    }, { ref: req.ref || null, selector: req.selector || null, text: req.text || null, real: !!req.real }));
   },
 
   type(req) {
@@ -513,7 +518,20 @@ const OPS = {
       const el = a.ref ? document.querySelector(`[data-ucu-ref="${a.ref}"]`) : document.querySelector(a.selector);
       if (!el) throw new Error("No element found for " + (a.ref || a.selector));
       el.focus();
-      if (el.isContentEditable) {
+      // The browser's own insertion makes input events it vouches for, which pages that ignore typing made by script
+      // accept. It replaces what is selected, so it is for typing that starts from an empty field.
+      let inserted = false;
+      if (a.clear && a.text && !(el instanceof HTMLSelectElement)) {
+        try {
+          if (el.isContentEditable) getSelection().selectAllChildren(el);
+          else el.select();
+          inserted = document.execCommand("insertText", false, a.text)
+            && (el.isContentEditable ? el.textContent : String(el.value)) === a.text;
+        } catch (e) { /* a field that takes no selection */ }
+      }
+      if (inserted) {
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (el.isContentEditable) {
         if (a.clear) el.textContent = "";
         el.textContent += a.text;
         el.dispatchEvent(new InputEvent("input", { bubbles: true, data: a.text, inputType: "insertText" }));
@@ -633,6 +651,7 @@ const SAFARI_OPS = {
     const tab = win.tabs[index - 1];
     const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
     req.at = { win, index, before, loaded: true };
+    Object.assign(req, { window_id: B.id(win), tab_index: index });
     return Object.assign(describe(win, tab, index), { loaded: done });
   },
 

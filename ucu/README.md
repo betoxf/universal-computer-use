@@ -227,7 +227,8 @@ agents can work at once, and you keep browsing:
 
 - `list` shows every window and tab, yours too, and which are the agent's.
 - `open` loads a page in a new tab of the agent's own.
-- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in the agent's tabs, in the background.
+- `navigate`, `read`, `click`, `type`, `wait` and `eval` work in the agent's tabs, in the background. `type` puts text
+  in through the browser's own text insertion, so the page gets input events the browser vouches for.
 - `steps` runs several of these in one call, such as open, type, click, wait and read, and stops at the first that
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file
@@ -257,8 +258,10 @@ it is made.
 Safari gives a page that isn't in sight, in a tab behind another or a window behind others, no animation frames and one
 timer tick a second, so an app that draws in them, such as Google's admin console, stands still. Some pages also act
 only on input the browser vouches for, which a click made by script isn't. For those the agent takes its tab `away`:
-the page loads in a window on the private desktop, where it is in sight and runs at full speed, and where `look` and
-`act` reach it by its title and click it for real. When the turn ends the page is a tab in your window again. While it
+the page loads in a window on the private desktop, where it is in sight and runs at full speed, and where `click` with
+`real` presses an element as you would: UCU finds where it is on that screen and clicks there. When a step waits in
+vain on a page that is paused, UCU tells the agent so, since from the page it only looks slow. When the turn ends the
+page is a tab in your window again. While it
 is away Safari has a window you don't see, so a link you click in another app can open there: UCU moves such a tab to
 your window at the agent's next step.
 

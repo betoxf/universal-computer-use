@@ -219,6 +219,10 @@ def answer(request, state, reply):
     if op in ("click", "type"):  # the page says where that was on screen while it is in sight
         in_sight = os.path.exists(os.path.join(os.environ["HOME"], "page-in-sight"))
         return {"op": op, "point": [640, 480] if in_sight else None}
+    if op == "eval" and request.get("script") == "return 'text'":
+        return "text"
+    if op == "wait_for":  # a page that isn't in sight stands still, so what it waits for never comes
+        return {"found": not os.path.exists(os.path.join(os.environ["HOME"], "page-asleep"))}
     if op == "hide_window" and os.path.exists(os.path.join(os.environ["HOME"], "window-moved")):
         return {"hidden": False, "moved": True}
     return {"op": op}
@@ -230,6 +234,8 @@ def main():
         handle.write(json.dumps({"at": time.time(), "osascript": request}) + "\n")
     state = load()
     reply = {"ok": True}
+    if request.get("vigil") and os.path.exists(os.path.join(os.environ["HOME"], "page-asleep")):
+        reply["asleep"] = True
     try:
         reply["result"] = answer(request, state[request["browser"]], reply)
     except LostTab as error:
