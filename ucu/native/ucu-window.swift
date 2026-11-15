@@ -1201,6 +1201,9 @@ final class Watcher {
         // seconds later, and by then their click is no longer new, so it would be undone.
         let onDock = clickedDockIcon(of: app)
         let theirs = onDock || (!ours && Self.userSwitched())
+        // Once it has brought its app forward, the click holds for a moment more and no longer: if they leave the
+        // app again, an agent's step that brings it forward seconds later isn't their doing.
+        if onDock { dockClick?.at = Date() - Self.dockWindow + Self.switchWindow }
         front = app
         if theirs {  // its windows can't stay hidden, or out of sight
             let kept = owned || parked[pid] != nil
@@ -1217,7 +1220,7 @@ final class Watcher {
         let over = "\(name) came forward over \(previous.localizedName ?? "?")"
         // A new app is held back while a call runs, unless the user did anything since just before it started.
         if isNew {
-            guard !Self.userIsActive(within: -launched.timeIntervalSinceNow + Self.inputWindow) else {
+            guard !theirs, !Self.userIsActive(within: -launched.timeIntervalSinceNow + Self.inputWindow) else {
                 return log("\(over) as it started: left in front, as the user may have opened it")
             }
             putBack(previous, over: app, why: "it started while the agent worked")
