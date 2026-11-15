@@ -121,6 +121,8 @@ FOCUS_NOTE = ("[ucu: {} came to the front during your actions, so ucu put {} bac
               "that the app did what you meant.]")
 WINDOW_FOCUS_NOTE = ("[ucu: {} gave one of your windows the user's keyboard, so ucu gave it back to their window. "
                      "Check that the app did what you meant.]")
+TAKEN_NOTE = ("[ucu: The user brought {} to their screen to see it. Keep working in it in the background, and "
+              "leave it there: don't move it to your desktop.]")
 # The engine's errors in the words of ucu's tools. Its own advice names its commands, which an agent here doesn't
 # have, so that is passed on only when it names none.
 ENGINE_WORDS = {"APP_NOT_FOUND": "{} Use the name the app shows in its menu bar, or its bundle id.",
@@ -317,6 +319,8 @@ def window_note(report):
     """Turn a report from `ucu-window watch` into a note for the agent."""
     if report.get("event") == "focus":
         return (WINDOW_FOCUS_NOTE if report.get("window") else FOCUS_NOTE).format(report.get("app"), report.get("back"))
+    if report.get("event") == "taken":
+        return TAKEN_NOTE.format(report.get("app"))
     kind = report.get("kind") or "window"
     title, text, buttons = report.get("title"), report.get("text"), report.get("buttons")
     parts = [f"{report.get('app')} opened a {kind}" + (f" titled {quoted(title)}" if title else "")]
@@ -1091,9 +1095,10 @@ class WindowWatcher:
     """Runs `ucu-window watch` while the chat works. Without the helper, or with one from before it could watch,
     everything here does nothing, and the agent just doesn't get what it adds."""
 
-    def __init__(self, color, who):
+    def __init__(self, color, who, taken):
         self.color = color     # gives this chat's cursor color
         self.who = who         # gives who the chat is, for the focus log
+        self.taken = taken     # hears which apps ucu kept out of sight the user came to
         self.process = None
         self.unusable = False  # it exited by itself, so it isn't started again
         self.lock = threading.Lock()
@@ -1130,6 +1135,8 @@ class WindowWatcher:
                     slot[1] = message
                     slot[0].set()
             elif "event" in message and not self.is_expected(message):
+                if message["event"] == "taken":
+                    self.taken(message.get("names") or [])
                 self.note(window_note(message))
         code = process.wait()
         with self.lock:
@@ -1444,7 +1451,7 @@ class Server:
         self.folder = working_folder()
         self.alerts = AlertWatcher()
         self.sessions = Sessions()
-        self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker)
+        self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker, self.user_took)
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
@@ -1636,6 +1643,14 @@ class Server:
         elif browser_note and reply.get("active") and self.browser_of(app_key(name)):
             self.windows.note(BROWSER_NOTE.format(name, self.browser_of(app_key(name)).tool))
         return reply.get("state")
+
+    def user_took(self, names):
+        """The user came to an app ucu kept out of their sight. It is on their screen now and stays there, so it is
+        no longer one to put on the agent's desktop."""
+        with self.lock:
+            for name in names:
+                self.hidden_apps.pop(app_key(name), None)
+                self.parked_apps.discard(app_key(name))
 
     def put_hidden_apps_on_desktop(self):
         """Give the apps ucu hid a window on screen: on the agent's desktop, or else behind the user's windows."""
