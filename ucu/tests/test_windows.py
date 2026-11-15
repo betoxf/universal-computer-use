@@ -200,6 +200,14 @@ class WatchTest(unittest.TestCase):
         proxy.report(event="focus", app="Blender", back="Mail")
         self.assertIn("Blender came to the front", proxy.notes(proxy.look())[0])
 
+    def test_leaves_an_app_the_user_came_to_on_their_screen(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Closed App")
+        proxy.report(event="taken", app="Closed App", names=["closed app"])
+        self.assertIn("The user brought Closed App to their screen", proxy.notes(proxy.look("Closed App"))[0])
+        proxy.act({"do": "click", "xy": [10, 10]}, app="Closed App")
+        self.assertEqual(len(proxy.commands("park")), 1)  # as it opened, and not again
+
     def test_marks_the_time_a_call_runs_and_the_apps_it_drives(self):
         proxy = WatchingProxy(self)
         proxy.look()

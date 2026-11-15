@@ -292,6 +292,7 @@ final class AgentDesktop {
 final class AgentCursor {
     static let size: CGFloat = 126, tick = 1.0 / 120, linger = 20.0, fadeTime = 0.25
     static let bend: CGFloat = 0.16, tiltLimit: CGFloat = 0.42, tiltEase = 0.07, restHeading = 3 * CGFloat.pi / 4
+    static let tabDepth = 10, tabSearch = 150, tabSearchPause = 2.0
 
     var color: NSColor?  // comes from the server
     var timer: Timer?
@@ -299,6 +300,8 @@ final class AgentCursor {
     let arrow = CAShapeLayer()
     var restAt = Date.distantFuture, lastStep = Date()
     var target: CGWindowID?  // the window under the cursor, which it stays just above
+    var tab: AXUIElement?  // that window's selected tab as the cursor came, in a window that has tabs
+    var searched = Date.distantPast
     var ticks = 0
     var position: CGPoint?, velocity = CGPoint.zero, tilt: CGFloat = 0
     var path: (start: CGPoint, control: CGPoint, end: CGPoint, began: Date, time: Double, moving: Bool)?
@@ -328,6 +331,7 @@ final class AgentCursor {
                 position = nil
                 path = nil
                 target = nil
+                tab = nil
             }
         }
         if position == nil {
@@ -348,7 +352,14 @@ final class AgentCursor {
 
     func head(to end: CGPoint, over window: [String: Any], _ now: Date) {
         let panel = panel ?? makePanel()
-        target = window[kCGWindowNumber as String] as? CGWindowID
+        let number = window[kCGWindowNumber as String] as? CGWindowID
+        // A step lands in the tab that shows, so the tab is found as the cursor comes and never later, when the tab
+        // that shows may be another. A window without tabs can get them, so it is searched again after a while.
+        if number != target || (tab == nil ? now.timeIntervalSince(searched) > Self.tabSearchPause : !tabShows()) {
+            tab = Self.selectedTab(of: window)
+            searched = now
+        }
+        target = number
         panel.level = NSWindow.Level(rawValue: window[kCGWindowLayer as String] as? Int ?? 0)
         panel.alphaValue = 1
         guard let start = position else {
@@ -410,14 +421,56 @@ final class AgentCursor {
         panel.setFrameOrigin(NSPoint(x: point.x - Self.size / 2, y: height - point.y - Self.size / 2))
     }
 
-    // The window under it may have come forward or gone to another Space since.
+    // The window under it may have come forward or gone to another Space since, or show another tab.
     func keepInPlace() {
         guard let panel, let target else { return }
-        if let window = windowInfo(target), window[kCGWindowIsOnscreen as String] as? Bool == true {
+        if let window = windowInfo(target), window[kCGWindowIsOnscreen as String] as? Bool == true, tabShows() {
             panel.order(.above, relativeTo: Int(target))
         } else {
             panel.orderOut(nil)
         }
+    }
+
+    // The agent works in one tab of a window, such as a page in the user's browser window. Once the user goes to
+    // another tab the cursor would point at their page, so it shows only while its tab does, and again when they
+    // come back. An app too busy to answer isn't asked again.
+    func tabShows() -> Bool {
+        guard let tab else { return true }
+        var value: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(tab, kAXValueAttribute as CFString, &value) {
+        case .success: return (value as? NSNumber)?.boolValue == true
+        case .cannotComplete:
+            self.tab = nil
+            return true
+        default: return false  // the tab was closed
+        }
+    }
+
+    // The selected tab of a window that has tabs. The window's own tabs are near its top, so the search goes level by
+    // level, stops at the first element that doesn't answer, and leaves web content out: a page can have tabs too.
+    static func selectedTab(of window: [String: Any]) -> AXUIElement? {
+        guard let pid = window[kCGWindowOwnerPID as String] as? Int else { return nil }
+        let place = bounds(of: window).origin
+        let all: [AXUIElement] = attribute(appElement(pid_t(pid)), kAXWindowsAttribute) ?? []
+        guard let found = all.first(where: { window in
+            Watcher.frame(of: window).map { abs($0.minX - place.x) < 2 && abs($0.minY - place.y) < 2 } ?? false
+        }) else { return nil }
+        var level = [found], seen = 0
+        for _ in 0..<tabDepth {
+            var next = [AXUIElement]()
+            for element in level {
+                seen += 1
+                guard seen <= tabSearch, let role: String = attribute(element, kAXRoleAttribute) else { return nil }
+                if role == "AXWebArea" { continue }
+                if role == kAXRadioButtonRole, (attribute(element, kAXSubroleAttribute) as String?) == "AXTabButton" {
+                    if (attribute(element, kAXValueAttribute) as NSNumber?)?.boolValue == true { return element }
+                    continue
+                }
+                next += attribute(element, kAXChildrenAttribute) as [AXUIElement]? ?? []
+            }
+            level = next
+        }
+        return nil
     }
 
     func makePanel() -> NSPanel {
@@ -489,6 +542,7 @@ final class AgentCursor {
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
 // it gave one of its windows out of sight the keyboard, while the user was in that app, and their window got it back.
+// {"event": "taken", ...} says the user came to an app ucu kept out of their sight, which is on their screen now.
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
                                             "AuthenticationServicesAgent", "coreautha"]
@@ -496,7 +550,7 @@ final class Watcher {
     static let inputWindow = 1.5, longestCall = 300.0, moveSettle = 0.3
     // Apps come forward by themselves seconds after an action too, such as a browser once a page has loaded.
     static let guardTail = 10.0, allowGrace = 5.0, switchWindow = 1.0, modifierWindow = 0.5, focusTick = 0.1
-    static let putBackCheck = 0.1, putBackTries = 3, oursGrace = 3.0, quitWait = 3.0
+    static let putBackCheck = 0.1, putBackTries = 3, oursGrace = 3.0, quitWait = 3.0, dockWindow = 5.0
 
     var watched = Set<String>()
     var own = Set<String>()  // the watched apps where the agent works in a window of its own, never in the user's
@@ -524,6 +578,7 @@ final class Watcher {
     var observers = [pid_t: AXObserver]()  // new windows of parked apps, which join the others on the desktop
     var who = "?"
     var usersWindows = [Int: CGPoint]()  // the windows on the user's screens as the desktop was made, and where
+    var dockClick: (at: Date, app: URL)?  // the user's last click, when it was on an app's icon in the Dock
 
     func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
@@ -558,6 +613,7 @@ final class Watcher {
         Timer.scheduledTimer(withTimeInterval: Self.focusTick, repeats: true) { [self] _ in
             if Date() < guardUntil { guardWindow() }
         }
+        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [self] in noteClick($0) }
         Thread.detachNewThread { [self] in
             while let line = readLine() {
                 guard let data = line.data(using: .utf8),
@@ -831,6 +887,7 @@ final class Watcher {
         keptHidden.insert(pid)
         Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] timer in
             if app.isTerminated || !keptHidden.contains(pid) || (app.isActive && Self.userSwitched())
+                || clickedDockIcon(of: app)
                 || (replied.map { -$0.timeIntervalSinceNow > Self.hideGuard } ?? false) {
                 if replied == nil { reply(state) }
                 keptHidden.remove(pid)
@@ -1112,15 +1169,48 @@ final class Watcher {
             || [CGKeyCode(36), CGKeyCode(76)].contains { CGEventSource.keyState(.hidSystemState, key: $0) }
     }
 
+    // Which Dock icon the user clicks is heard as they click. The seconds since the last click, which macOS counts,
+    // only show a click half a second after it, so one made just before its app came forward looked like none at
+    // all, and a busy app comes forward a second or more after the click. A click an agent sent names the process
+    // that sent it, and isn't the user's. Only the Dock is asked, which always answers.
+    func noteClick(_ event: NSEvent) {
+        guard let click = event.cgEvent, click.getIntegerValueField(.eventSourceUnixProcessID) == 0,
+              let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
+        else { return }
+        var item: AXUIElement?
+        AXUIElementCopyElementAtPosition(appElement(dock.processIdentifier), Float(click.location.x),
+                                         Float(click.location.y), &item)
+        let url: URL? = item.flatMap { attribute($0, kAXURLAttribute) }
+        let ago = ProcessInfo.processInfo.systemUptime - event.timestamp
+        dockClick = url.map { (Date() - ago, $0.standardizedFileURL) }
+    }
+
+    // Whether the user's last click, seconds ago at most, was on this app's icon in the Dock. It says which app they
+    // asked for, so it holds for longer than a click's time alone, and whatever the agent does meanwhile.
+    func clickedDockIcon(of app: NSRunningApplication) -> Bool {
+        guard let click = dockClick, -click.at.timeIntervalSinceNow < Self.dockWindow else { return false }
+        return click.app == app.bundleURL?.standardizedFileURL
+    }
+
     func activated(_ app: NSRunningApplication) {
         let previous = front, pid = app.processIdentifier, launched = app.launchDate ?? .distantPast
         let isNew = launched > busySince && Date() < busyUntil  // started during the call that is running
         let ours = Date() < oursUntil[pid] ?? .distantPast
         let owned = launchedHidden.contains(pid), name = app.localizedName ?? "?"
+        // Whether the user came to it is settled here, once, before the app is asked anything: a busy app answers
+        // seconds later, and by then their click is no longer new, so it would be undone.
+        let onDock = clickedDockIcon(of: app)
+        let theirs = onDock || (!ours && Self.userSwitched())
         front = app
-        if !ours, Self.userSwitched() {  // they clicked its Dock icon: its windows can't stay hidden, or out of sight
+        if theirs {  // its windows can't stay hidden, or out of sight
+            let kept = owned || parked[pid] != nil
+            keptHidden.remove(pid)
             bringBack(app)
             rescueStranded(of: app)
+            if kept {  // the agent hears that the app is on the user's screen now, and whose it is
+                let names = known.filter { $0.value.processIdentifier == pid }.map(\.key)
+                emit(["event": "taken", "app": name, "names": names])
+            }
         }
         guard let previous, previous.processIdentifier != pid, !previous.isTerminated,
               !(pid == allowed && Date() < allowedUntil) else { return }
@@ -1151,9 +1241,9 @@ final class Watcher {
             giveKeyboardBack(in: app)
             return log("\(over): left in front, as no step of the agent's was bringing it forward")
         }
-        if !ours, Self.userSwitched() {
+        if theirs {
             giveKeyboardBack(in: app)
-            return log("\(over): left in front, as the user clicked or switched apps")
+            return log("\(over): left in front, as the user clicked \(onDock ? "its Dock icon" : "or switched apps")")
         }
         if previous.isHidden || !Self.isOnScreen(previous) {
             return log("\(over): left in front, as the user's app was out of sight")

@@ -44,7 +44,7 @@ def answer(command):
         name = command["open"]
         if name in command["deny"]:
             state = "denied"
-        elif name.startswith("Closed"):
+        elif name.startswith("Closed") and name not in opened:  # once open, it is running
             time.sleep(OPEN_DELAY)
             opened.add(name)
             state = "opened"

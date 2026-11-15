@@ -216,7 +216,10 @@ other chats' desktops when one goes, with their windows, and each chat follows i
 opened are still running keeps it between turns instead, with the guard that puts your app back, so none of them can
 come forward over you while the agent is away. When that chat closes, UCU quits the apps it opened and you never took
 over; one asking about unsaved changes stays open, hidden, until you look at it. If you click such an app in the Dock,
-its windows come back to your screen, and the app is yours from then on. If virtual displays are not available, apps are
+its windows come back to your screen, where you can watch the agent work in it, and the app is yours from then on. UCU
+goes by the icon you clicked and not by how long ago you clicked: a busy app comes forward more than a second after the
+click, and an agent's step in between changes nothing. The agent is told the app is on your screen and to leave it
+there. If virtual displays are not available, apps are
 shown behind your windows instead. A window of an agent's own left there when the desktop goes, such as its browser
 window after a crash, goes to the Dock rather than onto your screen.
 
@@ -326,7 +329,8 @@ color when it is free. The cursor takes a curved path to each action, leans into
 is working on, and fades out when the turn ends. It takes no clicks and never moves your pointer. An agent working on a
 hidden app or on the private desktop shows no cursor, because nobody could see it. In Safari and Chrome a click or
 typing in a page shows the cursor where it lands while that page is in sight, such as the agent's tab when you are
-looking at it. In a tab behind another there is nothing to point at.
+looking at it. In a tab behind another there is nothing to point at. The cursor belongs to the tab it was shown on: it
+goes as soon as you switch to another tab of that window, and is back when you return to the agent's.
 
 ## Other MCP clients
 
