@@ -183,13 +183,20 @@ app's menu, which works even on a hidden app. The usage rules tell agents to bri
 see it or be taken there, never to make an action work, and to leave your clipboard alone.
 
 Apps still come forward by themselves, such as Chrome when it opens a window or an extension's popup. UCU puts your app
-back at once, usually within a few hundredths of a second, and tells the agent: for an app it opened, whenever that
-happens while the chat runs; for an app you use too, while the chat works on it and for 10 seconds after. When the
-agent's own step is what brings it forward, such as making its Chrome window, that always happens, unless you clicked a
-window of that app just then. Otherwise UCU leaves the app in front if you clicked, pressed a modifier key, or hold
-Return just before, or if your app is no longer in sight, because you may have switched apps or Spaces yourself. Typing
-in your app doesn't count, since that is when a stolen focus hurts most. A new app that starts during a call is held
-back too, unless you did anything since just before it started.
+back within a few hundredths of a second, and tells the agent: for an app it opened, whenever that happens while the
+chat runs; for an app you use too, while the chat works on it and for 10 seconds after. When the agent's own step is
+what brings it forward, such as making its Chrome window, that always happens, unless you clicked a window of that app
+just then. Otherwise UCU leaves the app in front if you clicked or used Command-Tab just before, if you hold Return, or
+if your app is no longer in sight, because you may have switched apps or Spaces yourself. Typing in your app doesn't
+count, since that is when a stolen focus hurts most. A new app that starts during a call is held back too, unless you
+did anything since just before it started.
+
+UCU hears your clicks and modifier keys as they happen, because macOS's own count of them runs half a second late. A
+click on a window of the app, in the Dock or in Mission Control counts at once, and so does letting go of Command, as
+Command-Tab ends, for half a second. A click anywhere else counts from half a second after it, as you click in your own
+app all the time. UCU doesn't hear which keys you press. A click on a window can reach UCU just after the app it brings
+forward. So when your pointer is on a window of an app that comes forward, or you hold Command, UCU waits a twentieth
+of a second for what you did before it puts your app back. While you type it doesn't wait for a click.
 
 Safari and Chrome are yours while an agent works in them, because it works in tabs or a window of its own. When no step of the
 agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a
