@@ -549,8 +549,9 @@ final class Watcher {
     static let quietTail = 1.5, windowSettle = 0.3, hideGuard = 3.0, noWindowLimit = 6.0, openLimit = 45.0
     static let inputWindow = 1.5, longestCall = 300.0, moveSettle = 0.3
     // Apps come forward by themselves seconds after an action too, such as a browser once a page has loaded.
-    static let guardTail = 10.0, allowGrace = 5.0, switchWindow = 1.0, modifierWindow = 0.5, focusTick = 0.1
+    static let guardTail = 10.0, allowGrace = 5.0, switchWindow = 1.0, focusTick = 0.1
     static let putBackCheck = 0.1, putBackTries = 3, oursGrace = 3.0, quitWait = 3.0, dockWindow = 5.0
+    static let hearWait = 0.05, commandWindow = 0.5
 
     var watched = Set<String>()
     var own = Set<String>()  // the watched apps where the agent works in a window of its own, never in the user's
@@ -579,6 +580,11 @@ final class Watcher {
     var who = "?"
     var usersWindows = [Int: CGPoint]()  // the windows on the user's screens as the desktop was made, and where
     var dockClick: (at: Date, app: URL)?  // the user's last click, when it was on an app's icon in the Dock
+    var lastClick: (at: Date, on: Int?)?  // the user's last click, heard as they made it, and whose window it was on
+    var commandHeld = false
+    // Until when the user's last asking macOS for an app holds, or an app comes forward: they clicked something of
+    // the Dock's, such as a window in Mission Control, or let go of Command, as Command-Tab ends.
+    var askedUntil = Date.distantPast
 
     func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
@@ -613,7 +619,8 @@ final class Watcher {
         Timer.scheduledTimer(withTimeInterval: Self.focusTick, repeats: true) { [self] _ in
             if Date() < guardUntil { guardWindow() }
         }
-        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [self] in noteClick($0) }
+        let input: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown, .flagsChanged]
+        NSEvent.addGlobalMonitorForEvents(matching: input) { [self] in noteInput($0) }
         Thread.detachNewThread { [self] in
             while let line = readLine() {
                 guard let data = line.data(using: .utf8),
@@ -886,7 +893,7 @@ final class Watcher {
         var finished: Date?, replied: Date?
         keptHidden.insert(pid)
         Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] timer in
-            if app.isTerminated || !keptHidden.contains(pid) || (app.isActive && Self.userSwitched())
+            if app.isTerminated || !keptHidden.contains(pid) || (app.isActive && userSwitched())
                 || clickedDockIcon(of: app)
                 || (replied.map { -$0.timeIntervalSinceNow > Self.hideGuard } ?? false) {
                 if replied == nil { reply(state) }
@@ -1158,31 +1165,48 @@ final class Watcher {
             .contains { secondsSince($0) < seconds }
     }
 
-    // Whether the user may have just switched apps themselves: they clicked a window, a Dock icon or a link another app
-    // opens, used a modifier key such as Command-Tab, or hold Return down in Spotlight or another launcher. Typing in
-    // the app they are in switches nothing, so it doesn't count: that is when a stolen focus hurts most. Gesture events
+    // Whether the user may have just switched apps themselves: they used Command-Tab, clicked in Mission Control or
+    // the Dock, clicked a link another app opens, or hold Return down in Spotlight or another launcher. Typing in the
+    // app they are in switches nothing, so it doesn't count: that is when a stolen focus hurts most. Gesture events
     // can't tell a swipe to another Space, since key presses count as gestures too, and macOS's notice of a new Space
     // also comes when an agent's desktop is made, so a swipe is told by the user's app having gone out of sight.
-    static func userSwitched() -> Bool {
-        [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains { secondsSince($0) < switchWindow }
-            || secondsSince(.flagsChanged) < modifierWindow
+    func userSwitched() -> Bool {
+        Date() < askedUntil
+            || [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains { Self.secondsSince($0) < Self.switchWindow }
             || [CGKeyCode(36), CGKeyCode(76)].contains { CGEventSource.keyState(.hidSystemState, key: $0) }
     }
 
-    // Which Dock icon the user clicks is heard as they click. The seconds since the last click, which macOS counts,
-    // only show a click half a second after it, so one made just before its app came forward looked like none at
-    // all, and a busy app comes forward a second or more after the click. A click an agent sent names the process
-    // that sent it, and isn't the user's. Only the Dock is asked, which always answers.
-    func noteClick(_ event: NSEvent) {
-        guard let click = event.cgEvent, click.getIntegerValueField(.eventSourceUnixProcessID) == 0,
-              let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
-        else { return }
+    // The user's clicks and modifier keys are heard as they happen. The seconds since the last one, which macOS
+    // counts, only show it half a second later, so a click made just before its app came forward looked like none at
+    // all. Only what says they asked for an app counts at once: a click anywhere else still counts from that count
+    // alone, as they click in their own app all the time. Key presses can't be heard without leave to watch the
+    // keyboard, so Command-Tab is told by Command being let go, which other shortcuts end with too: it holds for
+    // half a second. An event an agent sent names the process that sent it, and isn't the user's.
+    func noteInput(_ event: NSEvent) {
+        guard let input = event.cgEvent, input.getIntegerValueField(.eventSourceUnixProcessID) == 0 else { return }
+        let at = Date() - (ProcessInfo.processInfo.systemUptime - event.timestamp)
+        switch event.type {
+        case .flagsChanged:
+            let held = event.modifierFlags.contains(.command)
+            if commandHeld, !held { askedUntil = at + Self.commandWindow }
+            commandHeld = held
+        default:
+            let item = dockItem(at: input.location)
+            if item != nil { askedUntil = at + Self.switchWindow }
+            lastClick = (at, item == nil ? Self.topWindowOwner(at: input.location) : nil)
+            let icon: URL? = event.type == .leftMouseDown ? item.flatMap { attribute($0, kAXURLAttribute) } : nil
+            dockClick = icon.map { (at, $0.standardizedFileURL) }
+        }
+    }
+
+    // What the Dock has here: an icon, a window in Mission Control, an app in the switcher. Only the Dock is asked,
+    // which always answers.
+    func dockItem(at point: CGPoint) -> AXUIElement? {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
+        else { return nil }
         var item: AXUIElement?
-        AXUIElementCopyElementAtPosition(appElement(dock.processIdentifier), Float(click.location.x),
-                                         Float(click.location.y), &item)
-        let url: URL? = item.flatMap { attribute($0, kAXURLAttribute) }
-        let ago = ProcessInfo.processInfo.systemUptime - event.timestamp
-        dockClick = url.map { (Date() - ago, $0.standardizedFileURL) }
+        AXUIElementCopyElementAtPosition(appElement(dock.processIdentifier), Float(point.x), Float(point.y), &item)
+        return item
     }
 
     // Whether the user's last click, seconds ago at most, was on this app's icon in the Dock. It says which app they
@@ -1192,18 +1216,32 @@ final class Watcher {
         return click.app == app.bundleURL?.standardizedFileURL
     }
 
-    func activated(_ app: NSRunningApplication) {
-        let previous = front, pid = app.processIdentifier, launched = app.launchDate ?? .distantPast
+    func activated(_ app: NSRunningApplication, over earlier: NSRunningApplication? = nil, heard: Bool = false) {
+        let previous = heard ? earlier : front, pid = app.processIdentifier, launched = app.launchDate ?? .distantPast
         let isNew = launched > busySince && Date() < busyUntil  // started during the call that is running
         let ours = Date() < oursUntil[pid] ?? .distantPast
         let owned = launchedHidden.contains(pid), name = app.localizedName ?? "?"
+        let onDock = clickedDockIcon(of: app), onWindow = clicked(app)
+        // A click on a window can be heard a few thousandths of a second after the app it brings forward. So when
+        // the user did nothing that is known yet, the app waits a moment for what they did to be heard, if it stays
+        // in front that long: while they hold Command, which they may just have let go, or while the pointer is on
+        // a window of the app, unless they are typing, when they aren't clicking and their keys must not go to
+        // another app.
+        if !heard, !onDock, !onWindow, !userSwitched(), commandHeld || (Self.secondsSince(.keyDown) > Self.switchWindow
+            && CGEvent(source: nil).map { Self.topWindowOwner(at: $0.location) == Int(pid) } ?? false) {
+            return DispatchQueue.main.asyncAfter(deadline: .now() + Self.hearWait) { [self] in
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                activated(app, over: previous, heard: true)
+            }
+        }
         // Whether the user came to it is settled here, once, before the app is asked anything: a busy app answers
         // seconds later, and by then their click is no longer new, so it would be undone.
-        let onDock = clickedDockIcon(of: app)
-        let theirs = onDock || (!ours && Self.userSwitched())
+        let theirs = onDock || (!ours && (onWindow || userSwitched()))
         // Once it has brought its app forward, the click holds for a moment more and no longer: if they leave the
-        // app again, an agent's step that brings it forward seconds later isn't their doing.
+        // app again, an agent's step that brings it forward seconds later isn't their doing. What they asked macOS
+        // for brings one app forward, this one.
         if onDock { dockClick?.at = Date() - Self.dockWindow + Self.switchWindow }
+        askedUntil = .distantPast
         front = app
         if theirs {  // its windows can't stay hidden, or out of sight
             let kept = owned || parked[pid] != nil
@@ -1233,7 +1271,7 @@ final class Watcher {
         // another Space themselves.
         guard (Date() < guardUntil && driven.contains(app)) || owned || ours else { return }
         // A click on the app's own window is the user's, even as the agent's step brings the app forward.
-        if ours, Self.clicked(app) {
+        if ours, onWindow {
             giveKeyboardBack(in: app)
             return log("\(over): left in front, as the user clicked it")
         }
@@ -1265,13 +1303,17 @@ final class Watcher {
     }
 
     // Whether the user's last click, a moment ago, was on a window of this app.
-    static func clicked(_ app: NSRunningApplication) -> Bool {
-        guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(where: { secondsSince($0) < switchWindow }),
-              let pointer = CGEvent(source: nil)?.location else { return false }
+    func clicked(_ app: NSRunningApplication) -> Bool {
+        guard let click = lastClick, -click.at.timeIntervalSinceNow < Self.switchWindow else { return false }
+        return click.on == Int(app.processIdentifier)
+    }
+
+    // The process whose window is on top at this place.
+    static func topWindowOwner(at point: CGPoint) -> Int? {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []
-        let top = list.first { ($0[kCGWindowLayer as String] as? Int) == 0 && bounds(of: $0).contains(pointer) }
-        return (top?[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier)
+        let top = list.first { ($0[kCGWindowLayer as String] as? Int) == 0 && bounds(of: $0).contains(point) }
+        return top?[kCGWindowOwnerPID as String] as? Int
     }
 
     // The user's app comes back to the front. Asking it can fail while it is busy, so it is asked again.
@@ -1287,7 +1329,7 @@ final class Watcher {
         guard tries > 1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.putBackCheck) { [self] in
             let stays = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
-            guard stays, ours ? !Self.clicked(app) : !Self.userSwitched() else { return }
+            guard stays, !clicked(app), ours || !userSwitched() else { return }
             if tries == 2 { log("\(app.localizedName ?? "?") stayed in front after ucu asked twice: asking once more") }
             putBack(previous, over: app, ours: ours, why: why, tries: tries - 1)
         }
@@ -1339,7 +1381,7 @@ final class Watcher {
             return
         }
         // On no screen, it may be a window the user is moving. On an agent's desktop it is never theirs.
-        if !Self.isOnAgentDesktop(current), Self.userSwitched() { return }
+        if !Self.isOnAgentDesktop(current), userSwitched() { return }
         let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
         let known = userWindows[pid].flatMap { mine in windows.first { CFEqual($0, mine) } }
         let inSight = windows.first { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
