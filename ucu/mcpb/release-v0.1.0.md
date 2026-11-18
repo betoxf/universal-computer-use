@@ -68,11 +68,14 @@ The build isn't reproducible, so upload this exact file. If you pack again, or `
 before the release, run `ucu/mcpb/pack-mcpb.sh --update-server-json`, commit the new `fileSha256` in `server.json`, and
 use the new hash and file in every step below.
 
-**1. Merge the registry PR**, so `main` has `server.json`. Then, from a checkout of `main`:
+**1. Merge the registry PR**, so `main` has `server.json`. Then run every step from a checkout of
+`betoxf/universal-computer-use`'s `main`. On the maintainer's Mac that is the root checkout's `ucu` branch, which follows
+`home/main`; its local `main` follows the agent-desktop fork and has no `server.json`.
 
 ```bash
+cd ~/Projects/Shared-Tools/Universal-Computer-Use/Code/universal-computer-use
+git switch ucu && git pull     # ucu follows home/main
 ARTIFACT=~/Projects/Shared-Tools/Universal-Computer-Use/Outputs/mcp-registry/v0.1.0/ucu.mcpb
-git pull
 shasum -a 256 "$ARTIFACT"     # must equal fileSha256 in server.json
 grep fileSha256 server.json
 ```
@@ -91,10 +94,11 @@ gh release create v0.1.0 "$ARTIFACT" --repo betoxf/universal-computer-use --targ
 curl -sSL https://github.com/betoxf/universal-computer-use/releases/download/v0.1.0/ucu.mcpb | shasum -a 256
 ```
 
-**4. Publish to the MCP Registry**, from the repository root on `main`. Don't run these until the Release exists with
-the exact `.mcpb` whose SHA-256 is in `server.json`.
+**4. Publish to the MCP Registry**, from the same checkout. Don't run these until the Release exists with the exact
+`.mcpb` whose SHA-256 is in `server.json`.
 
 ```bash
+brew install mcp-publisher     # once, if `mcp-publisher --help` isn't found
 mcp-publisher validate
 mcp-publisher login github
 # then complete https://github.com/login/device as betoxf
