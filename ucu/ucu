@@ -54,7 +54,8 @@ FOCUS_LOG = HOME / "Library/Logs/ucu/focus.log"  # ucu-window's account of apps 
 UPDATE_EVERY = 600            # seconds between the checks that chats start
 UPDATE_LOG_LIMIT = 1_000_000  # bytes; the log then moves to update.log.1 and starts again
 SEARCH_PATH = os.pathsep.join(
-    [str(HOME / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", ""), "/usr/bin", "/bin"]
+    [str(HOME / ".local/bin"), str(HOME / ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin",
+     os.environ.get("PATH", ""), "/usr/bin", "/bin"]
 )
 
 CHROME = HOME / "Library/Application Support/Google/Chrome"
@@ -282,16 +283,16 @@ def seed_policy():
 
 
 def build_engine():
-    """Build agent-desktop and install it, or say why not. A rustup install has no `cargo` on PATH of its own."""
-    env = dict(os.environ)
+    """Build agent-desktop and install it, or say why not. cargo may not be on PATH: a Homebrew rustup has no `cargo`
+    of its own, and a new rustup install's ~/.cargo/bin is only on PATH in shells started after it."""
     cargo = tool("cargo")
     if not cargo and tool("rustup"):
         found = subprocess.run([tool("rustup"), "which", "cargo"], capture_output=True, text=True, cwd=str(WORKSPACE))
         if found.returncode == 0:
             cargo = found.stdout.strip()
-            env["PATH"] = os.pathsep.join([str(Path(cargo).parent), env.get("PATH", "")])
     if not cargo:
         return "cargo was not found; install Rust with rustup"
+    env = {**os.environ, "PATH": os.pathsep.join([str(Path(cargo).parent), os.environ.get("PATH", "")])}
     result = subprocess.run([cargo, "build", "--release", "-p", "agent-desktop"], capture_output=True, text=True,
                             cwd=str(WORKSPACE), env=env)
     if result.returncode != 0:
@@ -329,8 +330,9 @@ def install(python):
         version_ok = False
     if not version_ok:
         fail(f"{python} is not a Python 3.9 or newer")
-    if not tool("claude"):
-        fail("the claude CLI was not found; install Claude Code first")
+    uses_claude = tool("claude") is not None
+    if not uses_claude and not OPENCODE_CONFIG.exists():
+        fail(f"neither the claude CLI nor {OPENCODE_CONFIG} was found; install Claude Code or set up opencode first")
     failure = handshake(definition(python))
     if failure:
         fail(f"ucu did not start ({failure}); nothing was changed")
@@ -343,13 +345,16 @@ def install(python):
     say("✓", f"backed up the current setup to {folder}")
     build_window_helper()
     seed_policy()
-    claude("mcp", "remove", SERVER, "-s", "user")  # absent is fine
-    result = claude("mcp", "add-json", SERVER, json.dumps(definition(python)), "-s", "user")
-    if result.returncode != 0 or SERVER not in mcp_servers():
-        fail(f"could not register {SERVER}: {(result.stderr or result.stdout).strip()[:300]}")
-    say("✓", f"registered {SERVER} in {CLAUDE_CONFIG}")
-    set_stop_hook(True)
-    say("✓", f"set ucu's Stop hook in {SETTINGS}")
+    if uses_claude:
+        claude("mcp", "remove", SERVER, "-s", "user")  # absent is fine
+        result = claude("mcp", "add-json", SERVER, json.dumps(definition(python)), "-s", "user")
+        if result.returncode != 0 or SERVER not in mcp_servers():
+            fail(f"could not register {SERVER}: {(result.stderr or result.stdout).strip()[:300]}")
+        say("✓", f"registered {SERVER} in {CLAUDE_CONFIG}")
+        set_stop_hook(True)
+        say("✓", f"set ucu's Stop hook in {SETTINGS}")
+    else:
+        say("!", "the claude CLI was not found, so ucu was set up for opencode only")
     set_opencode(python, folder)
     set_chrome_host(python)
     print(f'Done. New sessions get `{SERVER}`; open ones need a restart. Run `./ucu deny "App Name"` to block an app.')
@@ -498,7 +503,11 @@ def doctor():
         say("✓" if ok else "✗", message + (f": {hint}" if hint and not ok else ""))
 
     entry = mcp_servers().get(SERVER)
-    check(entry is not None, f"{SERVER} is registered in {CLAUDE_CONFIG}", "run `ucu install`")
+    opencode_only = entry is None and not tool("claude") and OPENCODE_CONFIG.exists()
+    if opencode_only:
+        say("!", "the claude CLI was not found, so only opencode's setup is checked")
+    else:
+        check(entry is not None, f"{SERVER} is registered in {CLAUDE_CONFIG}", "run `ucu install`")
     if entry:
         check(entry.get("args") == ["-I", str(PROXY)], "it runs this repo's server",
               f"args are {entry.get('args')}; run `ucu install`")
@@ -520,9 +529,10 @@ def doctor():
         failure = handshake({"type": "stdio", **entry})
         check(failure is None, "the server answers an MCP initialize", failure)
 
-    hooks = read_settings().get("hooks", {})
-    check(any(is_ucu_hook(group) for group in hooks.get("Stop", [])), f"the Stop hook is in {SETTINGS}",
-          "run `ucu install`")
+    if not opencode_only:
+        hooks = read_settings().get("hooks", {})
+        check(any(is_ucu_hook(group) for group in hooks.get("Stop", [])), f"the Stop hook is in {SETTINGS}",
+              "run `ucu install`")
     try:
         denied = json.loads(proxy.POLICY.read_text()).get("deny")
         if isinstance(denied, list):
@@ -547,8 +557,11 @@ def doctor():
             servers = json.loads(OPENCODE_CONFIG.read_text()).get("mcp", {})
         except (OSError, ValueError):
             servers = {}
-        check((servers.get(SERVER) or {}).get("command", [])[1:] == ["-I", str(PROXY)], f"opencode runs {SERVER}",
-              "run `ucu install`")
+        command = (servers.get(SERVER) or {}).get("command", [])
+        check(command[1:] == ["-I", str(PROXY)], f"opencode runs {SERVER}", "run `ucu install`")
+        if opencode_only and command[1:] == ["-I", str(PROXY)]:
+            failure = handshake({"command": command[0], "args": command[1:]})
+            check(failure is None, "the server answers an MCP initialize", failure)
     return 1 if failures else 0
 
 
