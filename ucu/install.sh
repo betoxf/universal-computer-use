@@ -161,8 +161,12 @@ check_agent() {
 
 check_rust() {
   local status=0
-  if find_tool cargo >/dev/null || find_tool rustup >/dev/null; then
-    say "✓" "Rust"
+  if find_tool cargo >/dev/null; then
+    say "✓" "Rust, with cargo at $(find_tool cargo)"
+    return 0
+  fi
+  if find_tool rustup >/dev/null; then
+    say "✓" "Rust, through rustup at $(find_tool rustup); if it has no toolchain yet, the build downloads one"
     return 0
   fi
   echo "UCU builds its engine from source with Rust, which isn't installed. rustup (https://rustup.rs) can install it"

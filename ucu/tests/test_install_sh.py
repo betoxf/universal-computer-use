@@ -6,10 +6,14 @@ The script runs in a session of its own, so it has no terminal to ask in, as und
 """
 import json
 import os
+import pty
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +25,8 @@ SCRIPT = ROOT / "install.sh"
 SYSTEM = "/usr/bin:/bin"
 TOOLS = ("cat", "dirname", "ls", "mkdir", "sh", "git")
 OPENCODE = {"$schema": "https://opencode.ai/config.json"}
+# ucu looks for claude in these folders as well as on PATH, so a claude there can't be hidden from it.
+SYSTEM_CLAUDE = any(os.access(f"{folder}/claude", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin"))
 
 
 class InstallScriptTest(unittest.TestCase):
@@ -66,6 +72,35 @@ class InstallScriptTest(unittest.TestCase):
         result = subprocess.run(["/bin/bash", str(SCRIPT), *args], capture_output=True, text=True,
                                 env={**self.env, **env}, stdin=subprocess.DEVNULL, start_new_session=True, timeout=120)
         return result.returncode, result.stdout + result.stderr
+
+    def install_at_a_terminal(self, answer, *args):
+        """Run the script from stdin, as `curl | bash` does, with a terminal of its own that answers its question."""
+        pid, terminal = pty.fork()
+        if pid == 0:
+            os.dup2(os.open(SCRIPT, os.O_RDONLY), 0)
+            os.execve("/bin/bash", ["/bin/bash", "-s", "--", *args], self.env)
+        os.write(terminal, answer.encode() + b"\n")
+        output, deadline = b"", time.time() + 120
+        while time.time() < deadline:
+            if select.select([terminal], [], [], 1)[0]:
+                try:
+                    chunk = os.read(terminal, 4096)
+                except OSError:  # the script and everything it started have closed the terminal
+                    break
+                if not chunk:
+                    break
+                output += chunk
+        else:
+            os.kill(pid, signal.SIGKILL)
+        os.close(terminal)
+        status = os.waitpid(pid, 0)[1]
+        return os.waitstatus_to_exitcode(status), output.decode().replace("\r\n", "\n")
+
+    def without_cargo(self):
+        """Take cargo away, and have the fake curl's rustup put it back in ~/.cargo/bin."""
+        (self.local / "cargo").rename(self.home / "rustup-cargo")
+        rustup = f'/bin/mkdir -p "$HOME/.cargo/bin" && /bin/cp "{self.home}/rustup-cargo" "$HOME/.cargo/bin/cargo"'
+        self.fake("curl", f"echo '{rustup}; echo \"rustup $*\"'")
 
     def git(self, folder, *args):
         result = subprocess.run(["git", "-C", str(folder), *args], capture_output=True, text=True, env=self.env)
@@ -134,6 +169,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("git was not found", output)
         self.assert_nothing_installed()
 
+    @unittest.skipIf(SYSTEM_CLAUDE, "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
     def test_needs_claude_code_or_opencode(self):
         (self.local / "claude").unlink()
         code, output = self.install()
@@ -153,10 +189,7 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_yes_installs_rust_then_ucu(self):
         self.origin()
-        cargo = self.local / "cargo"
-        cargo.rename(self.home / "rustup-cargo")
-        rustup = f'/bin/mkdir -p "$HOME/.cargo/bin" && /bin/cp "{self.home}/rustup-cargo" "$HOME/.cargo/bin/cargo"'
-        self.fake("curl", f"echo '{rustup}; echo \"rustup $*\"'")
+        self.without_cargo()
         code, output = self.install("--yes")
         self.assertEqual(code, 0, output)
         self.assertIn("https://sh.rustup.rs", self.calls())
@@ -168,6 +201,32 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("Next steps:", output)
         self.assertNotIn("✗", output)
         self.assertNotIn("doctor found something to fix", output)
+
+    def test_at_a_terminal_it_asks_before_installing_rust(self):
+        self.origin()
+        self.without_cargo()
+        code, output = self.install_at_a_terminal("n")
+        self.assertEqual(code, 1, output)
+        self.assertIn("Install Rust with rustup now? [y/N]", output)
+        self.assertIn("UCU needs Rust", output)
+        self.assertNotIn("curl", self.calls())
+        self.assert_nothing_installed()
+
+        code, output = self.install_at_a_terminal("y")
+        self.assertEqual(code, 0, output)
+        self.assertIn("https://sh.rustup.rs", self.calls())
+        self.assertIn("✓ installed Rust", output)
+        self.assertIsNotNone(self.registered())
+
+    def test_a_problem_doctor_finds_still_ends_with_the_next_steps(self):
+        self.origin()
+        no_window_access = FAKE_SWIFTC.replace("exit 0", "echo no Accessibility permission >&2; exit 1")
+        self.python_fake(self.local / "swiftc", no_window_access)
+        code, output = self.install()
+        self.assertEqual(code, 0, output)
+        self.assertIn("✗ ucu-window can read app windows", output)
+        self.assertIn("doctor found something to fix", output)
+        self.assertIn("Next steps:", output)
 
     def test_runs_again_updates_a_clean_clone_and_leaves_local_changes(self):
         origin = self.origin()
@@ -216,6 +275,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(self.clone.exists())
         self.assertEqual(json.loads((self.home / ".claude.json").read_text()), config)
 
+    @unittest.skipIf(SYSTEM_CLAUDE, "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
     def test_opencode_only(self):
         self.origin()
         (self.local / "claude").unlink()

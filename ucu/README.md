@@ -100,7 +100,8 @@ cd universal-computer-use/ucu
 Without the `claude` command, `./ucu install` sets UCU up for opencode alone, when `~/.config/opencode/opencode.json`
 exists.
 
-UCU runs from its clone, so keep it, and it updates itself from there (see [Update](#update)). Start a new Claude Code
+UCU runs from its clone, so keep it, and it updates itself from there (see [Update](#update)). The `./ucu` commands in
+this README run in the clone's `ucu` folder, which is `~/.ucu/ucu` after the one-line install. Start a new Claude Code
 session to pick it up; open sessions need a restart. If `doctor` reports a problem, it says what to do next. The app that
 runs Claude Code, such as Terminal, needs Accessibility permission in **System Settings > Privacy & Security >
 Accessibility**, and Screen Recording for screenshots.

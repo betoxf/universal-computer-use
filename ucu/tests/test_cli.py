@@ -171,6 +171,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertTrue((self.home / ".local/bin/ucu-engine").exists())
 
+    @unittest.skipIf(any(os.access(f"{folder}/claude", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin")),
+                     "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
     def test_install_for_opencode_alone_and_for_neither(self):
         (self.home / ".local/bin/claude").unlink()
         code, output = self.ucu("install", "--python", sys.executable)
