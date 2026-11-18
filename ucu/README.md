@@ -86,6 +86,12 @@ bash install.sh
 Running it again brings `~/.ucu` up to date and installs again. It leaves a clone with local changes or commits of its
 own as it is. If Claude Code or opencode already runs UCU from another folder, as their configs say, it names that
 folder and changes nothing. `UCU_DIR` clones somewhere else, and `UCU_REPO` and `UCU_BRANCH` choose what to clone.
+Set them for `bash`, not for `curl`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | UCU_DIR=~/src/ucu bash
+```
+
 With `-s -- --uninstall` after `bash`, it runs `./ucu uninstall` from the installed clone and keeps the clone.
 
 To install by hand instead:
