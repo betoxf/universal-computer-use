@@ -62,11 +62,33 @@ that changes nothing on that page takes 1.1 s, and a screenshot of its 1280 x 90
 ## Requirements
 
 - macOS, with the Xcode Command Line Tools (`xcode-select --install`)
-- Rust, through [rustup](https://rustup.rs)
-- Python 3.9 or newer
-- [Claude Code](https://claude.com/claude-code), with the `claude` command on your `PATH`
+- Python 3.9 or newer, and git, which comes with the Command Line Tools
+- [Claude Code](https://claude.com/claude-code), with the `claude` command on your `PATH`, or opencode
+- Rust, through [rustup](https://rustup.rs), which the installer can set up for you
 
 ## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash
+```
+
+[`install.sh`](install.sh) checks the requirements and stops with what to do when one is missing. If Rust is missing,
+it asks before installing it with rustup; when there is no terminal to ask in, it stops unless you add `-s -- --yes`
+after `bash` (or set `UCU_YES=1`). It then clones UCU to `~/.ucu` and runs `./ucu install` and `./ucu doctor` from
+there, and ends with what to do next. To read it before you run it, download it first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+Running it again brings `~/.ucu` up to date and installs again. It leaves a clone with local changes or commits of its
+own as it is. If Claude Code or opencode already runs UCU from another folder, as their configs say, it names that
+folder and changes nothing. `UCU_DIR` clones somewhere else, and `UCU_REPO` and `UCU_BRANCH` choose what to clone.
+With `-s -- --uninstall` after `bash`, it runs `./ucu uninstall` from the installed clone and keeps the clone.
+
+To install by hand instead:
 
 ```bash
 git clone https://github.com/betoxf/universal-computer-use.git
@@ -75,7 +97,10 @@ cd universal-computer-use/ucu
 ./ucu doctor
 ```
 
-UCU runs from this folder, so keep it, and it updates itself from there (see [Update](#update)). Start a new Claude Code
+Without the `claude` command, `./ucu install` sets UCU up for opencode alone, when `~/.config/opencode/opencode.json`
+exists.
+
+UCU runs from its clone, so keep it, and it updates itself from there (see [Update](#update)). Start a new Claude Code
 session to pick it up; open sessions need a restart. If `doctor` reports a problem, it says what to do next. The app that
 runs Claude Code, such as Terminal, needs Accessibility permission in **System Settings > Privacy & Security >
 Accessibility**, and Screen Recording for screenshots.
@@ -372,6 +397,7 @@ stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
 | Path | What it does |
 | --- | --- |
 | `ucu` | The `install`, `uninstall`, `update`, `doctor`, `deny`, `allow` and `denied` commands. |
+| `install.sh` | The one-line installer: checks the requirements, clones UCU to `~/.ucu` and runs `ucu install`. |
 | `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text and adds notes. |
 | `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows, holds the private desktop and draws each chat's cursor. |
 | `native/browser.js` | The browser side of the `safari` and `chrome` tools, run with `osascript`. |
@@ -385,8 +411,8 @@ stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
 python3 -m unittest discover -s tests
 ```
 
-These run the real server and installer against a fake engine in a temporary `HOME`, with fake `claude`, `swiftc` and
-`cargo`.
+These run the real server, `ucu install` and `install.sh` against a fake engine in a temporary `HOME`, with fake
+`claude`, `swiftc` and `cargo`.
 
 ## Credits
 

@@ -160,6 +160,36 @@ class CliTest(unittest.TestCase):
         self.assertFalse((self.home / ".config/opencode").exists())
         self.assertFalse((self.home / "Library/Application Support/Google").exists())  # nor Chrome
 
+    def test_install_finds_cargo_where_rustup_puts_it(self):
+        cargo_home = self.home / ".cargo/bin"
+        cargo_home.mkdir(parents=True)
+        (self.home / ".local/bin/cargo").rename(cargo_home / "cargo")  # not on PATH, as before a new shell
+        rustup = self.home / ".local/bin/rustup"  # found before a real one, which could install a toolchain
+        rustup.write_text("#!/bin/sh\nexit 1\n")
+        rustup.chmod(0o755)
+        code, output = self.ucu("install", "--python", sys.executable)
+        self.assertEqual(code, 0, output)
+        self.assertTrue((self.home / ".local/bin/ucu-engine").exists())
+
+    def test_install_for_opencode_alone_and_for_neither(self):
+        (self.home / ".local/bin/claude").unlink()
+        code, output = self.ucu("install", "--python", sys.executable)
+        self.assertEqual(code, 1, output)
+        self.assertIn("neither the claude CLI nor", output)
+        self.assertFalse((self.home / ".local/bin/ucu-engine").exists())
+
+        self.opencode()
+        code, output = self.ucu("install", "--python", sys.executable)
+        self.assertEqual(code, 0, output)
+        self.assertIn("ucu was set up for opencode only", output)
+        self.assertEqual(sorted(self.read_json(".claude.json")["mcpServers"]), ["other"])
+        self.assertEqual(self.stop_hooks(), [OTHER_HOOK])
+        self.assertEqual(self.read_json(".config/opencode/opencode.json")["mcp"]["ucu"]["command"][1:], ["-I", PROXY])
+        code, output = self.ucu("doctor")
+        self.assertEqual(code, 0, output)
+        self.assertIn("only opencode's setup is checked", output)
+        self.assertIn("the server answers an MCP initialize", output)
+
     def test_deny_allow_and_denied(self):
         self.assertEqual(self.ucu("denied")[1].strip(), "No apps are denied: every app is approved.")
         self.assertEqual(self.ucu("deny", "Mail")[0], 0)
