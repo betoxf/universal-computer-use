@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.betoxf/universal-computer-use",
+  "title": "UCU",
+  "description": "Local Mac computer-use MCP server on Vercel’s agent-desktop; runs without taking pointer or focus.",
+  "repository": {
+    "url": "https://github.com/betoxf/universal-computer-use",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/betoxf/universal-computer-use/releases/download/v0.1.0/ucu.mcpb",
+      "version": "0.1.0",
+      "fileSha256": "e3643248012bed424e816999f702ea9f7fb07db09a285aec9f381bca6e02b30f",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
