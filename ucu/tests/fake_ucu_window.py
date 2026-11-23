@@ -3,8 +3,10 @@
 
 Every command and its exit are appended as JSON to $FAKE_WINDOW_LOG, with the time. An app counts as closed if its name
 starts with "Closed", as windowless if it starts with "Empty", and as denied if it is in the request's `deny`. "Safari"
-and "Google Chrome" are active, as if the user were in them. On `rest` it exits, unless it opened an app. An app with "Stuck" in its name can't move to the agent's desktop. Each line added to
-$FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the other commands.
+and "Google Chrome" are active, as if the user were in them. On `rest` it exits, unless it opened an app. An app with
+"Stuck" in its name can't move to the agent's desktop. An app comes to the front for an agent's steps unless its name
+starts with "Busy" (the user is working), "Front" (it is in front already) or "Left" (the user leaves it meanwhile).
+Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the other commands.
 """
 import json
 import os
@@ -16,6 +18,7 @@ LOG = os.environ["FAKE_WINDOW_LOG"]
 REPORTS = os.environ["FAKE_WINDOW_REPORTS"]
 OPEN_DELAY = 0.2  # opening an app takes a while, and the engine must not get the call before it is done
 parked = set()
+lent = []  # the app that is in front for an agent's steps
 opened = set()  # apps it opened, which keep it running after `rest`
 writing = threading.Lock()
 
@@ -60,6 +63,18 @@ def answer(command):
         fresh = not set(command["park"]) <= parked
         parked.update(command["park"])
         send({"id": command["id"], "state": "no desktop" if stuck else "parked", "moved": fresh})
+    elif "borrow" in command:
+        name = command["borrow"]
+        state = "busy" if name.startswith("Busy") else "front" if name.startswith("Front") else "borrowed"
+        if state != "busy":
+            lent.append(name)
+        send({"id": command["id"], "state": state, "front": "Mail"})
+    elif "giveBack" in command and "id" in command:
+        send({"id": command["id"], "state": "returned" if lent else "none", "taken": False})
+        lent.clear()
+    elif "front" in command:  # an app called "Left…" is one the user leaves while the agent works in it
+        name = lent[-1] if lent else ""
+        send({"id": command["id"], "front": "Mail" if name.startswith("Left") else name})
     elif "desktop" in command:
         moved = os.path.exists(os.path.join(os.environ["HOME"], "desktop-moved"))  # another chat's desktop left
         send({"id": command["id"], "bounds": [-3840 if moved else -1920, -2400 if moved else -1200, 1920, 1200]})

@@ -139,8 +139,19 @@ no `look` first:
 `collapse`, `clear`, `scroll-to`, `type` or `set-value` (with `text`), `select` (with `text`), `scroll` (with `direction`
 and `amount`), `press` (with `keys`), `menu` (with `text` such as `File > New Window`) or `wait` (until `text` shows in
 the window, for up to `amount` seconds; without `text` it pauses for `amount` seconds). For a click where there is
-neither number nor name, pass `xy` with pixels from a `look` screenshot. Nothing scrolls at a place in the background
-yet.
+neither number nor name, pass `xy` with pixels from a `look` screenshot: `click` and its kin, `scroll`, or `drag` with
+`to`, the place it ends.
+
+A scroll or a drag at a place takes the real pointer, and some apps take input only while they are in front. For those,
+`act` brings the app to the front, and for an app that ignores steps made behind, the agent passes `front: true`:
+
+- The app comes forward only once you have done nothing for a moment (1.5 seconds). While you work, `act` waits up to
+  8 seconds and then tells the agent you are busy.
+- When the steps are done, your app is in front again, the pointer is where it was, and an app that was on the agent's
+  desktop is back there.
+- If you click meanwhile, you have taken over: the app stays where you have it, and the remaining steps aren't made.
+- An app that is in front already is worked in where it is, with nothing taken or given back.
+- If the server stops mid-step, `ucu-window` gives your app back by itself after 20 seconds.
 
 A model's round trip costs far more than the action it asks for, so these are made to save them. A named element is
 looked up in the window as it is now, waited for briefly if a step before brings it, and found again if the window

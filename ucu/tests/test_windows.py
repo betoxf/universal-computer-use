@@ -151,6 +151,52 @@ class WatchTest(unittest.TestCase):
         self.assertTrue(proxy.commands("park")[0]["onlyHidden"])
         self.assertEqual(proxy.batched()[0]["command"], "mouse-click")
 
+    def test_brings_an_app_to_the_front_for_a_scroll_at_a_place_and_gives_the_users_app_back(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Canvas")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20], "direction": "up", "amount": 2}, app="Canvas")
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        self.assertEqual(proxy.commands("borrow")[0]["borrow"], "Canvas")
+        self.assertEqual(len(proxy.commands("giveBack")), 2)  # after the steps, and once more however they end
+        self.assertEqual(proxy.batched(), [{"command": "mouse-wheel", "args": {"x": 110, "y": 220, "dx": 0, "dy": 2.0}}])
+        self.assertIn("--headed", proxy.engine_calls("batch")[0])
+        self.assertIn("Canvas was in front for these steps", proxy.text(reply))
+
+    def test_drags_and_clicks_with_the_real_pointer_when_the_agent_asks_for_the_front(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Canvas")
+        steps = [{"do": "drag", "xy": [10, 20], "to": [30, 40]}, {"do": "click", "xy": [5, 5]}, {"do": "click", "on": 1}]
+        reply = proxy.call("act", app="Canvas", front=True, steps=steps)
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        self.assertEqual(proxy.batched(), [
+            {"command": "drag", "args": {"from_xy": "110,220", "to_xy": "130,240"}},
+            {"command": "mouse-click", "args": {"xy": "105,205"}},  # no app: the pointer itself clicks
+            {"command": "click", "args": {"ref_id": "@s1:e1"}}])
+
+    def test_leaves_the_user_alone_while_they_work(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Busy App")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Busy App")
+        self.assertIn("The user is working in Mail, and these steps need Busy App in front", proxy.text(reply))
+        self.assertEqual(proxy.batched(), [])
+        self.assertEqual(proxy.commands("giveBack"), [])
+
+    def test_stops_steps_in_front_once_the_user_has_gone_elsewhere(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Left App")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Left App")
+        self.assertIn("Mail is in front now", proxy.text(reply))
+        self.assertEqual(proxy.batched(), [])
+        self.assertTrue(proxy.commands("giveBack"))
+
+    def test_works_in_an_app_that_is_in_front_already_without_taking_or_giving_anything(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Front App")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Front App")
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        self.assertEqual(proxy.commands("giveBack"), [])
+        self.assertNotIn("was in front for these steps", proxy.text(reply))
+
     def test_shows_a_hidden_app_behind_the_user_without_a_desktop(self):
         proxy = WatchingProxy(self)
         proxy.look("Closed Stuck")

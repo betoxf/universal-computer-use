@@ -333,11 +333,13 @@ class ServerTest(unittest.TestCase):
         typed = self.server.act({"do": "type", "name": "Shown", "text": "x"}, app="Ghost")
         self.assertIn("image Shown is no longer in the window", self.server.text(typed))
 
-    def test_refuses_a_scroll_at_a_place_instead_of_clicking_there(self):
+    def test_makes_no_scroll_at_a_place_without_a_helper_to_give_the_users_app_back(self):
         self.server.look()
         reply = self.server.act({"do": "scroll", "xy": [10, 10], "direction": "down"})
-        self.assertIn("`xy` works with click", self.server.text(reply))
+        self.assertIn("These steps need Calculator in front", self.server.text(reply))
         self.assertEqual(self.server.batched(), [])
+        typed = self.server.act({"do": "type", "xy": [10, 10], "text": "x"})
+        self.assertIn("`xy` works with click", self.server.text(typed))
 
     def test_pauses_when_a_wait_names_no_text(self):
         self.server.look()

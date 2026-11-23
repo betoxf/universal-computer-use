@@ -545,6 +545,10 @@ final class AgentCursor {
 //   {"cursor": "#E5484D"}                               draw the agent's cursor in this color
 //   {"cursorTo": [640, 480]}                            move the cursor to this place on screen
 //   {"turnEnded": true}                                 the turn ended, so the cursor can go
+//   {"id": 5, "borrow": "Blender", "wait": 8}           bring this app to the front for an agent's steps, once the
+//                                                       user has done nothing for a moment
+//   {"id": 6, "giveBack": true}                         those steps are done: the user's app comes back
+//   {"id": 7, "front": true}                            say which app is in front
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
@@ -651,6 +655,7 @@ final class Watcher {
     // the user's app back. One that won't quit yet, such as one asking about unsaved changes, stays hidden. Without the
     // desktop, macOS moves its windows back to the user's screens, so they are hidden first.
     func finish() {
+        giveBack(id: nil)
         let leaving = keptApps(), started = Date()
         leaving.forEach { $0.terminate() }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [self] timer in
@@ -817,12 +822,141 @@ final class Watcher {
         if let names = command["park"] as? [String] {
             park(names, onlyHidden: command["onlyHidden"] as? Bool ?? false, id: command["id"])
         }
+        if let name = command["borrow"] as? String, let id = command["id"] {
+            borrow(name, window: command["window"] as? String ?? "", wait: command["wait"] as? Double ?? 8, id: id)
+        }
+        if command["giveBack"] != nil { giveBack(id: command["id"]) }
+        if command["front"] != nil, let id = command["id"] {
+            emit(["id": id, "front": NSWorkspace.shared.frontmostApplication?.localizedName ?? ""])
+        }
+        if command["rest"] != nil { giveBack(id: nil) }  // a turn never ends with the user's screen still lent
         if command["desktop"] != nil, let id = command["id"] {
             withDesktop { area in
                 let bounds = area.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] }
                 emit(["id": id, "bounds": bounds as Any])
             }
         }
+    }
+
+    // MARK: lending the front
+
+    // Some steps can't be made behind the user's windows: a scroll or a drag at a place takes the real pointer, and
+    // some apps, such as one that shows another computer's screen, take input only while they are in front. For
+    // those the app comes to the front, but only once the user has done nothing for a moment, and when the steps are
+    // done their app, the pointer and the app's place on an agent's desktop are as they were. That also happens by
+    // itself after lendLimit seconds, so a server that crashed can't leave the user's screen taken. A user who
+    // clicks meanwhile has taken over: where they are, and the app, stay as they left them.
+    struct Lent {
+        let app: NSRunningApplication, previous: NSRunningApplication?, pointer: CGPoint?
+        let wasParked: Bool, wasOwned: Bool, started: Date
+        var timer: Timer?, userClicked = false, userMoved = false
+    }
+
+    static let lendIdle = 1.5, lendLimit = 20.0, lendSettle = 2.0
+    var lent: Lent?
+    var userMonitor: Any?
+
+    func borrow(_ query: String, window named: String, wait: Double, id: Any) {
+        guard let app = running(query) else { return emit(["id": id, "state": "unknown"]) }
+        let pid = app.processIdentifier
+        if lent?.app.processIdentifier == pid { return emit(["id": id, "state": "borrowed"]) }
+        // In front already: the user is looking at it, and the agent works there with them.
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, hasWindowInSight(app) {
+            return emit(["id": id, "state": "front"])
+        }
+        let until = Date() + wait
+        func attempt() {
+            if !Self.userIsActive(within: Self.lendIdle) { return lend(app, window: named, id: id) }
+            if Date() >= until {
+                let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
+                return emit(["id": id, "state": "busy", "front": front])
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { attempt() }
+        }
+        attempt()
+    }
+
+    func lend(_ app: NSRunningApplication, window named: String, id: Any) {
+        let pid = app.processIdentifier, name = app.localizedName ?? "?"
+        let previous = NSWorkspace.shared.frontmostApplication
+        lent = Lent(app: app, previous: previous, pointer: CGEvent(source: nil)?.location,
+                    wasParked: parked[pid] != nil, wasOwned: launchedHidden.contains(pid), started: Date())
+        allowed = pid
+        allowedUntil = Date() + Self.lendLimit + 1  // it stays in front until it is given back
+        keptHidden.remove(pid)
+        bringBack(app)  // from an agent's desktop to where its windows were
+        app.unhide()
+        let element = appElement(pid)
+        let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
+        for window in windows where Self.isOutOfSight(window) { bringIntoSight(window) }  // ucu opened it: no place yet
+        let wanted = named.isEmpty ? nil : windows.first { key(title($0)).contains(key(named)) }
+        if let window = wanted ?? attribute(element, kAXMainWindowAttribute) ?? windows.first {
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+        AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        app.activate()
+        watchUser()
+        log("\(name) is in front for steps of the agent's that can't be made behind: "
+            + "\(previous?.localizedName ?? "the user's app") comes back after them")
+        lent?.timer = Timer.scheduledTimer(withTimeInterval: Self.lendLimit, repeats: false) { [self] _ in
+            log("\(name) was not given back in \(Int(Self.lendLimit)) seconds, so ucu gives the user's app back itself")
+            giveBack(id: nil)
+        }
+        let asked = Date()
+        Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [self] timer in
+            let isFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            guard isFront || -asked.timeIntervalSinceNow > Self.lendSettle else { return }
+            timer.invalidate()
+            if !isFront { giveBack(id: nil) }
+            emit(["id": id, "state": isFront ? "borrowed" : "failed"])
+        }
+    }
+
+    // The user's own clicks and pointer moves while their screen is lent. An agent's carry the process that sent them.
+    func watchUser() {
+        guard userMonitor == nil else { return }
+        let kinds: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown, .mouseMoved]
+        userMonitor = NSEvent.addGlobalMonitorForEvents(matching: kinds) { [self] event in
+            guard lent != nil, event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) == 0 else { return }
+            if event.type == .mouseMoved { lent?.userMoved = true } else { lent?.userClicked = true }
+        }
+    }
+
+    func giveBack(id: Any?) {
+        guard let was = lent else {
+            if let id { emit(["id": id, "state": "none"]) }
+            return
+        }
+        lent = nil
+        was.timer?.invalidate()
+        allowedUntil = .distantPast
+        let app = was.app, pid = app.processIdentifier, name = app.localizedName ?? "?"
+        let stillFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        let seconds = String(format: "%.1f", -was.started.timeIntervalSinceNow)
+        let theirs = was.userClicked || !stillFront  // they clicked, or went to another app: it is as they left it
+        if theirs {
+            log("\(name) was in front for the agent's steps for \(seconds) s: the user took over, so it stays as it is")
+        } else {
+            if was.wasOwned { launchedHidden.insert(pid) }
+            if was.wasParked, !app.isTerminated {
+                withDesktop { [self] area in
+                    if let area { moveToDesktop([app], area: area, id: nil) }
+                }
+            }
+            if let previous = was.previous, !previous.isTerminated {
+                front = previous
+                AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
+                                             kCFBooleanTrue)
+            }
+            if let pointer = was.pointer, !was.userMoved { CGWarpMouseCursorPosition(pointer) }
+            log("\(name) was in front for the agent's steps for \(seconds) s: "
+                + "\(was.previous?.localizedName ?? "the user's app") is back")
+        }
+        guard let id else { return }
+        // Windows on their way back to an agent's desktop are read only once they are there.
+        let settle = !theirs && was.wasParked ? Self.moveSettle + 0.4 : 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) { emit(["id": id, "state": "returned", "taken": theirs]) }
     }
 
     func running(_ query: String) -> NSRunningApplication? {

@@ -103,8 +103,18 @@ SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
 TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
-XY_ONLY_CLICKS = ("`xy` works with click, double-click, right-click and triple-click. Nothing scrolls at a place in "
-                  "the background yet: scroll an element by its number, or press keys such as down or space.")
+XY_ONLY_CLICKS = "`xy` works with click, double-click, right-click, triple-click, scroll and drag."
+BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
+USER_BUSY = ("The user is working in {}, and these steps need {} in front, which would take their screen. Do what "
+             "can be done behind, try again in a while, or ask them.")
+LEFT_FRONT = ("{} is in front now, so the user has gone on with their own work: the rest of these steps, which need "
+              "{} in front, were not made.")
+NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it there and give the user's app back: "
+             "`ucu install` builds one that can.")
+BORROWED_NOTE = ("{} was in front for these steps, as they can't be made behind, and the user's app is back in "
+                 "front now.")
+TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
+TRY_FRONT_NOTE = "If the picture shows no change either, the app may take input only in front: pass `front: true`."
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
                "screenshot shows.")
 SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab first and leave it "
@@ -151,18 +161,19 @@ USAGE_RULES = """ucu rules:
 it, and when you know an element's name, act on it by `name` without looking first.
 - Prefer numbers over positions. Use `xy` for what has no number, with pixels from a `look` screenshot.
 - With several windows, pass part of a title as `window`. Calls for different apps can run together.
-- Everything works in the background. Bring an app to the front only when the user asks to see it or be taken \
-there, or has to act in it themselves, such as to sign in (focus_window with activate, or `show` in the browser \
-tools): they can't see your windows, so do it before you ask them. Never do it to make an action work, and never use \
-the clipboard, which is theirs. If something can't be done in the background, ask the user.
+- Everything works in the background. A scroll or drag by `xy` can't, so `act` brings the app to the front for \
+it once the user is idle, and gives their app back after. If steps by `xy` change nothing in an app's picture, it \
+may take input only in front: do them again with `front: true`. When `act` says the user is busy, do other work \
+and try again, or ask them.
+- Bring an app to the user yourself only when they ask to see it or be taken there, or have to act in it, such as \
+to sign in (focus_window with activate, or `show` in the browser tools): they can't see your windows, so do it \
+before you ask them. Never use the clipboard, which is theirs.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in tabs of your own while the user is in \
 theirs. Put what belongs together in one call's `steps`.
-- If an action has no visible effect, stop and tell the user: remote-desktop and canvas apps can ignore background \
-input.
 - Don't let two agents drive the same app at the same time."""
-APP_PROPERTY = {"type": "string", "description": 'Name or bundle id of an app, e.g. "Calculator".'}
-WINDOW_PROPERTY = {"type": "string", "description": "Part of a window's title, for an app with several windows."}
+APP_PROPERTY = {"type": "string", "description": "An app's name or bundle id."}
+WINDOW_PROPERTY = {"type": "string", "description": "Part of a window's title, when the app has several."}
 SIMPLE_STEPS = ("click", "double-click", "right-click", "triple-click", "focus", "toggle", "check", "uncheck", "expand",
                 "collapse", "clear", "scroll-to")
 TEXT_STEPS = {"type": "text", "set-value": "value", "select": "value"}
@@ -177,20 +188,23 @@ WINDOW_TOOLS = [
          "screenshot": {"type": "boolean"}}},
      "annotations": {"readOnlyHint": True}},
     {"name": "act",
-     "description": "Do steps in an app, in order, without moving the user's pointer or taking focus, then return what "
-                    "changed. It stops at the first step that fails. A step is {do, on, ...}: `do` is "
+     "description": "Do steps in an app, in order, in the background, then return what changed. It stops at the "
+                    "first step that fails. A step is {do, on, ...}: `do` is "
                     + ", ".join(SIMPLE_STEPS) + ", type or set-value (with text), select (with text), scroll (with "
                     "direction and optional amount), press (with keys such as cmd+n or Return), menu (with text such "
                     "as File > New Window) or wait (amount seconds, or until text shows). The last three take "
-                    "no `on`. `on` is a number from look; or pass `name`, the element's name, and skip the look. For a "
-                    "click where there is neither, pass xy: [x, y].",
+                    "no `on`. `on` is a number from look; or pass `name`, the element's name, and skip the look. With "
+                    "neither, click or scroll at xy: [x, y], or drag from xy to `to`. That scroll or drag, and all "
+                    "steps with `front: true`, need the app in front: it comes once the user is idle, and theirs "
+                    "comes back after.",
      "inputSchema": {"type": "object", "required": ["app", "steps"], "properties": {
-         "app": APP_PROPERTY, "window": WINDOW_PROPERTY,
+         "app": APP_PROPERTY, "window": WINDOW_PROPERTY, "front": {"type": "boolean"},
          "steps": {"type": "array", "items": {"type": "object", "required": ["do"], "properties": {
              "do": {"type": "string"}, "on": {"type": "integer"}, "name": {"type": "string"},
              "text": {"type": "string"},
              "keys": {"type": "string"}, "direction": {"enum": ["up", "down", "left", "right"]},
-             "amount": {"type": "integer"}, "xy": {"type": "array", "items": {"type": "number"}}}}}}}},
+             "amount": {"type": "integer"}, "xy": {"type": "array", "items": {"type": "number"}},
+             "to": {"type": "array"}}}}}}},
     {"name": "list_windows",
      "description": "List an app's windows, or every app's without `app`: title, main (the one `look` reads by default), "
                     "dialog or panel, minimized, fullscreen, and frame. A header shows if the app is hidden.",
@@ -202,10 +216,9 @@ WINDOW_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "app": APP_PROPERTY,
          "title": {"type": "string", "description": "Part of the window's title, as list_windows shows it."},
-         "unfullscreen": {"type": "boolean", "description": "Leave full screen first (default false)."},
-         "activate": {"type": "boolean", "description": "Bring the window to the user's screen and the front, only "
-                                                        "when they asked to see it or must act in it (default "
-                                                        "false)."}},
+         "unfullscreen": {"type": "boolean", "description": "Leave full screen first."},
+         "activate": {"type": "boolean", "description": "Bring it to the user's screen, in front: only when they "
+                                                        "ask or must act in it."}},
          "required": ["app", "title"]}},
     {"name": "move_to_desktop",
      "description": "Move an app's windows to your private desktop, a display the user can't see. They keep working, "
@@ -278,6 +291,10 @@ def sign_in_note(result, note):
     if isinstance(result, dict) and result.pop("password", None):
         return f"{note}\n{SIGN_IN_NOTE}" if note else SIGN_IN_NOTE
     return note
+
+
+def valid_place(xy):
+    return isinstance(xy, list) and len(xy) == 2 and all(isinstance(at, (int, float)) for at in xy)
 
 
 def run_window_tool(name, arguments):
@@ -1316,9 +1333,10 @@ class Engine:
         return problem
 
     @classmethod
-    def batch(cls, entries):
-        """Run commands in one engine run, in order; return how many ran, and the ToolError that stopped them."""
-        data = cls.run("batch", json.dumps(entries), "--stop-on-error")
+    def batch(cls, entries, headed=False):
+        """Run commands in one engine run, in order; return how many ran, and the ToolError that stopped them.
+        `headed` uses the real pointer, for an app that is in front for these steps."""
+        data = cls.run("batch", json.dumps(entries), "--stop-on-error", *(["--headed"] if headed else []))
         for index, result in enumerate(data.get("results") or []):
             if not result.get("ok"):
                 return index, cls.failure(result.get("error") or {})
@@ -1787,12 +1805,25 @@ class Server:
         view = before = seen or self.read(app, window)
         index = 0
         workspace = self.browser_of(app_key(app))
+        lent = self.borrow(app, title) if self.needs_front(arguments, steps) else None
+        try:
+            if lent == "borrowed":  # its windows came to the user's screen, so every place in it is another now
+                view = self.read(app, window)
+            return self.run_act(app, window, key, seen, before, view, steps, workspace, lent)
+        finally:
+            if lent == "borrowed":
+                self.give_back(app)
+
+    def run_act(self, app, window, key, seen, before, view, steps, workspace, lent):
+        index, fresh = 0, None
         while index < len(steps):
             if workspace and workspace.used:  # a step in a page can bring its browser forward
                 self.windows.send({"ours": app})
             ending = next((at for at in range(index, len(steps)) if self.runs_alone(steps[at])), len(steps))
             step, fresh = steps[index], None
             try:
+                if lent:
+                    self.still_front(app)
                 if ending > index:
                     view, index = self.run_steps(app, window, before, view, steps, index, ending)
                     continue
@@ -1804,19 +1835,66 @@ class Server:
                 elif step.get("do") == "wait":
                     view = fresh = self.wait_for(app, window, step)
                 else:
-                    view = self.click_at(app, window, view, step)
+                    view = self.click_at(app, window, view, step, front=bool(lent))
                 index += 1
             except ToolError as error:
                 raise self.failed(app, window, key, seen, before, steps, index, error) from None
-        said = self.settled(app, window, key, before, whole=seen is None, fresh=fresh)
+        if lent == "borrowed":
+            self.give_back(app)  # before the last reading, which is of the window where it is from now on
+            lent = "returned"
+        said = self.settled(app, window, key, before, whole=seen is None, fresh=None if lent else fresh)
         if said.startswith("No change") and any("xy" in step for step in steps):
             said += " " + UNREAD_NOTE  # a picture or a screen in another computer changes without a word of it
+            if not lent:
+                said += " " + TRY_FRONT_NOTE
         return [{"type": "text", "text": said}]
+
+    # --- steps that need the app in front ----------------------------------
+    @staticmethod
+    def needs_front(arguments, steps):
+        """Whether steps can't be made behind the user's windows: the agent says so of an app that takes input only
+        in front, and a scroll or a drag at a place takes the real pointer."""
+        return bool(arguments.get("front")) or any(
+            isinstance(step, dict) and (step.get("do") == "drag" or (step.get("do") == "scroll" and "xy" in step))
+            for step in steps)
+
+    def borrow(self, app, title):
+        """Bring the app to the front for these steps. ucu-window does it only once the user has done nothing for a
+        moment, and gives their app back by itself if this server never does. Return "front" when the app was in
+        front already, where the agent works with the user, or "borrowed"."""
+        self.windows.start()
+        reply = self.windows.ask({"borrow": app, "window": title or "", "wait": BORROW_WAIT}, BORROW_WAIT + 5) or {}
+        if reply.get("state") == "busy":
+            raise ToolError(USER_BUSY.format(reply.get("front") or "another app", app))
+        if not reply:
+            raise ToolError(NO_BORROW.format(app))
+        if reply.get("state") not in ("front", "borrowed"):
+            raise ToolError(f"{app} couldn't come to the front for these steps.")
+        if reply["state"] == "borrowed":
+            self.windows.note(BORROWED_NOTE.format(app))
+        return reply["state"]
+
+    def give_back(self, app):
+        reply = self.windows.ask({"giveBack": True}, 5) or {}
+        if reply.get("taken"):
+            self.windows.note(TAKEN_NOTE.format(app))
+
+    def still_front(self, app):
+        """Steps with the real pointer land wherever the user is, so they stop once the user is somewhere else."""
+        front = (self.windows.ask({"front": True}, 5) or {}).get("front")
+        if front and app_key(front) != app_key(app) and not self.same_app(front, app):
+            raise ToolError(LEFT_FRONT.format(front, app))
+
+    @staticmethod
+    def same_app(shown, asked):
+        """Whether the name an app shows is the app the agent named, by another name or its bundle id."""
+        text, failed = run_window_tool("list_windows", {"app": asked})
+        return not failed and app_key(text.split(" (", 1)[0]) == app_key(shown)
 
     @classmethod
     def runs_alone(cls, step):
         """Whether a step is one the engine can't take in a run with others."""
-        return "xy" in step or cls.is_shortcut(step) or step.get("do") in ("menu", "wait")
+        return "xy" in step or cls.is_shortcut(step) or step.get("do") in ("menu", "wait", "drag")
 
     def failed(self, app, window, key, seen, before, steps, index, error):
         """What a failed act says: the step, its element and why. When steps before it ran, or its number is out of
@@ -2029,17 +2107,45 @@ class Server:
             return self.read(app, window)
         return view
 
-    def click_at(self, app, window, view, step):
-        """Click a place in the window's picture, which has picture_scale pixels to a point."""
-        if step.get("do") not in ("click", *GESTURES):  # anything else would arrive as a click
+    def click_at(self, app, window, view, step, front=False):
+        """Click a place in the window's picture, which has picture_scale pixels to a point. With the app in front
+        the real pointer does it, which can scroll and drag there too."""
+        kind = step.get("do")
+        if kind not in ("click", *GESTURES, "scroll", "drag"):  # anything else would arrive as a click
             raise ToolError(XY_ONLY_CLICKS)
+        if not valid_place(step.get("xy")) or (kind == "drag" and not valid_place(step.get("to"))):
+            raise ToolError("drag needs `xy` and `to`, each [x, y]." if kind == "drag" else "`xy` is [x, y].")
         view = self.on_screen(app, window, view)
         frame = view.frame
         if not frame:
             raise ToolError("This window has no position to click.")
         scale = picture_scale(frame)
-        self.point_click(app, (frame["x"] + step["xy"][0] / scale, frame["y"] + step["xy"][1] / scale), step)
+
+        def place(xy):
+            return frame["x"] + xy[0] / scale, frame["y"] + xy[1] / scale
+        if front:
+            self.front_step(kind, place(step["xy"]), step, place)
+        else:
+            self.point_click(app, place(step["xy"]), step)
         return view
+
+    def front_step(self, kind, point, step, place):
+        """A step with the real pointer, in an app that is in front for it."""
+        self.windows.send({"cursorTo": point})
+        xy = f"{point[0]:.0f},{point[1]:.0f}"
+        if kind == "scroll":
+            lines = float(step.get("amount") or 3)
+            dx, dy = {"up": (0, lines), "down": (0, -lines), "left": (-lines, 0), "right": (lines, 0)}.get(
+                str(step.get("direction") or "down"), (0, -lines))
+            entry = {"command": "mouse-wheel", "args": {"x": round(point[0]), "y": round(point[1]), "dx": dx, "dy": dy}}
+        elif kind == "drag":
+            to = place(step["to"])
+            entry = {"command": "drag", "args": {"from_xy": xy, "to_xy": f"{to[0]:.0f},{to[1]:.0f}"}}
+        else:
+            entry = {"command": "mouse-click", "args": {"xy": xy, **GESTURES.get(kind, {})}}
+        _ran, failure = Engine.batch([entry], headed=True)
+        if failure:
+            raise failure
 
     def click_where(self, app, window, view, number, step):
         """Double, triple and right clicks go to where an element is when it doesn't take them as an action of its
