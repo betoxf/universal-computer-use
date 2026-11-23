@@ -585,10 +585,12 @@ final class AskLabel: NSObject {
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in place() }
     }
 
-    // Just under the window's title bar, and only while the user is in that window.
+    // Just under the window's title bar, and only while the user is in that window. A window that has closed says so
+    // itself. One that doesn't answer is in a busy app, a page loading for instance, and is still there.
     func place() {
+        var role: CFTypeRef?
         guard let panel, let app, let window, !app.isTerminated,
-              (attribute(window, kAXRoleAttribute) as String?) != nil else {  // the window closed
+              AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) != .invalidUIElement else {
             let ended = done
             hide()
             ended?(false)
