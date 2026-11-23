@@ -341,6 +341,12 @@ class ServerTest(unittest.TestCase):
         typed = self.server.act({"do": "type", "xy": [10, 10], "text": "x"})
         self.assertIn("`xy` works with click", self.server.text(typed))
 
+    def test_clicks_a_place_in_a_window_where_the_window_is_now(self):
+        self.server.look(app="Moved")
+        reply = self.server.act({"do": "click", "xy": [10, 20]}, app="Moved")
+        self.assertFalse(reply["result"]["isError"], self.server.text(reply))
+        self.assertEqual(self.server.batched(), [{"command": "mouse-click", "args": {"xy": "510,620", "app": "Moved"}}])
+
     def test_pauses_when_a_wait_names_no_text(self):
         self.server.look()
         started = time.monotonic()

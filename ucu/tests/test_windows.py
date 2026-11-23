@@ -1,5 +1,6 @@
 """How ucu-proxy.py keeps apps out of the way, reports new windows and shares the Mac with other chats."""
 import base64
+import fcntl
 import importlib.util
 import json
 import os
@@ -160,15 +161,17 @@ class WatchTest(unittest.TestCase):
         reply = proxy.act({"do": "scroll", "xy": [10, 20], "direction": "up", "amount": 2}, app="Canvas")
         self.assertFalse(reply["result"]["isError"], proxy.text(reply))
         self.assertEqual(proxy.commands("borrow")[0]["borrow"], "Canvas")
-        self.assertEqual(len(proxy.commands("giveBack")), 2)  # after the steps, and once more however they end
-        self.assertEqual(proxy.batched(), [{"command": "mouse-wheel", "args": {"x": 110, "y": 220, "dx": 0, "dy": 2.0}}])
+        self.assertEqual(len(proxy.commands("giveBack")), 1)
+        wheel = {"command": "mouse-wheel", "args": {"x": 110, "y": 220, "dx": 0, "dy": 2.0}}
+        self.assertEqual(proxy.batched(), [wheel])
         self.assertIn("--headed", proxy.engine_calls("batch")[0])
-        self.assertIn("Canvas was in front for these steps", proxy.text(reply))
+        self.assertIn("Canvas was in front for the steps that can't be made behind", proxy.text(reply))
 
     def test_drags_and_clicks_with_the_real_pointer_when_the_agent_asks_for_the_front(self):
         proxy = WatchingProxy(self)
         proxy.look("Canvas")
-        steps = [{"do": "drag", "xy": [10, 20], "to": [30, 40]}, {"do": "click", "xy": [5, 5]}, {"do": "click", "on": 1}]
+        steps = [{"do": "drag", "xy": [10, 20], "to": [30, 40]}, {"do": "click", "xy": [5, 5]},
+                 {"do": "click", "on": 1}]
         reply = proxy.call("act", app="Canvas", front=True, steps=steps)
         self.assertFalse(reply["result"]["isError"], proxy.text(reply))
         self.assertEqual(proxy.batched(), [
@@ -192,13 +195,34 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(proxy.batched(), [])
         self.assertTrue(proxy.commands("giveBack"))
 
-    def test_works_in_an_app_that_is_in_front_already_without_taking_or_giving_anything(self):
+    def test_works_with_the_user_in_a_window_they_are_in_already(self):
         proxy = WatchingProxy(self)
         proxy.look("Front App")
         reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Front App")
         self.assertFalse(reply["result"]["isError"], proxy.text(reply))
-        self.assertEqual(proxy.commands("giveBack"), [])
-        self.assertNotIn("was in front for these steps", proxy.text(reply))
+        self.assertEqual(len(proxy.commands("giveBack")), 1)  # the pointer goes back where the user had it
+        self.assertNotIn("was in front for the steps", proxy.text(reply))
+
+    def test_gives_the_users_app_back_for_a_wait_and_takes_the_front_again_after_it(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Canvas")
+        steps = [{"do": "click", "xy": [5, 5]}, {"do": "wait", "amount": 0.1}, {"do": "click", "xy": [6, 6]}]
+        reply = proxy.call("act", app="Canvas", front=True, steps=steps)
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        kinds = [kind for command in proxy.commands("id") for kind in ("borrow", "giveBack") if kind in command]
+        self.assertEqual(kinds, ["borrow", "giveBack", "borrow", "giveBack"])
+        self.assertEqual(proxy.text(reply).count("was in front for the steps"), 1)
+
+    def test_lets_one_agent_at_a_time_have_the_front(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Canvas")
+        lock = Path(proxy.home.name) / "Library/Application Support/ucu/front.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with lock.open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Canvas")
+        self.assertIn("Another agent's steps have the front", proxy.text(reply))
+        self.assertEqual(proxy.commands("borrow"), [])
 
     def test_says_on_the_window_what_the_user_must_do_until_the_agent_goes_on(self):
         proxy = WatchingProxy(self)
@@ -407,7 +431,7 @@ class SafariTest(unittest.TestCase):
         self.assertEqual(len(plain), 1)
         asks = proxy.safari(op="open", url="https://a.test/sign-in")["content"]
         self.assertNotIn("password", json.loads(asks[0]["text"]))
-        self.assertIn("`show` them this tab first", asks[1]["text"])
+        self.assertIn("`show` them this tab, with `text` saying what to do", asks[1]["text"])
 
     def test_opens_its_tabs_in_the_users_window_behind_theirs(self):
         proxy = WatchingProxy(self)

@@ -47,6 +47,7 @@ Its tests are in tests/test_proxy.py, tests/test_policy.py, tests/test_alerts.py
 import argparse
 import base64
 import collections
+import fcntl
 import hashlib
 import itertools
 import json
@@ -105,6 +106,8 @@ CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488
 TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
 XY_ONLY_CLICKS = "`xy` works with click, double-click, right-click, triple-click, scroll and drag."
 ASK_LIMIT = 120       # characters of what an agent asks of the user that show on the window
+FRONT_LOCK = Path.home() / "Library/Application Support/ucu/front.lock"  # held by the chat whose app is in front
+FRONT_TAKEN = "Another agent's steps have the front of the user's screen right now. Try again in a moment."
 BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
 USER_BUSY = ("The user is working in {}, and these steps need {} in front, which would take their screen. Do what "
              "can be done behind, try again in a while, or ask them.")
@@ -112,8 +115,8 @@ LEFT_FRONT = ("{} is in front now, so the user has gone on with their own work: 
               "{} in front, were not made.")
 NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it there and give the user's app back: "
              "`ucu install` builds one that can.")
-BORROWED_NOTE = ("{} was in front for these steps, as they can't be made behind, and the user's app is back in "
-                 "front now.")
+BORROWED_NOTE = ("{} was in front for the steps that can't be made behind, and the user's app is back in front "
+                 "now.")
 TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
 ASK_NOTE = ("The user sees what you ask of them on the window, with a Done button. Don't act in it until they are "
             "done: `wait` for what shows then, or end your turn and tell them what you need.")
@@ -121,8 +124,8 @@ DONE_NOTE = "[ucu: The user clicked Done on what you asked of them in {}. Go on 
 TRY_FRONT_NOTE = "If the picture shows no change either, the app may take input only in front: pass `front: true`."
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
                "screenshot shows.")
-SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab first and leave it "
-                "open: they can't see it where it is.")
+SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab, with `text` saying "
+                "what to do, and leave it open: they can't see it where it is.")
 SAFARI_TIMEOUT = 45   # seconds; a page showing a dialog blocks every script until it is answered
 SAFARI_PAINT = 0.45   # seconds Safari takes to paint a page that has been hidden
 ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
@@ -171,7 +174,8 @@ may take input only in front: do them again with `front: true`. When `act` says 
 and try again, or ask them.
 - Bring an app to the user yourself only when they ask to see it or be taken there, or have to act in it, such as \
 to sign in (focus_window with activate, or `show` in the browser tools): they can't see your windows, so do it \
-before you ask them. Never use the clipboard, which is theirs.
+before you ask them, and say what you need with `ask` or `text`, which shows on the window until they are done. \
+Never use the clipboard, which is theirs.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in tabs of your own while the user is in \
 theirs. Put what belongs together in one call's `steps`.
@@ -746,6 +750,7 @@ class BrowserWorkspace:
                     self.server.ask_user(self.app, arguments["text"])
                     result["note"] = ASK_NOTE + " `hide` takes the window back after."
             elif op == "hide":
+                self.server.resume(self.app)  # the window leaves the user: nothing is asked of them there any more
                 result = {"hidden": self.take_back()}
             elif op in self.OPERATIONS:
                 target = self.target(arguments)
@@ -978,6 +983,7 @@ class SafariWorkspace(BrowserWorkspace):
             elif op == "close" and "tab_index" not in arguments:
                 result = {"closed": self.close_window()}
             elif op == "hide":
+                self.server.resume(self.app)
                 result = {"hidden": False, "note": "In Safari your tabs are in the user's own window: there is "
                                                    "nothing to take back. `away` takes one to your desktop."}
             elif op == "away":
@@ -1264,6 +1270,46 @@ class WindowWatcher:
                 process.stdin.close()  # the helper exits on EOF: read() collects it, so nothing waits here
             except OSError:
                 pass
+
+
+class Front:
+    """An app's window in front of the user's for an agent's steps, for as long as they need it and no longer: see
+    Server.borrow. It is taken for the first step that needs it and given back before a wait and after the last."""
+
+    def __init__(self, server, app, title, always):
+        self.server, self.app, self.title = server, app, title
+        self.always = always  # the agent asked for every step: the app takes input only in front
+        self.state, self.turn, self.used = None, None, False
+
+    def needs(self, step):
+        kind = step.get("do")
+        return self.always or kind == "drag" or (kind == "scroll" and "xy" in step)
+
+    def take(self):
+        """Bring it to the front, if it isn't lent already. Return whether its window may have moved."""
+        if self.state:
+            return False
+        self.turn = self.server.front_turn()
+        try:
+            self.state = self.server.borrow(self.app, self.title)
+        except ToolError:
+            self.turn.close()
+            raise
+        if self.state == "borrowed" and not self.used:
+            self.server.windows.note(BORROWED_NOTE.format(self.app))
+        self.used = True
+        return self.state == "borrowed"
+
+    def give(self):
+        """Give the user's app back. Return whether there was anything to give."""
+        if not self.state:
+            return False
+        try:
+            self.server.give_back(self.app)
+        finally:
+            self.state = None
+            self.turn.close()
+        return True
 
 
 class ToolError(Exception):
@@ -1622,7 +1668,7 @@ class Server:
         else:
             text, failed = run_window_tool(name, arguments)
             if not failed and name == "focus_window" and arguments.get("activate") and arguments.get("ask"):
-                self.ask_user(str(arguments.get("app") or ""), arguments["ask"])
+                self.ask_user(str(arguments.get("app") or ""), arguments["ask"], str(arguments.get("title") or ""))
                 text += "\n" + ASK_NOTE
         if failed:
             raise ToolError(text)
@@ -1823,20 +1869,16 @@ class Server:
         window = self.window_id(app, title) if title else None
         seen = self.views.get(key)  # without it the agent hasn't read this window, so the result shows all of it
         view = before = seen or self.read(app, window)
-        index = 0
         workspace = self.browser_of(app_key(app))
         if any(isinstance(step, dict) and step.get("do") != "wait" for step in steps):
             self.resume(app)
-        lent = self.borrow(app, title) if self.needs_front(arguments, steps) else None
+        front = Front(self, app, title, bool(arguments.get("front")))
         try:
-            if lent == "borrowed":  # its windows came to the user's screen, so every place in it is another now
-                view = self.read(app, window)
-            return self.run_act(app, window, key, seen, before, view, steps, workspace, lent)
+            return self.run_act(app, window, key, seen, before, view, steps, workspace, front)
         finally:
-            if lent == "borrowed":
-                self.give_back(app)
+            front.give()  # however the steps end, the user's app comes back
 
-    def run_act(self, app, window, key, seen, before, view, steps, workspace, lent):
+    def run_act(self, app, window, key, seen, before, view, steps, workspace, front):
         index, fresh = 0, None
         while index < len(steps):
             if workspace and workspace.used:  # a step in a page can bring its browser forward
@@ -1844,7 +1886,13 @@ class Server:
             ending = next((at for at in range(index, len(steps)) if self.runs_alone(steps[at])), len(steps))
             step, fresh = steps[index], None
             try:
-                if lent:
+                # The app is in front only for the steps that need it. A wait can last minutes: the user has their
+                # screen meanwhile, and the app comes forward again for what follows.
+                if step.get("do") == "wait":
+                    front.give()
+                elif front.needs(step) and front.take():
+                    view = self.read(app, window)  # its window came to the user's screen: every place is another
+                if front.state:
                     self.still_front(app)
                 if ending > index:
                     view, index = self.run_steps(app, window, before, view, steps, index, ending)
@@ -1857,25 +1905,25 @@ class Server:
                 elif step.get("do") == "wait":
                     view = fresh = self.wait_for(app, window, step)
                 else:
-                    view = self.click_at(app, window, view, step, front=bool(lent))
+                    view = self.click_at(app, window, view, step, front=bool(front.state))
                 index += 1
             except ToolError as error:
+                front.give()  # before the window is read for what the failure says
                 raise self.failed(app, window, key, seen, before, steps, index, error) from None
-        if lent == "borrowed":
-            self.give_back(app)  # before the last reading, which is of the window where it is from now on
-            lent = "returned"
-        said = self.settled(app, window, key, before, whole=seen is None, fresh=None if lent else fresh)
+        if front.give():
+            fresh = None  # the last reading is of the window where it is from now on
+        said = self.settled(app, window, key, before, whole=seen is None, fresh=fresh)
         if said.startswith("No change") and any("xy" in step for step in steps):
             said += " " + UNREAD_NOTE  # a picture or a screen in another computer changes without a word of it
-            if not lent:
+            if not front.used:
                 said += " " + TRY_FRONT_NOTE
         return [{"type": "text", "text": said}]
 
     # --- asking the user to act in a window ---------------------------------
-    def ask_user(self, app, text):
-        """Say on the app's window, which the agent has just brought to the user, what they must do there."""
+    def ask_user(self, app, text, window=""):
+        """Say on the window the agent has just brought to the user what they must do there."""
         self.windows.start()
-        self.windows.send({"ask": " ".join(str(text).split())[:ASK_LIMIT], "app": app})
+        self.windows.send({"ask": " ".join(str(text).split())[:ASK_LIMIT], "app": app, "window": window})
         self.asked = app_key(app)
 
     def resume(self, app):
@@ -1886,32 +1934,41 @@ class Server:
 
     # --- steps that need the app in front ----------------------------------
     @staticmethod
-    def needs_front(arguments, steps):
-        """Whether steps can't be made behind the user's windows: the agent says so of an app that takes input only
-        in front, and a scroll or a drag at a place takes the real pointer."""
-        return bool(arguments.get("front")) or any(
-            isinstance(step, dict) and (step.get("do") == "drag" or (step.get("do") == "scroll" and "xy" in step))
-            for step in steps)
+    def front_turn():
+        """One agent at a time has the front of the user's screen, in whatever chat: a second would bring its app
+        over the first one's and forget whose turn it is to come back. Return what holds the turn until closed."""
+        FRONT_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        held, until = FRONT_LOCK.open("w"), time.monotonic() + BORROW_WAIT
+        while True:
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return held
+            except OSError:
+                if time.monotonic() > until:
+                    held.close()
+                    raise ToolError(FRONT_TAKEN) from None
+                time.sleep(0.1)
 
     def borrow(self, app, title):
-        """Bring the app to the front for these steps. ucu-window does it only once the user has done nothing for a
-        moment, and gives their app back by itself if this server never does. Return "front" when the app was in
-        front already, where the agent works with the user, or "borrowed"."""
+        """Bring the app's window to the front for steps that need it. ucu-window does it only once the user has done
+        nothing for a moment, and gives their app back by itself if this server never does. Return "front" when the
+        user was in that window already, where the agent works with them, or "borrowed"."""
         self.windows.start()
         reply = self.windows.ask({"borrow": app, "window": title or "", "wait": BORROW_WAIT}, BORROW_WAIT + 5) or {}
         if reply.get("state") == "busy":
             raise ToolError(USER_BUSY.format(reply.get("front") or "another app", app))
+        if reply.get("state") == "lent":
+            raise ToolError(FRONT_TAKEN)
         if not reply:
             raise ToolError(NO_BORROW.format(app))
         if reply.get("state") not in ("front", "borrowed"):
             raise ToolError(f"{app} couldn't come to the front for these steps.")
-        if reply["state"] == "borrowed":
-            self.windows.note(BORROWED_NOTE.format(app))
         return reply["state"]
 
     def give_back(self, app):
         reply = self.windows.ask({"giveBack": True}, 5) or {}
-        if reply.get("taken"):
+        if reply.get("taken"):  # the user came to it: it is on their screen now, and stays
+            self.user_took([app])
             self.windows.note(TAKEN_NOTE.format(app))
 
     def still_front(self, app):
@@ -2151,7 +2208,7 @@ class Server:
         if not valid_place(step.get("xy")) or (kind == "drag" and not valid_place(step.get("to"))):
             raise ToolError("drag needs `xy` and `to`, each [x, y]." if kind == "drag" else "`xy` is [x, y].")
         view = self.on_screen(app, window, view)
-        frame = view.frame
+        frame = self.frame_now(app, view) or view.frame
         if not frame:
             raise ToolError("This window has no position to click.")
         scale = picture_scale(frame)
@@ -2163,6 +2220,18 @@ class Server:
         else:
             self.point_click(app, place(step["xy"]), step)
         return view
+
+    @staticmethod
+    def frame_now(app, view):
+        """Where a window is now, or None when the engine doesn't say. It isn't always where it was read: the user
+        moves their windows, and one comes to their screen for them or for a step and goes back."""
+        try:
+            windows = Engine.run("list-windows", "--app", app) or []
+        except ToolError:
+            return None
+        frame = next((found.get("bounds") for found in windows
+                      if isinstance(found, dict) and found.get("id") == view.window), None)
+        return frame if isinstance(frame, dict) and {"x", "y", "width", "height"} <= set(frame) else None
 
     def front_step(self, kind, point, step, place):
         """A step with the real pointer, in an app that is in front for it."""
