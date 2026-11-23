@@ -5,6 +5,7 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "Unmaintained advisory on a zbus 5 transitive dependency. zbus 5.19 is the newest release that has the blocking API this crate uses; remove this entry when the crate moves to zbus 6." },
   { id = "RUSTSEC-2026-0371", reason = "Unmaintained advisory on a zbus 5 transitive dependency. zbus 5.19 is the newest release that has the blocking API this crate uses; remove this entry when the crate moves to zbus 6." },
   { id = "RUSTSEC-2026-0372", reason = "Unmaintained advisory on a zbus 5 transitive dependency. zbus 5.19 is the newest release that has the blocking API this crate uses; remove this entry when the crate moves to zbus 6." },
+  { id = "RUSTSEC-2026-0543", reason = "Unmaintained advisory on chrono, not a vulnerability. chrono comes only through uiautomation, used by the Windows UI Automation adapter, and no uiautomation release without chrono exists. Revisit by 2027-02-19; remove this entry when uiautomation drops chrono or the Windows adapter replaces uiautomation." },
 ]
 
 [licenses]
