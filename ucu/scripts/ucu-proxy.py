@@ -120,6 +120,8 @@ BORROWED_NOTE = ("{} was in front for the steps that can't be made behind, and t
 TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
 ASK_NOTE = ("The user sees what you ask of them on the window, with a Done button. Don't act in it until they are "
             "done: `wait` for what shows then, or end your turn and tell them what you need.")
+USER_AT_WORK = ("The user is doing what you asked of them in {} right now. Leave it to them: `wait` for what shows "
+                "when they are done, or end your turn.")
 DONE_NOTE = "[ucu: The user clicked Done on what you asked of them in {}. Go on there.]"
 TRY_FRONT_NOTE = "If the picture shows no change either, the app may take input only in front: pass `front: true`."
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
@@ -1927,10 +1929,18 @@ class Server:
         self.asked = app_key(app)
 
     def resume(self, app):
-        """The agent goes on working in an app: what it asked of the user there is no longer on the window."""
-        if self.asked == app_key(app):
-            self.windows.send({"ask": "", "app": app})
-            self.asked = None
+        """The agent goes on working in an app: what it asked of the user there is no longer on the window. If the
+        user is at it this moment, typing or clicking in that app, a step of the agent's would land in the middle
+        of what they do, a password perhaps. So it waits for them to pause, and is refused if they don't."""
+        if self.asked != app_key(app):
+            return
+        until = time.monotonic() + BORROW_WAIT
+        while (self.windows.ask({"atWork": app}, 5) or {}).get("atWork"):
+            if time.monotonic() > until:
+                raise ToolError(USER_AT_WORK.format(app))
+            time.sleep(0.3)
+        self.windows.send({"ask": "", "app": app})
+        self.asked = None
 
     # --- steps that need the app in front ----------------------------------
     @staticmethod

@@ -226,7 +226,8 @@ class WatchTest(unittest.TestCase):
 
     def test_says_on_the_window_what_the_user_must_do_until_the_agent_goes_on(self):
         proxy = WatchingProxy(self)
-        reply = proxy.call("focus_window", app="Calculator", title="Calc", activate=True, ask="Type the  code\nand press OK")
+        reply = proxy.call("focus_window", app="Calculator", title="Calc", activate=True,
+                           ask="Type the  code\nand press OK")
         self.assertIn("The user sees what you ask of them on the window", proxy.text(reply))
         self.assertEqual(proxy.asks(), [("Type the code and press OK", "Calculator")])
         proxy.look("Calculator")
@@ -236,6 +237,14 @@ class WatchTest(unittest.TestCase):
         said = proxy.text(proxy.act({"do": "click", "on": 1}, app="Calculator"))
         self.assertIn("The user clicked Done on what you asked of them in Calculator", said)
         self.assertEqual(proxy.asks()[-1], ("", "Calculator"))
+
+    def test_leaves_a_window_to_the_user_while_they_do_what_it_asked_there(self):
+        proxy = WatchingProxy(self)
+        proxy.call("focus_window", app="Typing App", title="x", activate=True, ask="Type your password")
+        reply = proxy.act({"do": "click", "on": 1}, app="Typing App")
+        self.assertIn("The user is doing what you asked of them in Typing App right now", proxy.text(reply))
+        self.assertEqual(proxy.batched(), [])
+        self.assertEqual(proxy.asks(), [("Type your password", "Typing App")])  # and the label stays
 
     def test_says_it_on_a_page_the_agent_shows_the_user(self):
         proxy = WatchingProxy(self)

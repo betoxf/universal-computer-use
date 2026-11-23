@@ -6,6 +6,7 @@ starts with "Closed", as windowless if it starts with "Empty", and as denied if 
 and "Google Chrome" are active, as if the user were in them. On `rest` it exits, unless it opened an app. An app with
 "Stuck" in its name can't move to the agent's desktop. An app comes to the front for an agent's steps unless its name
 starts with "Busy" (the user is working), "Front" (it is in front already) or "Left" (the user leaves it meanwhile).
+In an app whose name starts with "Typing" the user is typing whenever it is asked.
 Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the other commands.
 """
 import json
@@ -75,6 +76,8 @@ def answer(command):
     elif "front" in command:  # an app called "Left…" is one the user leaves while the agent works in it
         name = lent[-1] if lent else ""
         send({"id": command["id"], "front": "Mail" if name.startswith("Left") else name})
+    elif "atWork" in command:
+        send({"id": command["id"], "atWork": command["atWork"].startswith("Typing")})
     elif "desktop" in command:
         moved = os.path.exists(os.path.join(os.environ["HOME"], "desktop-moved"))  # another chat's desktop left
         send({"id": command["id"], "bounds": [-3840 if moved else -1920, -2400 if moved else -1200, 1920, 1200]})

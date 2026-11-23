@@ -640,6 +640,7 @@ final class AskLabel: NSObject {
 //                                                       user has done nothing for a moment
 //   {"id": 6, "giveBack": true}                         those steps are done: the user's app comes back
 //   {"id": 7, "front": true}                            say which app is in front
+//   {"id": 8, "atWork": "Safari"}                       say whether the user is typing or clicking in this app now
 //   {"ask": "Sign in", "app": "Safari", "window": "…"}  say on that window what the user must do ("": no more)
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
@@ -924,6 +925,12 @@ final class Watcher {
             if lent != nil { keepLending() }
             emit(["id": id, "front": NSWorkspace.shared.frontmostApplication?.localizedName ?? ""])
         }
+        if let name = command["atWork"] as? String, let id = command["id"] {
+            // Whether the user is at work in this app right now: in it, and typing, clicking or scrolling.
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let inIt = running(name).map { $0.processIdentifier == front } ?? false
+            emit(["id": id, "atWork": inIt && Self.userIsActive(within: Self.lendIdle)])
+        }
         if command["rest"] != nil { giveBack(id: nil) }  // a turn never ends with the user's screen still lent
         if let text = command["ask"] as? String {
             // The window is the one named, or the one the agent has just brought to the user, which the app is in.
@@ -989,20 +996,26 @@ final class Watcher {
         let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
         let wanted = named.isEmpty ? nil : windows.first { key(title($0)).contains(key(named)) }
         let window = wanted ?? attribute(element, kAXMainWindowAttribute) ?? windows.first
-        let focused: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
-        // The user is looking at that very window: the agent works there with them, and nothing moves.
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, let window, let focused,
-           CFEqual(window, focused), !Self.isOutOfSight(window) {
-            lent = Lent(app: app, previous: nil, pointer: CGEvent(source: nil)?.location, window: nil, place: nil,
-                        userWindow: nil, wasHidden: false, wasKept: false, light: true, started: Date())
-            watchUser()
-            keepLending()
-            return emit(["id": id, "state": "front"])
+        // Whether the user is in that very window: the agent then works there with them, and nothing moves.
+        func isTheirs() -> Bool {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, let window,
+                  let focused: AXUIElement = attribute(element, kAXFocusedWindowAttribute) else { return false }
+            return CFEqual(window, focused) && !Self.isOutOfSight(window)
         }
         let until = Date() + wait
         func attempt() {
             if lent != nil { return emit(["id": id, "state": "lent", "front": lent?.app.localizedName ?? "?"]) }
-            if !Self.userIsActive(within: Self.lendIdle) { return lend(app, window: window, id: id) }
+            // Wherever the window is, the real pointer is about to move: never while the user types, clicks or
+            // scrolls, least of all in that window.
+            if !Self.userIsActive(within: Self.lendIdle) {
+                guard isTheirs() else { return lend(app, window: window, id: id) }
+                lent = Lent(app: app, previous: nil, pointer: CGEvent(source: nil)?.location, window: nil,
+                            place: nil, userWindow: nil, wasHidden: false, wasKept: false, light: true,
+                            started: Date())
+                watchUser()
+                keepLending()
+                return emit(["id": id, "state": "front"])
+            }
             if Date() >= until {
                 let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
                 return emit(["id": id, "state": "busy", "front": front])
@@ -1802,8 +1815,8 @@ case "focus", "unfullscreen":
             if Watcher.isOutOfSight(window) { bringIntoSight(window) }  // the user asked to see it
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             app.unhide()
-            // macOS doesn't activate every app it is asked to, and says nothing of it: a program that isn't an app
-            // bundle, such as one run from a terminal, stays behind. The app itself, asked to be in front, comes.
+            // macOS doesn't activate every app it is asked to, and says nothing of it: a program run from a terminal
+            // stayed behind while its window was reported as main. The app itself, asked to be in front, comes.
             AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
             app.activate()
             for _ in 0..<50 where NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
