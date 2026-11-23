@@ -109,12 +109,19 @@ ASK_LIMIT = 120       # characters of what an agent asks of the user that show o
 FRONT_LOCK = Path.home() / "Library/Application Support/ucu/front.lock"  # held by the chat whose app is in front
 FRONT_TAKEN = "Another agent's steps have the front of the user's screen right now. Try again in a moment."
 BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
-USER_BUSY = ("The user is working in {}, and these steps need {} in front, which would take their screen. Do what "
+USER_BUSY = ("The user is working in {}, and these steps take their pointer, and may bring {} to the front. Do what "
              "can be done behind, try again in a while, or ask them.")
 LEFT_FRONT = ("{} is in front now, so the user has gone on with their own work: the rest of these steps, which need "
               "{} in front, were not made.")
 NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it there and give the user's app back: "
              "`ucu install` builds one that can.")
+OWN_FRONT = ("{} has the user's own windows too, so it isn't brought to the front for your steps. A scroll by `xy` "
+             "works in your window where it is; for the rest use the browser tool, which clicks and types in the page.")
+FRONT_DWELL = 0.25    # seconds an app stays in front after the last step, which an app that is left at once can lose
+POINTER_MISSED = ("The pointer didn't get to that place, so the step was not made: the user may be moving it. Try "
+                  "again in a moment.")
+COVERED = ("Another window is over that place in {}, so the step was not made: it would have landed in that one. "
+           "`look` with screenshot shows the window as it is.")
 BORROWED_NOTE = ("{} was in front for the steps that can't be made behind, and the user's app is back in front "
                  "now.")
 TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
@@ -170,10 +177,10 @@ USAGE_RULES = """ucu rules:
 it, and when you know an element's name, act on it by `name` without looking first.
 - Prefer numbers over positions. Use `xy` for what has no number, with pixels from a `look` screenshot.
 - With several windows, pass part of a title as `window`. Calls for different apps can run together.
-- Everything works in the background. A scroll or drag by `xy` can't, so `act` brings the app to the front for \
-it once the user is idle, and gives their app back after. If steps by `xy` change nothing in an app's picture, it \
-may take input only in front: do them again with `front: true`. When `act` says the user is busy, do other work \
-and try again, or ask them.
+- Everything works in the background. A scroll or drag by `xy` takes the real pointer, and a drag the front too: \
+`act` takes them once the user is idle, and gives them back after. If steps by `xy` change nothing in an app's \
+picture, it may take input only in front: do them again with `front: true`. When `act` says the user is busy, do \
+other work and try again, or ask them.
 - Bring an app to the user yourself only when they ask to see it or be taken there, or have to act in it, such as \
 to sign in (focus_window with activate, or `show` in the browser tools): they can't see your windows, so do it \
 before you ask them, and say what you need with `ask` or `text`, which shows on the window until they are done. \
@@ -1278,9 +1285,13 @@ class Front:
     """An app's window in front of the user's for an agent's steps, for as long as they need it and no longer: see
     Server.borrow. It is taken for the first step that needs it and given back before a wait and after the last."""
 
-    def __init__(self, server, app, title, always):
+    def __init__(self, server, app, title, always, steps):
         self.server, self.app, self.title = server, app, title
         self.always = always  # the agent asked for every step: the app takes input only in front
+        # A scroll goes to the window under the pointer, in front or not, so for scrolls alone the pointer is all
+        # that is taken where ucu-window can do with that. A drag presses, which brings its app to the front.
+        self.pointer_only = not always and not any(isinstance(step, dict) and step.get("do") == "drag"
+                                                   for step in steps)
         self.state, self.turn, self.used = None, None, False
 
     def needs(self, step):
@@ -1293,7 +1304,7 @@ class Front:
             return False
         self.turn = self.server.front_turn()
         try:
-            self.state = self.server.borrow(self.app, self.title)
+            self.state = self.server.borrow(self.app, self.title, self.pointer_only)
         except ToolError:
             self.turn.close()
             raise
@@ -1307,6 +1318,8 @@ class Front:
         if not self.state:
             return False
         try:
+            if self.state == "borrowed":  # what the last step sent is still on its way to the app
+                time.sleep(FRONT_DWELL)
             self.server.give_back(self.app)
         finally:
             self.state = None
@@ -1874,7 +1887,7 @@ class Server:
         workspace = self.browser_of(app_key(app))
         if any(isinstance(step, dict) and step.get("do") != "wait" for step in steps):
             self.resume(app)
-        front = Front(self, app, title, bool(arguments.get("front")))
+        front = Front(self, app, title, bool(arguments.get("front")), steps)
         try:
             return self.run_act(app, window, key, seen, before, view, steps, workspace, front)
         finally:
@@ -1894,7 +1907,7 @@ class Server:
                     front.give()
                 elif front.needs(step) and front.take():
                     view = self.read(app, window)  # its window came to the user's screen: every place is another
-                if front.state:
+                if front.state in ("borrowed", "front"):  # with the pointer alone, the user's app stays in front
                     self.still_front(app)
                 if ending > index:
                     view, index = self.run_steps(app, window, before, view, steps, index, ending)
@@ -1907,7 +1920,7 @@ class Server:
                 elif step.get("do") == "wait":
                     view = fresh = self.wait_for(app, window, step)
                 else:
-                    view = self.click_at(app, window, view, step, front=bool(front.state))
+                    view = self.click_at(app, window, view, step, front=front.state)
                 index += 1
             except ToolError as error:
                 front.give()  # before the window is read for what the failure says
@@ -1959,19 +1972,23 @@ class Server:
                     raise ToolError(FRONT_TAKEN) from None
                 time.sleep(0.1)
 
-    def borrow(self, app, title):
+    def borrow(self, app, title, pointer_only=False):
         """Bring the app's window to the front for steps that need it. ucu-window does it only once the user has done
-        nothing for a moment, and gives their app back by itself if this server never does. Return "front" when the
-        user was in that window already, where the agent works with them, or "borrowed"."""
+        nothing for a moment, and gives their app back by itself if this server never does. Return "borrowed", or
+        "front" when the user was in that window already, where the agent works with them, or "pointer" when
+        only the pointer goes to a window on the agent's desktop, which `pointer_only` allows."""
         self.windows.start()
-        reply = self.windows.ask({"borrow": app, "window": title or "", "wait": BORROW_WAIT}, BORROW_WAIT + 5) or {}
+        asked = {"borrow": app, "window": title or "", "wait": BORROW_WAIT, "pointerOnly": pointer_only}
+        reply = self.windows.ask(asked, BORROW_WAIT + 5) or {}
         if reply.get("state") == "busy":
             raise ToolError(USER_BUSY.format(reply.get("front") or "another app", app))
         if reply.get("state") == "lent":
             raise ToolError(FRONT_TAKEN)
+        if reply.get("state") == "own":
+            raise ToolError(OWN_FRONT.format(app))
         if not reply:
             raise ToolError(NO_BORROW.format(app))
-        if reply.get("state") not in ("front", "borrowed"):
+        if reply.get("state") not in ("front", "borrowed", "pointer"):
             raise ToolError(f"{app} couldn't come to the front for these steps.")
         return reply["state"]
 
@@ -1981,11 +1998,18 @@ class Server:
             self.user_took([app])
             self.windows.note(TAKEN_NOTE.format(app))
 
-    def still_front(self, app):
-        """Steps with the real pointer land wherever the user is, so they stop once the user is somewhere else."""
-        front = (self.windows.ask({"front": True}, 5) or {}).get("front")
-        if front and app_key(front) != app_key(app) and not self.same_app(front, app):
+    def still_front(self, app, at=None, number=None, in_front=True):
+        """Steps with the real pointer land wherever the user is, and on whatever window is in front at their place.
+        So they stop once the user is somewhere else, unless the app needn't be `in_front` for them, and a step at a
+        place isn't made when the window there is another than the one it is for: `number` is the window server's
+        number for that one."""
+        asked = {"front": True, **({"at": [round(at[0]), round(at[1])]} if at else {})}
+        reply = self.windows.ask(asked, 5) or {}
+        front = reply.get("front")
+        if in_front and front and app_key(front) != app_key(app) and not self.same_app(front, app):
             raise ToolError(LEFT_FRONT.format(front, app))
+        if at and number is not None and reply.get("top", number) != number:
+            raise ToolError(COVERED.format(app))
 
     @staticmethod
     def same_app(shown, asked):
@@ -2225,7 +2249,10 @@ class Server:
 
         def place(xy):
             return frame["x"] + xy[0] / scale, frame["y"] + xy[1] / scale
-        if front:
+        if front:  # the real pointer acts on whatever is there, so each place is checked first
+            found = re.fullmatch(r"w-(\d+)", str(view.window))
+            for xy in (step["xy"], step["to"]) if kind == "drag" else (step["xy"],):
+                self.still_front(app, place(xy), int(found.group(1)) if found else None, front != "pointer")
             self.front_step(kind, place(step["xy"]), step, place)
         else:
             self.point_click(app, place(step["xy"]), step)
@@ -2258,6 +2285,8 @@ class Server:
         else:
             entry = {"command": "mouse-click", "args": {"xy": xy, **GESTURES.get(kind, {})}}
         _ran, failure = Engine.batch([entry], headed=True)
+        if failure and "did not reach" in str(getattr(failure, "raw", "")):  # the engine checks where the pointer is
+            raise ToolError(POINTER_MISSED)
         if failure:
             raise failure
 

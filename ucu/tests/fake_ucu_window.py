@@ -6,8 +6,11 @@ starts with "Closed", as windowless if it starts with "Empty", and as denied if 
 and "Google Chrome" are active, as if the user were in them. On `rest` it exits, unless it opened an app. An app with
 "Stuck" in its name can't move to the agent's desktop. An app comes to the front for an agent's steps unless its name
 starts with "Busy" (the user is working), "Front" (it is in front already) or "Left" (the user leaves it meanwhile).
-In an app whose name starts with "Typing" the user is typing whenever it is asked.
-Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the other commands.
+In an app whose name starts with "Typing" the user is typing whenever it is asked, and one whose name starts with
+"Covered" has another window over every place in its own. An app whose name starts with "Parked" is on the agent's
+desktop, where the pointer alone is enough for a scroll, and the user's app stays in front.
+Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the
+other commands.
 """
 import json
 import os
@@ -67,7 +70,11 @@ def answer(command):
     elif "borrow" in command:
         name = command["borrow"]
         state = "busy" if name.startswith("Busy") else "front" if name.startswith("Front") else "borrowed"
-        if state != "busy":
+        if name.startswith("Parked") and command.get("pointerOnly"):  # on the agent's desktop: the pointer is enough
+            state = "pointer"
+        if name.startswith("Own"):  # a browser with the user's windows and the chat's own
+            state = "own"
+        if state not in ("busy", "own"):
             lent.append(name)
         send({"id": command["id"], "state": state, "front": "Mail"})
     elif "giveBack" in command and "id" in command:
@@ -75,7 +82,9 @@ def answer(command):
         lent.clear()
     elif "front" in command:  # an app called "Left…" is one the user leaves while the agent works in it
         name = lent[-1] if lent else ""
-        send({"id": command["id"], "front": "Mail" if name.startswith("Left") else name})
+        covered = {"top": 0} if name.startswith("Covered") and "at" in command else {}  # another window is there
+        elsewhere = name.startswith(("Left", "Parked"))  # the user's own app is in front
+        send({"id": command["id"], "front": "Mail" if elsewhere else name, **covered})
     elif "atWork" in command:
         send({"id": command["id"], "atWork": command["atWork"].startswith("Typing")})
     elif "desktop" in command:

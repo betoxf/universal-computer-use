@@ -183,7 +183,7 @@ class WatchTest(unittest.TestCase):
         proxy = WatchingProxy(self)
         proxy.look("Busy App")
         reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Busy App")
-        self.assertIn("The user is working in Mail, and these steps need Busy App in front", proxy.text(reply))
+        self.assertIn("The user is working in Mail, and these steps take their pointer", proxy.text(reply))
         self.assertEqual(proxy.batched(), [])
         self.assertEqual(proxy.commands("giveBack"), [])
 
@@ -192,6 +192,34 @@ class WatchTest(unittest.TestCase):
         proxy.look("Left App")
         reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Left App")
         self.assertIn("Mail is in front now", proxy.text(reply))
+        self.assertEqual(proxy.batched(), [])
+        self.assertTrue(proxy.commands("giveBack"))
+
+    def test_takes_only_the_pointer_for_a_scroll_in_a_window_on_the_agents_desktop(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Parked App")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Parked App")
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))  # though the user's app is in front
+        self.assertTrue(proxy.commands("borrow")[0]["pointerOnly"])
+        self.assertEqual([entry["command"] for entry in proxy.batched()], ["mouse-wheel"])
+        self.assertNotIn("was in front for the steps", proxy.text(reply))
+        dragged = proxy.act({"do": "drag", "xy": [10, 20], "to": [30, 40]}, app="Parked App")
+        self.assertFalse(proxy.commands("borrow")[1]["pointerOnly"])  # a drag presses, which takes the front
+        self.assertIn("Mail is in front now", proxy.text(dragged))
+
+    def test_brings_no_browser_with_the_users_windows_to_the_front(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Own Browser")
+        reply = proxy.call("act", app="Own Browser", front=True, steps=[{"do": "click", "xy": [10, 20]}])
+        self.assertIn("Own Browser has the user's own windows too", proxy.text(reply))
+        self.assertEqual(proxy.batched(), [])
+        self.assertEqual(proxy.commands("giveBack"), [])
+
+    def test_makes_no_step_with_the_real_pointer_where_another_window_is_in_front(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Covered App")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Covered App")
+        self.assertIn("Another window is over that place in Covered App", proxy.text(reply))
         self.assertEqual(proxy.batched(), [])
         self.assertTrue(proxy.commands("giveBack"))
 

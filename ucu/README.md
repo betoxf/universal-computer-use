@@ -143,17 +143,25 @@ the window, for up to `amount` seconds; without `text` it pauses for `amount` se
 neither number nor name, pass `xy` with pixels from a `look` screenshot: `click` and its kin, `scroll`, or `drag` with
 `to`, the place it ends.
 
-A scroll or a drag at a place takes the real pointer, and some apps take input only while they are in front. For those,
-`act` brings the window to the front, and for an app that ignores steps made behind, the agent passes `front: true`:
+A scroll or a drag at a place takes the real pointer, and some apps take input only while they are in front. `act`
+makes those steps with the pointer, and brings the app to the front where it must. For an app that ignores steps made
+behind, the agent passes `front: true`:
 
-- The window comes forward only once you have done nothing for a moment (1.5 seconds). While you work, `act` waits up
-  to 8 seconds and then tells the agent you are busy.
-- Only the window the steps are for comes, and only for the steps that need it. Before a `wait` step, and when the
-  steps are done, your app is in front again, the pointer is where it was, and a window that came from the agent's
-  desktop is back there.
-- If you click meanwhile, you have taken over: the app stays where you have it, and the remaining steps aren't made.
-- A window you are in already is worked in where it is, once you have done nothing for that moment. Nothing moves,
-  and the pointer goes back where you had it.
+- None of this happens while you work. It waits until you have done nothing for a moment (1.5 seconds without a key,
+  a click or a scroll), for up to 8 seconds, and then tells the agent you are busy.
+- A window stays where it is. One on the agent's desktop takes the pointer there, where you see none of it. For a
+  scroll that is all, and your app keeps the keyboard. For a drag, or with `front: true`, its app is also the active
+  one for the steps.
+- A window on your screen is raised over the others for the steps. Then your app, or the window of that app you were
+  in, is in front again.
+- The pointer is back where you had it afterwards, unless you moved it.
+- The front is taken only for the steps that need it, and given back before a `wait` step.
+- A step with the real pointer is made only if the window it is for is the one in front at that place.
+- A browser that holds your windows and the agent's own is never brought to the front for steps. A scroll works in
+  the agent's window where it is, and the browser tools do the rest.
+- If you click the app's window meanwhile, you have taken it over, and it stays as you have it. If you go to another
+  app, you stay there. Either way the remaining steps aren't made.
+- A window you are in already is worked in where it is.
 - One agent at a time has the front, across chats. A second one waits up to 8 seconds, then is told to try again.
 - If the server stops mid-step, `ucu-window` gives your app back by itself, 20 seconds after it last heard from it.
 
