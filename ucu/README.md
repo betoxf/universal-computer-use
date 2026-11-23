@@ -152,7 +152,8 @@ A scroll or a drag at a place takes the real pointer, and some apps take input o
   steps are done, your app is in front again, the pointer is where it was, and a window that came from the agent's
   desktop is back there.
 - If you click meanwhile, you have taken over: the app stays where you have it, and the remaining steps aren't made.
-- A window you are in already is worked in where it is. Nothing moves, and the pointer goes back where you had it.
+- A window you are in already is worked in where it is, once you have done nothing for that moment. Nothing moves,
+  and the pointer goes back where you had it.
 - One agent at a time has the front, across chats. A second one waits up to 8 seconds, then is told to try again.
 - If the server stops mid-step, `ucu-window` gives your app back by itself, 20 seconds after it last heard from it.
 
@@ -228,6 +229,10 @@ then carries a label in the chat's color, "Waiting for you: Sign in", with a Don
 - Done tells the agent you are finished. It hears it with its next step, so say so in the chat too if it has stopped.
 - The label goes when you click Done, when the agent goes on working in that app, when the window closes, or when the
   chat ends.
+- While the label is there, a step of the agent's in that app waits while you type, click or scroll in it, and is
+  refused if you don't pause within 8 seconds.
+
+"Doing nothing" means no key, click or scroll: reading or watching counts as idle.
 
 Every time an app comes forward during agent work, `~/Library/Logs/ucu/focus.log` says what UCU did, naming the apps but
 no window titles, and `ucu doctor` sums up the last day.
