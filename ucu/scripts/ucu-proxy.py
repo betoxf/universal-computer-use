@@ -104,6 +104,7 @@ SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
 TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
 XY_ONLY_CLICKS = "`xy` works with click, double-click, right-click, triple-click, scroll and drag."
+ASK_LIMIT = 120       # characters of what an agent asks of the user that show on the window
 BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
 USER_BUSY = ("The user is working in {}, and these steps need {} in front, which would take their screen. Do what "
              "can be done behind, try again in a while, or ask them.")
@@ -114,6 +115,9 @@ NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it t
 BORROWED_NOTE = ("{} was in front for these steps, as they can't be made behind, and the user's app is back in "
                  "front now.")
 TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
+ASK_NOTE = ("The user sees what you ask of them on the window, with a Done button. Don't act in it until they are "
+            "done: `wait` for what shows then, or end your turn and tell them what you need.")
+DONE_NOTE = "[ucu: The user clicked Done on what you asked of them in {}. Go on there.]"
 TRY_FRONT_NOTE = "If the picture shows no change either, the app may take input only in front: pass `front: true`."
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
                "screenshot shows.")
@@ -184,7 +188,7 @@ WINDOW_TOOLS = [
                     "for what the tree doesn't show.",
      "inputSchema": {"type": "object", "required": ["app"], "properties": {
          "app": APP_PROPERTY, "window": WINDOW_PROPERTY, "find": {"type": "string"},
-         "full": {"type": "boolean", "description": "The whole tree, however long, instead of what changed."},
+         "full": {"type": "boolean", "description": "The whole tree, not what changed."},
          "screenshot": {"type": "boolean"}}},
      "annotations": {"readOnlyHint": True}},
     {"name": "act",
@@ -194,16 +198,15 @@ WINDOW_TOOLS = [
                     "direction and optional amount), press (with keys such as cmd+n or Return), menu (with text such "
                     "as File > New Window) or wait (amount seconds, or until text shows). The last three take "
                     "no `on`. `on` is a number from look; or pass `name`, the element's name, and skip the look. With "
-                    "neither, click or scroll at xy: [x, y], or drag from xy to `to`. That scroll or drag, and all "
-                    "steps with `front: true`, need the app in front: it comes once the user is idle, and theirs "
-                    "comes back after.",
+                    "neither, click or scroll at xy: [x, y], or drag from xy to `to`. That scroll or drag, and steps "
+                    "with `front: true`, bring the app to the front once the user is idle, then theirs back.",
      "inputSchema": {"type": "object", "required": ["app", "steps"], "properties": {
          "app": APP_PROPERTY, "window": WINDOW_PROPERTY, "front": {"type": "boolean"},
          "steps": {"type": "array", "items": {"type": "object", "required": ["do"], "properties": {
              "do": {"type": "string"}, "on": {"type": "integer"}, "name": {"type": "string"},
              "text": {"type": "string"},
              "keys": {"type": "string"}, "direction": {"enum": ["up", "down", "left", "right"]},
-             "amount": {"type": "integer"}, "xy": {"type": "array", "items": {"type": "number"}},
+             "amount": {"type": "integer"}, "xy": {"type": "array"},
              "to": {"type": "array"}}}}}}},
     {"name": "list_windows",
      "description": "List an app's windows, or every app's without `app`: title, main (the one `look` reads by default), "
@@ -211,36 +214,37 @@ WINDOW_TOOLS = [
      "inputSchema": {"type": "object", "properties": {"app": APP_PROPERTY}},
      "annotations": {"readOnlyHint": True}},
     {"name": "focus_window",
-     "description": "Make a window its app's main window. It stays where it is unless `activate` is set. Fails if "
-                    "the title matches no window or several.",
+     "description": "Make a window its app's main window. It stays where it is unless `activate` is set. Fails "
+                    "unless the title matches one window.",
      "inputSchema": {"type": "object", "properties": {
          "app": APP_PROPERTY,
-         "title": {"type": "string", "description": "Part of the window's title, as list_windows shows it."},
+         "title": {"type": "string", "description": "Part of its title, as list_windows shows it."},
          "unfullscreen": {"type": "boolean", "description": "Leave full screen first."},
          "activate": {"type": "boolean", "description": "Bring it to the user's screen, in front: only when they "
-                                                        "ask or must act in it."}},
+                                                        "ask or must act in it."},
+         "ask": {"type": "string", "description": "With activate: what they must do, shown there."}},
          "required": ["app", "title"]}},
     {"name": "move_to_desktop",
-     "description": "Move an app's windows to your private desktop, a display the user can't see. They keep working, "
-                    "with clicks by coordinates and screenshots too. focus_window with activate: true brings them "
-                    "back.",
+     "description": "Move an app's windows to your private desktop, a display the user can't see. They keep "
+                    "working, clicks by xy and screenshots too. focus_window with activate brings them back.",
      "inputSchema": {"type": "object", "properties": {"app": APP_PROPERTY}, "required": ["app"]}},
     {"name": "safari",
      "description": "Work in Safari in tabs of your own, behind the tab the user is on in their window, without "
-                    "taking focus. `list` shows every window and tab, and which are yours. `open` "
+                    "taking focus. `list` shows every window and tab, and whose. `open` "
                     "loads a URL in a new tab of yours. In your tabs: "
                     "`navigate`, `read` (what: text, html, links, or interactive, which gives refs), `click`, `type`, "
-                    "`wait`, `eval` (a function body that returns a value, and may await), `upload` and `shot` (a "
+                    "`wait`, `eval` (a function body that returns a value; may await), `upload` and `shot` (a "
                     "screenshot). "
                     "`close` closes a tab, or all of yours without tab_index. window_id and tab_index default to your "
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks are made by script, which some pages ignore. "
                     "`upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
                     "drops them on an element, with no picker: confirm with the user first. `show` brings your tab to "
-                    "the front, only when the user asks to see it or must act in it, such as to sign in. "
+                    "the user, only when they ask or must act in it, such as to sign in: with `text`, it says there "
+                    "what they must do. "
                     "`away` moves it to your private desktop until your turn ends, for a page that stalls or "
                     "ignores your clicks: there `click` with `real` presses for real. `steps` runs several "
-                    "operations in one call, each {op, ...}, and stops at the first that fails.",
+                    "operations in one call, each {op, ...}, stopping at the first that fails.",
      "inputSchema": {"type": "object", "properties": {
          "op": {"enum": ["list", "open", "navigate", "read", "click", "type", "wait", "eval", "upload", "shot",
                          "show", "hide", "away", "close"]},
@@ -354,6 +358,8 @@ def window_note(report):
         return (WINDOW_FOCUS_NOTE if report.get("window") else FOCUS_NOTE).format(report.get("app"), report.get("back"))
     if report.get("event") == "taken":
         return TAKEN_NOTE.format(report.get("app"))
+    if report.get("event") == "done":
+        return DONE_NOTE.format(report.get("app"))
     kind = report.get("kind") or "window"
     title, text, buttons = report.get("title"), report.get("text"), report.get("buttons")
     parts = [f"{report.get('app')} opened a {kind}" + (f" titled {quoted(title)}" if title else "")]
@@ -700,6 +706,8 @@ class BrowserWorkspace:
 
     def run_one(self, arguments):
         op = arguments.get("op")
+        if op in ("navigate", "click", "type", "upload"):  # the agent goes on in the page: nothing is asked any more
+            self.server.resume(self.app)
         with self.lock:
             note = None if op == "list" else self.follow(op, arguments)
             if op not in ("list", "close", "shot"):  # a screenshot shows it itself, and waits for it to paint
@@ -734,6 +742,9 @@ class BrowserWorkspace:
                 self.shared, self.shown = True, False
                 result["note"] = ("Your window is on the user's screen, in front. They can use it, and you keep "
                                   "working in it. `hide` takes it back when they are done.")
+                if arguments.get("text"):
+                    self.server.ask_user(self.app, arguments["text"])
+                    result["note"] = ASK_NOTE + " `hide` takes the window back after."
             elif op == "hide":
                 result = {"hidden": self.take_back()}
             elif op in self.OPERATIONS:
@@ -939,6 +950,8 @@ class SafariWorkspace(BrowserWorkspace):
 
     def run_one(self, arguments):
         op, note = arguments.get("op"), None
+        if op in ("navigate", "click", "type", "upload"):  # the agent goes on in the page: nothing is asked any more
+            self.server.resume(self.app)
         with self.lock:
             if op == "list":
                 here = [page for page in self.pages if not page.get("away")]
@@ -982,6 +995,9 @@ class SafariWorkspace(BrowserWorkspace):
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.in_tab({"op": "show_tab"}, page, "tab_index" in arguments)
                 result["note"] = "Your tab is in front of the user now, in their own window. Keep working in it."
+                if arguments.get("text"):
+                    self.server.ask_user(self.app, arguments["text"])
+                    result["note"] = ASK_NOTE
             elif op == "close" or op in self.OPERATIONS:
                 page, theirs = self.aim(arguments)
                 request = {key: value for key, value in arguments.items()
@@ -1491,6 +1507,7 @@ class Server:
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
+        self.asked = None                   # the app on whose window the user reads what the agent asks of them
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
         self.parked_apps = set()            # those of them on the agent's desktop, as app_key names
@@ -1604,6 +1621,9 @@ class Server:
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
         else:
             text, failed = run_window_tool(name, arguments)
+            if not failed and name == "focus_window" and arguments.get("activate") and arguments.get("ask"):
+                self.ask_user(str(arguments.get("app") or ""), arguments["ask"])
+                text += "\n" + ASK_NOTE
         if failed:
             raise ToolError(text)
         return [{"type": "text", "text": text}]
@@ -1805,6 +1825,8 @@ class Server:
         view = before = seen or self.read(app, window)
         index = 0
         workspace = self.browser_of(app_key(app))
+        if any(isinstance(step, dict) and step.get("do") != "wait" for step in steps):
+            self.resume(app)
         lent = self.borrow(app, title) if self.needs_front(arguments, steps) else None
         try:
             if lent == "borrowed":  # its windows came to the user's screen, so every place in it is another now
@@ -1848,6 +1870,19 @@ class Server:
             if not lent:
                 said += " " + TRY_FRONT_NOTE
         return [{"type": "text", "text": said}]
+
+    # --- asking the user to act in a window ---------------------------------
+    def ask_user(self, app, text):
+        """Say on the app's window, which the agent has just brought to the user, what they must do there."""
+        self.windows.start()
+        self.windows.send({"ask": " ".join(str(text).split())[:ASK_LIMIT], "app": app})
+        self.asked = app_key(app)
+
+    def resume(self, app):
+        """The agent goes on working in an app: what it asked of the user there is no longer on the window."""
+        if self.asked == app_key(app):
+            self.windows.send({"ask": "", "app": app})
+            self.asked = None
 
     # --- steps that need the app in front ----------------------------------
     @staticmethod

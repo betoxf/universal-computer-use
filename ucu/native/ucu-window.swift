@@ -528,6 +528,90 @@ final class AgentCursor {
     }
 }
 
+// What an agent needs from the user, said on the window it brought to them: "Waiting for you: Sign in", with a Done
+// button, in the chat's color. It sits at the top of the app's front window while that app is in front, until the
+// user clicks Done, the agent goes on working there, or the chat ends. It stays between turns too, which is when an
+// agent that has stopped to wait for the user needs it most.
+final class AskLabel: NSObject {
+    var panel: NSPanel?
+    var app: NSRunningApplication?
+    var timer: Timer?
+    var done: (() -> Void)?
+    var isShowing: Bool { panel != nil }
+
+    func show(_ text: String, on app: NSRunningApplication, color: NSColor?, done: @escaping () -> Void) {
+        hide()
+        NSApplication.shared.setActivationPolicy(.accessory)  // no Dock icon, and it never becomes the active app
+        let label = NSTextField(labelWithString: "Waiting for you: " + text)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .white
+        label.lineBreakMode = .byTruncatingTail
+        // It fits in the window it is on: in a narrow one the text is cut short, and reads whole in the chat.
+        let element = appElement(app.processIdentifier)
+        let window: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
+            ?? attribute(element, kAXMainWindowAttribute)
+        let room = (window.flatMap(Watcher.frame(of:))?.width ?? 600) - 120
+        label.widthAnchor.constraint(lessThanOrEqualToConstant: min(460, max(120, room))).isActive = true
+        let button = NSButton(title: "", target: self, action: #selector(clicked))
+        button.isBordered = false  // a system button's dark title can't be read on the chat's color
+        button.attributedTitle = NSAttributedString(string: "Done", attributes: [
+            .foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.24).cgColor
+        button.layer?.cornerRadius = 10
+        button.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let stack = NSStackView(views: [label, button])
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 7, left: 14, bottom: 7, right: 10)
+        let size = stack.fittingSize, bounds = NSRect(origin: .zero, size: size)
+        let panel = NSPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+                            defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        let back = NSView(frame: bounds)
+        back.wantsLayer = true
+        let tint = color ?? .darkGray
+        back.layer?.backgroundColor = (tint.blended(withFraction: 0.45, of: .black) ?? tint).cgColor
+        back.layer?.cornerRadius = size.height / 2
+        stack.frame = bounds
+        back.addSubview(stack)
+        panel.contentView = back
+        (self.panel, self.app, self.done) = (panel, app, done)
+        place()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in place() }
+    }
+
+    // Just under the title bar of the app's front window, and only while the app is in front: over another app's
+    // window it would say nothing of where the user is needed.
+    func place() {
+        guard let panel, let app, !app.isTerminated else { return hide() }
+        let element = appElement(app.processIdentifier)
+        let window: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
+            ?? attribute(element, kAXMainWindowAttribute)
+        guard app.isActive, let window, let frame = Watcher.frame(of: window), !Watcher.isOutOfSight(window),
+              let screen = NSScreen.screens.first else { return panel.orderOut(nil) }
+        let size = panel.frame.size, top = frame.minY + 36  // windows count from the top, screens up
+        panel.setFrameOrigin(NSPoint(x: frame.midX - size.width / 2, y: screen.frame.height - top - size.height))
+        panel.orderFrontRegardless()
+    }
+
+    @objc func clicked() {
+        let done = done
+        hide()
+        done?()
+    }
+
+    func hide() {
+        timer?.invalidate()
+        panel?.orderOut(nil)
+        (panel, app, timer, done) = (nil, nil, nil, nil)
+    }
+}
+
 // Runs next to the server for as long as its stdin stays open, so it can't outlive the proxy. Commands come as one
 // JSON object per line on stdin; replies and reports go out the same way on stdout.
 //
@@ -549,11 +633,13 @@ final class AgentCursor {
 //                                                       user has done nothing for a moment
 //   {"id": 6, "giveBack": true}                         those steps are done: the user's app comes back
 //   {"id": 7, "front": true}                            say which app is in front
+//   {"ask": "Sign in", "app": "Safari"}                 say on this app's window what the user must do ("": no more)
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
 // it gave one of its windows out of sight the keyboard, while the user was in that app, and their window got it back.
 // {"event": "taken", ...} says the user came to an app ucu kept out of their sight, which is on their screen now.
+// {"event": "done", ...} says the user clicked Done on what the agent asked of them in an app.
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
                                             "AuthenticationServicesAgent", "coreautha"]
@@ -572,6 +658,7 @@ final class Watcher {
     var keptHidden = Set<pid_t>()
     let desktop = AgentDesktop()
     let cursor = AgentCursor()
+    let ask = AskLabel()
     var parked = [pid_t: (app: NSRunningApplication, places: [(AXUIElement, CGPoint)], target: CGPoint)]()
     var busySince = Date.distantFuture
     var busyUntil = Date.distantPast
@@ -648,7 +735,7 @@ final class Watcher {
     // Between turns this goes, and the agent's desktop with it, unless it keeps apps ucu opened: with nothing here to
     // put the user's app back, one of them could come forward over it at any time.
     func restIfDone() {
-        if resting, keptApps().isEmpty { finish() }
+        if resting, keptApps().isEmpty, !ask.isShowing { finish() }  // a user who is asked something still sees it
     }
 
     // When the chat ends, the apps ucu opened for it are quit, so that none can come forward later with nothing to put
@@ -830,6 +917,18 @@ final class Watcher {
             emit(["id": id, "front": NSWorkspace.shared.frontmostApplication?.localizedName ?? ""])
         }
         if command["rest"] != nil { giveBack(id: nil) }  // a turn never ends with the user's screen still lent
+        if let text = command["ask"] as? String {
+            if !text.isEmpty, let app = (command["app"] as? String).flatMap(running) {
+                let name = app.localizedName ?? "?"
+                ask.show(text, on: app, color: cursor.color) { [self] in
+                    emit(["event": "done", "app": name])
+                    restIfDone()
+                }
+            } else {
+                ask.hide()
+                restIfDone()
+            }
+        }
         if command["desktop"] != nil, let id = command["id"] {
             withDesktop { area in
                 let bounds = area.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] }
@@ -956,7 +1055,9 @@ final class Watcher {
         guard let id else { return }
         // Windows on their way back to an agent's desktop are read only once they are there.
         let settle = !theirs && was.wasParked ? Self.moveSettle + 0.4 : 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + settle) { emit(["id": id, "state": "returned", "taken": theirs]) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
+            emit(["id": id, "state": "returned", "taken": theirs])
+        }
     }
 
     func running(_ query: String) -> NSRunningApplication? {

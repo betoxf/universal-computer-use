@@ -121,10 +121,11 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
 
 - `look {app, window?, find?, full?, screenshot?}`: an app's window as numbered text, then only what changed, up to 300
   lines. `find` shows only the lines with a text, under what they are inside of, and `full` the whole tree.
-- `act {app, window?, steps}`: steps in order, then what changed. It stops at the first step that fails.
+- `act {app, window?, steps, front?}`: steps in order, then what changed. It stops at the first step that fails.
 - `list_windows {app?}`: the windows of an app, or of every app, and which is the main window.
-- `focus_window {app, title, unfullscreen?, activate?}`: makes a window the main window. With `activate: true`, the
-  window comes to your screen and the front, only when you ask to see it.
+- `focus_window {app, title, unfullscreen?, activate?, ask?}`: makes a window the main window. With `activate: true`,
+  the window comes to your screen and the front, when you ask to see it or have to do something in it. `ask` says on
+  the window what that is.
 - `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
 - `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own tabs.
 
@@ -212,7 +213,16 @@ window when it is made or shown. Your window gets it back at once, so your typin
 
 When you ask to see what the agent is doing, or to be taken there, `focus_window` with `activate: true` brings that
 window from the private desktop to your screen and to the front, and the browser tools' `show` brings you the agent's
-window, which you both use from then on. That is the only way UCU brings anything forward.
+window, which you both use from then on. Besides the steps that need an app in front (see `act` above), that is the
+only way UCU brings anything forward.
+
+When the agent needs you to do something in a window, such as to sign in or type a password, it brings the window to
+you the same way and says what it needs: `focus_window` with `ask`, or the browser tools' `show` with `text`. The window
+then carries a label in the chat's color, "Waiting for you: Sign in", with a Done button:
+
+- The label shows while that app is in front, also after the agent's turn has ended to wait for you.
+- Done tells the agent you are finished. It hears it with its next step, so say so in the chat too if it has stopped.
+- The label goes when you click Done, when the agent goes on working in that window, or when the chat ends.
 
 Every time an app comes forward during agent work, `~/Library/Logs/ucu/focus.log` says what UCU did, naming the apps but
 no window titles, and `ucu doctor` sums up the last day.

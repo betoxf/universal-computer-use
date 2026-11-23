@@ -68,6 +68,9 @@ class WatchingProxy(Proxy):
         lines = self.window_log.read_text().splitlines() if self.window_log.exists() else []
         return [command for command in map(json.loads, lines) if kind in command]
 
+    def asks(self):
+        return [(command["ask"], command["app"]) for command in self.commands("ask")]
+
     def texts(self, reply):
         return [item["text"] for item in reply["result"]["content"]]
 
@@ -196,6 +199,31 @@ class WatchTest(unittest.TestCase):
         self.assertFalse(reply["result"]["isError"], proxy.text(reply))
         self.assertEqual(proxy.commands("giveBack"), [])
         self.assertNotIn("was in front for these steps", proxy.text(reply))
+
+    def test_says_on_the_window_what_the_user_must_do_until_the_agent_goes_on(self):
+        proxy = WatchingProxy(self)
+        reply = proxy.call("focus_window", app="Calculator", title="Calc", activate=True, ask="Type the  code\nand press OK")
+        self.assertIn("The user sees what you ask of them on the window", proxy.text(reply))
+        self.assertEqual(proxy.asks(), [("Type the code and press OK", "Calculator")])
+        proxy.look("Calculator")
+        proxy.act({"do": "wait", "amount": 0.1}, app="Calculator")  # reading and waiting leave it there
+        self.assertEqual(len(proxy.asks()), 1)
+        proxy.report(event="done", app="Calculator")
+        said = proxy.text(proxy.act({"do": "click", "on": 1}, app="Calculator"))
+        self.assertIn("The user clicked Done on what you asked of them in Calculator", said)
+        self.assertEqual(proxy.asks()[-1], ("", "Calculator"))
+
+    def test_says_it_on_a_page_the_agent_shows_the_user(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test/sign-in")
+        shown = proxy.safari(op="show", text="Sign in")["content"][0]["text"]
+        self.assertIn("with a Done button", shown)
+        self.assertEqual(proxy.asks(), [("Sign in", "Safari")])
+        proxy.safari(op="read", what="text")
+        proxy.safari(op="eval", script="return 'text'")
+        self.assertEqual(len(proxy.asks()), 1)
+        proxy.safari(op="click", text="Next")
+        self.assertEqual(proxy.asks()[-1], ("", "Safari"))
 
     def test_shows_a_hidden_app_behind_the_user_without_a_desktop(self):
         proxy = WatchingProxy(self)
