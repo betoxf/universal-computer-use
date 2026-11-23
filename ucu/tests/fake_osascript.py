@@ -120,7 +120,7 @@ def answer_safari(request, state, reply):
         window["tabs"].append(tab)
         reply["own"] = where(window, tab, None)
         return {"window_id": window["window_id"], "tab_index": len(window["tabs"]), "url": request["url"],
-                "title": "T", "loaded": True}
+                "title": "T", "loaded": True, **({"password": True} if "sign-in" in request["url"] else {})}
     if "own" not in request:  # a window of the chat's own, on the agent's desktop: a copy of a page, or one away
         window = next((window for window in state["windows"] if window["window_id"] == request.get("window_id")), None)
         if window and op == "navigate":

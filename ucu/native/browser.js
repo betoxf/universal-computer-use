@@ -12,6 +12,8 @@ ObjC.import("AppKit");
 
 const BLANK = /^(about:blank|favorites:|chrome:\/\/newtab)/;
 const MARK = "ucu-tab";  // where a page's session storage holds the mark of the chat whose tab it is in
+const NOTHING = "The page returned nothing (is it still loading, or a non-HTML page?)";
+const EVAL_WAIT = 40;  // seconds a script that awaits has, under the time ucu gives the browser to answer
 const CHUNK = 1 << 20;  // characters of a file's base64 that go to a page at a time
 
 const BROWSERS = {
@@ -94,7 +96,46 @@ function js(tab, code) {
 function page(tab, fn, args) {
   const code = `(function(){try{return JSON.stringify({v:(${fn})(${JSON.stringify(args || {})})})}catch(e){return JSON.stringify({e:String(e&&e.message||e)})}})()`;
   const raw = js(tab, code);
-  if (raw === undefined || raw === null) throw new Error("The page returned nothing (is it still loading, or a non-HTML page?)");
+  if (raw === undefined || raw === null) throw new Error(NOTHING);
+  const reply = JSON.parse(raw);
+  if (reply.e) throw new Error(reply.e);
+  return reply.v;
+}
+
+// A script that doesn't parse never runs, and the browser says nothing about it: the page answers a script that
+// does, and that tells the two apart.
+function unparsed(tab, error) {
+  if (error.message !== NOTHING) return error;
+  let answers = false;
+  try { answers = js(tab, "1+1") == 2; } catch (e) { /* a page that runs no script */ }
+  return answers ? new Error("Your script has a syntax error, so none of it ran. It is the body of a function: "
+    + "`return` what you want back.") : error;
+}
+
+// A script that awaits. Neither browser waits for a promise, so the page keeps the result until it is asked for.
+function awaited(tab, script, seconds) {
+  const slot = literal("ucu" + Math.random().toString(36).slice(2));
+  const keep = `function(o){try{window[${literal(MARK)}+"-eval"][${slot}]=JSON.stringify(o)}catch(e){`
+    + `window[${literal(MARK)}+"-eval"][${slot}]=JSON.stringify({e:String(e&&e.message||e)})}}`;
+  const start = `(function(){var k=${literal(MARK)}+"-eval";(window[k]=window[k]||{})[${slot}]="";var keep=${keep};`
+    + `(async function(){ ${script} })().then(function(v){keep({v:v})},function(e){keep({e:String(e&&e.message||e)})});`
+    + `return "started"})()`;
+  if (js(tab, start) !== "started") throw unparsed(tab, new Error(NOTHING));
+  const take = `(function(){var s=window[${literal(MARK)}+"-eval"];if(!s||!(${slot} in s))return "gone";`
+    + `var r=s[${slot}];if(r)delete s[${slot}];return r})()`;
+  const deadline = Date.now() + Math.min(seconds || EVAL_WAIT, EVAL_WAIT) * 1000;
+  let raw = "";
+  for (let pause = 0.03; Date.now() < deadline; pause = Math.min(pause * 2, 0.25)) {
+    try { raw = js(tab, take); } catch (e) { raw = "gone"; }
+    if (raw === undefined || raw === null) raw = "gone";  // a page that is on its way out answers nothing
+    if (raw) break;  // a result, or the page left and took the script with it
+    delay(pause);
+  }
+  if (raw === "gone") {
+    throw new Error("The page went to another address before your script finished, so what it returned is lost. "
+      + "Leave the page in one step, `wait`, then read the new page in another.");
+  }
+  if (!raw) throw new Error(`Your script was still waiting after ${Math.min(seconds || EVAL_WAIT, EVAL_WAIT)} seconds.`);
   const reply = JSON.parse(raw);
   if (reply.e) throw new Error(reply.e);
   return reply.v;
@@ -296,6 +337,24 @@ function describe(win, tab, index) {
   return { window_id: B.id(win), tab_index: index, url: urlOf(tab), title };
 }
 
+// Where a tab is after it went to a page. A page that asks for a password is one the user may have to sign in to,
+// which the agent hears, as they can't see its tab where it is. A sign-in form often comes after the page has loaded,
+// so a `wait` that came to nothing looks for one too.
+function arrived(win, tab, index, done) {
+  const at = Object.assign(describe(win, tab, index), { loaded: done });
+  if (asksPassword(tab)) at.password = true;
+  return at;
+}
+
+function asksPassword(tab) {
+  try {
+    return js(tab, "(function(){return Array.prototype.some.call(document.querySelectorAll('input[type=password]'),"
+      + "function(e){return e.getClientRects().length>0})})()") === true;
+  } catch (e) {
+    return false;  // a page that runs no script
+  }
+}
+
 const OPS = {
   // With window_id, only that window, with where it is and its tabs' ids: for the agent's window while the user has
   // it on their screen, where they move it and change its tabs. With `marks`, the tabs that carry one of them say so:
@@ -343,7 +402,7 @@ const OPS = {
       tab = win.tabs[index - 1];
     }
     const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
-    return Object.assign(describe(win, tab, index), { loaded: done });
+    return arrived(win, tab, index, done);
   },
 
   navigate(req) {
@@ -352,7 +411,7 @@ const OPS = {
     try { previous = B === BROWSERS.chrome ? tab.url() : js(tab, "location.href"); } catch (e) {}
     tab.url = req.url;
     const done = req.wait === false ? null : loaded(tab, previous === req.url ? null : previous, req.timeout_seconds);
-    return Object.assign(describe(win, tab, req.tab_index), { loaded: done });
+    return arrived(win, tab, req.tab_index, done);
   },
 
   // The agent's window outlives its last tab: making another shows for a moment, and brings Chrome forward.
@@ -443,7 +502,12 @@ const OPS = {
 
   eval(req) {
     const { tab } = tabOf(req);
-    return page(tab, `function(){ ${req.script} }`, {});
+    if (/\bawait\b/.test(req.script)) return awaited(tab, req.script, req.timeout_seconds);
+    try {
+      return page(tab, `function(){ ${req.script} }`, {});
+    } catch (error) {
+      throw unparsed(tab, error);
+    }
   },
 
   read(req) {
@@ -609,7 +673,7 @@ const OPS = {
       } catch (e) { /* navigating */ }
       delay(0.2);
     }
-    return { found: false };
+    return asksPassword(tab) ? { found: false, password: true } : { found: false };
   },
 };
 
@@ -652,7 +716,7 @@ const SAFARI_OPS = {
     const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
     req.at = { win, index, before, loaded: true };
     Object.assign(req, { window_id: B.id(win), tab_index: index });
-    return Object.assign(describe(win, tab, index), { loaded: done });
+    return arrived(win, tab, index, done);
   },
 
   navigate(req) {
@@ -683,7 +747,7 @@ const CHROME_OPS = {
     const { previous, went } = chromeGo(tab, req.url, false);
     if (!went) return { window_id: req.window_id, tab_index: index, typed: true, previous };
     const done = req.wait === false ? null : loaded(tab, null, req.timeout_seconds);
-    return Object.assign(describe(win, tab, index), { loaded: done });
+    return arrived(win, tab, index, done);
   },
 
   navigate(req) {
@@ -691,7 +755,7 @@ const CHROME_OPS = {
     const { previous, went } = req.sent ? { previous: req.previous, went: true } : chromeGo(tab, req.url, req.typed);
     if (!went) return { window_id: req.window_id, tab_index: req.tab_index, typed: true, previous };
     const done = req.wait === false ? null : loaded(tab, previous === req.url ? null : previous, req.timeout_seconds);
-    return Object.assign(describe(win, tab, req.tab_index), { loaded: done });
+    return arrived(win, tab, req.tab_index, done);
   },
 
   create_window(req) {

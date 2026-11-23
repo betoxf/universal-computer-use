@@ -325,6 +325,20 @@ class ServerTest(unittest.TestCase):
             {"command": "mouse-click", "args": {"xy": "120,210", "app": "Calculator", "count": 2}},
             {"command": "click", "args": {"ref_id": "@s1:e1"}}])
 
+    def test_refuses_a_scroll_at_a_place_instead_of_clicking_there(self):
+        self.server.look()
+        reply = self.server.act({"do": "scroll", "xy": [10, 10], "direction": "down"})
+        self.assertIn("`xy` works with click", self.server.text(reply))
+        self.assertEqual(self.server.batched(), [])
+
+    def test_pauses_when_a_wait_names_no_text(self):
+        self.server.look()
+        started = time.monotonic()
+        reply = self.server.act({"do": "click", "on": 1}, {"do": "wait", "amount": 0.5})
+        self.assertFalse(reply["result"]["isError"], self.server.text(reply))
+        self.assertGreater(time.monotonic() - started, 0.5)
+        self.assertIn("+ statictext 1, Description: Display", self.server.text(reply))
+
     def test_reads_a_window_without_a_change_once_more_and_no_more(self):
         self.server.look()
         started = time.monotonic()
