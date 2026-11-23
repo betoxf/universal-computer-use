@@ -1989,6 +1989,12 @@ class Server:
             if failure and failure.needs_place and steps[at].get("do") in GESTURES:
                 view, failure = self.click_where(app, window, view, numbers[ran], steps[at]), None
                 at += 1
+            # A reading made for this try shows the element, and the engine still can't find it: some lists make
+            # their items anew each time they are asked. A click goes to where the element shows instead.
+            elif failure and at == tried and isinstance(failure, Gone) and numbers[ran] in view.points \
+                    and steps[at].get("do") in ("click", *GESTURES):
+                view, failure = self.click_where(app, window, view, numbers[ran], steps[at]), None
+                at += 1
             if failure:
                 raise failure
         except ToolError as error:

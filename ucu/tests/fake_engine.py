@@ -6,7 +6,8 @@ The window has a display and two buttons. Each step changes the display, so a lo
 and none takes a double click except where it is on screen. An app called "Slow" takes a while, "Many" has two windows,
 "Twins" two buttons called Add, "Long" 400 more buttons, and "Broken" answers with a snapshot ucu can't read. "Rebuilt"
 has a button called Fresh that is a new element at every read, and the one from the first read is gone. "Stale" has a
-button called Old at its first read only. "Closing" loses its second window at the first step. After two clicks every
+button called Old at its first read only. "Ghost" has an image called Shown that is in every read and that the
+engine never finds. "Closing" loses its second window at the first step. After two clicks every
 window has a button called Later. Google Chrome has two windows with the same title: the user's, and one where ucu puts
 the agent's on the fake desktop.
 """
@@ -48,6 +49,8 @@ def snapshot(app):
         reads = LOG.with_name("stale")
         extra = [] if reads.exists() else [{"role": "button", "name": "Old", "ref_id": "@s1:e99"}]
         reads.touch()
+    if app == "Ghost":  # a list that makes its items anew whenever it is asked: the engine never finds the one read
+        extra = [{"role": "image", "name": "Shown", "ref_id": "@s1:e88", "bounds": {**box, "y": 300.0}}]
     if clicks() >= 2:  # something that only shows after two clicks
         extra.append({"role": "button", "name": "Later", "ref_id": "@s1:e5", "available_actions": ["Click"]})
     return {"app": app, "window": {"title": app, "id": "w-1"}, "tree": {
@@ -89,7 +92,7 @@ def main():
     elif command == "batch":
         results = []
         for entry in json.loads(arguments[1]):
-            if str(entry["args"].get("ref_id", "")).endswith("e99"):
+            if str(entry["args"].get("ref_id", "")).endswith(("e99", "e88")):
                 results.append({"ok": False, "command": entry["command"],
                                 "error": {"code": "STALE_REF", "message": "That ref is stale"}})
                 break
