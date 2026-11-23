@@ -138,8 +138,9 @@ no `look` first:
 `do` is `click`, `double-click`, `right-click`, `triple-click`, `focus`, `toggle`, `check`, `uncheck`, `expand`,
 `collapse`, `clear`, `scroll-to`, `type` or `set-value` (with `text`), `select` (with `text`), `scroll` (with `direction`
 and `amount`), `press` (with `keys`), `menu` (with `text` such as `File > New Window`) or `wait` (until `text` shows in
-the window, for up to `amount` seconds). For a click where there is neither number nor name, pass `xy` with pixels from
-a `look` screenshot.
+the window, for up to `amount` seconds; without `text` it pauses for `amount` seconds). For a click where there is
+neither number nor name, pass `xy` with pixels from a `look` screenshot. Nothing scrolls at a place in the background
+yet.
 
 A model's round trip costs far more than the action it asks for, so these are made to save them. A named element is
 looked up in the window as it is now, waited for briefly if a step before brings it, and found again if the window
@@ -239,6 +240,9 @@ agents can work at once, and you keep browsing:
 - `open` loads a page in a new tab of the agent's own.
 - `navigate`, `read`, `click`, `type`, `wait` and `eval` work in the agent's tabs, in the background. `type` puts text
   in through the browser's own text insertion, so the page gets input events the browser vouches for.
+  An `eval` script is the body of a function and may `await`. A tab that lands on a page with a password field says so,
+  and so does a `wait` that came to nothing there, so that the agent shows the tab to the user before asking them to
+  sign in.
 - `steps` runs several of these in one call, such as open, type, click, wait and read, and stops at the first that
   fails. `read` with `what: "interactive"` lists a page's links and controls as one short line each.
 - `upload` gives a page local files without its file picker, which would need the browser in front: they go into a file

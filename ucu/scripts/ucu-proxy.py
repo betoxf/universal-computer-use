@@ -88,6 +88,7 @@ INVALID_ELEMENT = -25202  # what the accessibility API says of an element that i
 LOOK_LIMIT = 300      # lines of a window a result shows; `find` and `full` reach the rest
 NAME_WAIT = 2         # seconds an element named in a step has to show up, since it may come from the step before
 WAIT_DEFAULT, WAIT_LIMIT, WAIT_PACE = 10, 120, 0.3  # seconds a `wait` step waits for its text
+PAUSE_DEFAULT, PAUSE_LIMIT = 1, 30  # seconds a `wait` step without a text pauses
 CURSOR_PACE = 0.12    # seconds the cursor spends on each step of a run
 POLICY = Path.home() / "Library/Application Support/ucu/policy.json"
 APPROVAL_LOG = Path.home() / "Library/Logs/ucu/approve.log"
@@ -102,6 +103,12 @@ SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
 TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
+XY_ONLY_CLICKS = ("`xy` works with click, double-click, right-click and triple-click. Nothing scrolls at a place in "
+                  "the background yet: scroll an element by its number, or press keys such as down or space.")
+UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
+               "screenshot shows.")
+SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab first and leave it "
+                "open: they can't see it where it is.")
 SAFARI_TIMEOUT = 45   # seconds; a page showing a dialog blocks every script until it is answered
 SAFARI_PAINT = 0.45   # seconds Safari takes to paint a page that has been hidden
 ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
@@ -145,8 +152,9 @@ it, and when you know an element's name, act on it by `name` without looking fir
 - Prefer numbers over positions. Use `xy` for what has no number, with pixels from a `look` screenshot.
 - With several windows, pass part of a title as `window`. Calls for different apps can run together.
 - Everything works in the background. Bring an app to the front only when the user asks to see it or be taken \
-there (focus_window with activate, or `show` in the browser tools), never to make an action work, and never use the \
-clipboard, which is theirs. If something can't be done in the background, ask the user.
+there, or has to act in it themselves, such as to sign in (focus_window with activate, or `show` in the browser \
+tools): they can't see your windows, so do it before you ask them. Never do it to make an action work, and never use \
+the clipboard, which is theirs. If something can't be done in the background, ask the user.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in tabs of your own while the user is in \
 theirs. Put what belongs together in one call's `steps`.
@@ -173,7 +181,7 @@ WINDOW_TOOLS = [
                     "changed. It stops at the first step that fails. A step is {do, on, ...}: `do` is "
                     + ", ".join(SIMPLE_STEPS) + ", type or set-value (with text), select (with text), scroll (with "
                     "direction and optional amount), press (with keys such as cmd+n or Return), menu (with text such "
-                    "as File > New Window) or wait (until text shows, for up to amount seconds). The last three take "
+                    "as File > New Window) or wait (amount seconds, or until text shows). The last three take "
                     "no `on`. `on` is a number from look; or pass `name`, the element's name, and skip the look. For a "
                     "click where there is neither, pass xy: [x, y].",
      "inputSchema": {"type": "object", "required": ["app", "steps"], "properties": {
@@ -196,7 +204,7 @@ WINDOW_TOOLS = [
          "title": {"type": "string", "description": "Part of the window's title, as list_windows shows it."},
          "unfullscreen": {"type": "boolean", "description": "Leave full screen first (default false)."},
          "activate": {"type": "boolean", "description": "Bring the window to the user's screen and the front, only "
-                                                        "when they asked to see it or be taken there (default "
+                                                        "when they asked to see it or must act in it (default "
                                                         "false)."}},
          "required": ["app", "title"]}},
     {"name": "move_to_desktop",
@@ -209,7 +217,8 @@ WINDOW_TOOLS = [
                     "taking focus. `list` shows every window and tab, and which are yours. `open` "
                     "loads a URL in a new tab of yours. In your tabs: "
                     "`navigate`, `read` (what: text, html, links, or interactive, which gives refs), `click`, `type`, "
-                    "`wait`, `eval` (a function body that returns a value), `upload` and `shot` (a screenshot). "
+                    "`wait`, `eval` (a function body that returns a value, and may await), `upload` and `shot` (a "
+                    "screenshot). "
                     "`close` closes a tab, or all of yours without tab_index. window_id and tab_index default to your "
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks are made by script, which some pages ignore. "
@@ -262,6 +271,13 @@ an effect, and not twice for the same risk."""
 def app_key(name):
     """An app name for comparing: case and invisible marks (WhatsApp's name starts with one) don't count."""
     return "".join(c for c in str(name) if unicodedata.category(c) != "Cf").strip().casefold()
+
+
+def sign_in_note(result, note):
+    """Add to a step's note that its page asks for a password, which browser.js says of a page a tab went to."""
+    if isinstance(result, dict) and result.pop("password", None):
+        return f"{note}\n{SIGN_IN_NOTE}" if note else SIGN_IN_NOTE
+    return note
 
 
 def run_window_tool(name, arguments):
@@ -726,6 +742,7 @@ class BrowserWorkspace:
                 raise RuntimeError(f"Unknown operation {op}. Pass `op`, or `steps`.")
             if self.shared and op != "list":
                 self.remember()
+        note = sign_in_note(result, note)
         return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)},
                 *([{"type": "text", "text": note}] if note else [])]
 
@@ -981,6 +998,7 @@ class SafariWorkspace(BrowserWorkspace):
                     result["content"] = interactive_lines(result["content"], result.get("url"))
             else:
                 raise RuntimeError(f"Unknown operation {op}. Pass `op`, or `steps`.")
+        note = sign_in_note(result, note)
         return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)},
                 *([{"type": "text", "text": note}] if note else [])]
 
@@ -1791,6 +1809,8 @@ class Server:
             except ToolError as error:
                 raise self.failed(app, window, key, seen, before, steps, index, error) from None
         said = self.settled(app, window, key, before, whole=seen is None, fresh=fresh)
+        if said.startswith("No change") and any("xy" in step for step in steps):
+            said += " " + UNREAD_NOTE  # a picture or a screen in another computer changes without a word of it
         return [{"type": "text", "text": said}]
 
     @classmethod
@@ -1885,10 +1905,13 @@ class Server:
                 time.sleep(WAIT_PACE)
 
     def wait_for(self, app, window, step):
-        """Read the window until it shows a text, so the model needn't look again and again."""
-        wanted, seconds = str(step.get("text") or ""), min(float(step.get("amount") or WAIT_DEFAULT), WAIT_LIMIT)
+        """Read the window until it shows a text, so the model needn't look again and again. Without a text it is
+        a pause, for what shows no text when it is done: a picture, or a screen in another computer."""
+        wanted = str(step.get("text") or "")
         if not wanted:
-            raise ToolError("wait needs `text`: what the window should show.")
+            time.sleep(min(float(step.get("amount") or PAUSE_DEFAULT), PAUSE_LIMIT))
+            return self.read(app, window)
+        seconds = min(float(step.get("amount") or WAIT_DEFAULT), WAIT_LIMIT)
         until = time.monotonic() + seconds
         while True:
             view = self.read(app, window)
@@ -1966,6 +1989,12 @@ class Server:
             if failure and failure.needs_place and steps[at].get("do") in GESTURES:
                 view, failure = self.click_where(app, window, view, numbers[ran], steps[at]), None
                 at += 1
+            # A reading made for this try shows the element, and the engine still can't find it: some lists make
+            # their items anew each time they are asked. A click goes to where the element shows instead.
+            elif failure and at == tried and isinstance(failure, Gone) and numbers[ran] in view.points \
+                    and steps[at].get("do") in ("click", *GESTURES):
+                view, failure = self.click_where(app, window, view, numbers[ran], steps[at]), None
+                at += 1
             if failure:
                 raise failure
         except ToolError as error:
@@ -2002,6 +2031,8 @@ class Server:
 
     def click_at(self, app, window, view, step):
         """Click a place in the window's picture, which has picture_scale pixels to a point."""
+        if step.get("do") not in ("click", *GESTURES):  # anything else would arrive as a click
+            raise ToolError(XY_ONLY_CLICKS)
         view = self.on_screen(app, window, view)
         frame = view.frame
         if not frame:

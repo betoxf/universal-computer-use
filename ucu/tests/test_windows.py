@@ -327,6 +327,14 @@ class SharedMacTest(unittest.TestCase):
 
 
 class SafariTest(unittest.TestCase):
+    def test_says_that_a_page_asks_for_a_password_so_the_user_gets_to_see_it(self):
+        proxy = WatchingProxy(self)
+        plain = proxy.safari(op="open", url="https://a.test")["content"]
+        self.assertEqual(len(plain), 1)
+        asks = proxy.safari(op="open", url="https://a.test/sign-in")["content"]
+        self.assertNotIn("password", json.loads(asks[0]["text"]))
+        self.assertIn("`show` them this tab first", asks[1]["text"])
+
     def test_opens_its_tabs_in_the_users_window_behind_theirs(self):
         proxy = WatchingProxy(self)
         first = json.loads(proxy.safari(op="open", url="https://a.test")["content"][0]["text"])

@@ -50,7 +50,14 @@ func matching(_ query: String) -> NSRunningApplication? {
         key($0.bundleIdentifier ?? "") == wanted || key($0.localizedName ?? "") == wanted
             || key($0.bundleURL?.path ?? "") == wanted
     }
-    return apps.first(where: { $0.activationPolicy == .regular }) ?? apps.first
+    if let app = apps.first(where: { $0.activationPolicy == .regular }) ?? apps.first { return app }
+    // An app's file can have another name than the one it shows (DeviceHub.app is "Device Hub"), and look and act
+    // know it by either. A program's name counts only when one running app has it, as many apps run the same one.
+    let all = NSWorkspace.shared.runningApplications
+    let filed = all.filter { key($0.bundleURL?.deletingPathExtension().lastPathComponent ?? "") == wanted }
+    if let app = filed.first(where: { $0.activationPolicy == .regular }) ?? filed.first { return app }
+    let programs = all.filter { key($0.executableURL?.lastPathComponent ?? "") == wanted }
+    return programs.count == 1 ? programs[0] : nil
 }
 
 func runningApp(_ query: String) -> NSRunningApplication {
