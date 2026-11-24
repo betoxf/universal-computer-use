@@ -580,6 +580,7 @@ final class Watcher {
     // Apps ucu opened for the agent, which stay out of the user's sight, on the desktop or else hidden, until the user
     // takes one: they can't come forward at any time while the chat runs.
     var launchedHidden = Set<pid_t>()
+    var opening = Set<URL>()  // the apps ucu is opening this moment: one can come forward before ucu has its process
     var launchedFresh = Set<pid_t>()  // those that weren't running before: they quit when the chat ends
     var resting = false  // between turns, this runs only to keep ucu's apps out of sight
     var observers = [pid_t: AXObserver]()  // new windows of parked apps, which join the others on the desktop
@@ -878,8 +879,10 @@ final class Watcher {
         configuration.hides = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
+        opening.insert(url.standardizedFileURL)
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
             DispatchQueue.main.async { [self] in
+                opening.remove(url.standardizedFileURL)
                 if let app {
                     launchedHidden.insert(app.processIdentifier)
                     if state == "opened" { launchedFresh.insert(app.processIdentifier) }
@@ -1213,10 +1216,14 @@ final class Watcher {
         let isNew = launched > busySince && Date() < busyUntil  // started during the call that is running
         let ours = Date() < oursUntil[pid] ?? .distantPast
         let owned = launchedHidden.contains(pid), name = app.localizedName ?? "?"
+        // An app ucu itself is opening is not one the user opened, whatever they do meanwhile. Taken for theirs
+        // because they were typing as it started, Windows App kept the front for 6.7 seconds, out of sight on the
+        // agent's desktop, and got what they typed. Their click on its Dock icon is still theirs.
+        let opened = isNew && (owned || app.bundleURL.map { opening.contains($0.standardizedFileURL) } ?? false)
         // Whether the user came to it is settled here, once, before the app is asked anything: a busy app answers
         // seconds later, and by then their click is no longer new, so it would be undone.
         let onDock = clickedDockIcon(of: app)
-        let theirs = onDock || (!ours && Self.userSwitched())
+        let theirs = onDock || (!ours && !opened && Self.userSwitched())
         // Once it has brought its app forward, the click holds for a moment more and no longer: if they leave the
         // app again, an agent's step that brings it forward seconds later isn't their doing.
         if onDock { dockClick?.at = Date() - Self.dockWindow + Self.switchWindow }
@@ -1236,10 +1243,9 @@ final class Watcher {
         let over = "\(name) came forward over \(previous.localizedName ?? "?")"
         // A new app is held back while a call runs, unless the user did anything since just before it started.
         if isNew {
-            guard !theirs, !Self.userIsActive(within: -launched.timeIntervalSinceNow + Self.inputWindow) else {
-                return log("\(over) as it started: left in front, as the user may have opened it")
-            }
-            putBack(previous, over: app, why: "it started while the agent worked")
+            guard !theirs, opened || !Self.userIsActive(within: -launched.timeIntervalSinceNow + Self.inputWindow)
+            else { return log("\(over) as it started: left in front, as the user may have opened it") }
+            putBack(previous, over: app, why: opened ? "ucu was opening it" : "it started while the agent worked")
             if parked[pid] == nil { keepHidden(app, id: nil) }
             return
         }
