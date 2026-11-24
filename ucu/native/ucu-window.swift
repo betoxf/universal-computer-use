@@ -1238,7 +1238,10 @@ final class Watcher {
         // opened, whose place is out of sight, while the chat runs. When the agent is bringing it forward, the user's
         // clicks elsewhere have nothing to do with it. The user's app must still be in sight: if it isn't, they went to
         // another Space themselves.
-        guard (Date() < guardUntil && driven.contains(app)) || owned || ours else { return }
+        // Nor can one whose windows the agent keeps on its desktop, while none of them is in the user's sight: in front,
+        // it has their keyboard in a window they can't see.
+        let unseen = parked[pid] != nil && !hasWindowInSight(app)
+        guard (Date() < guardUntil && driven.contains(app)) || owned || ours || unseen else { return }
         // A click on the app's own window is the user's, even as the agent's step brings the app forward.
         if ours, Self.clicked(app) {
             giveKeyboardBack(in: app)
