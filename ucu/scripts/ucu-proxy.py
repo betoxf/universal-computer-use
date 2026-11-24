@@ -115,8 +115,9 @@ LEFT_FRONT = ("{} is in front now, so the user has gone on with their own work: 
               "{} in front, were not made.")
 NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it there and give the user's app back: "
              "`ucu install` builds one that can.")
-OWN_FRONT = ("{} has the user's own windows too, so it isn't brought to the front for your steps. A scroll by `xy` "
-             "works in your window where it is; for the rest use the browser tool, which clicks and types in the page.")
+OWN_FRONT = ("{} has the user's own windows too, so it isn't brought to the front for your steps. Use the browser "
+             "tool, which clicks and types in the page. A scroll by `xy` works in a window of your own on your "
+             "desktop.")
 FRONT_DWELL = 0.25    # seconds an app stays in front after the last step, which an app that is left at once can lose
 POINTER_MISSED = ("The pointer didn't get to that place, so the step was not made: the user may be moving it. Try "
                   "again in a moment.")
@@ -1293,6 +1294,7 @@ class Front:
         self.pointer_only = not always and not any(isinstance(step, dict) and step.get("do") == "drag"
                                                    for step in steps)
         self.state, self.turn, self.used = None, None, False
+        self.came_forward = False  # the app was in front for a step, and not just the pointer over its window
 
     def needs(self, step):
         kind = step.get("do")
@@ -1308,10 +1310,22 @@ class Front:
         except ToolError:
             self.turn.close()
             raise
-        if self.state == "borrowed" and not self.used:
+        if self.state == "borrowed" and not self.came_forward:  # said once, however often it comes
             self.server.windows.note(BORROWED_NOTE.format(self.app))
         self.used = True
+        self.came_forward = self.came_forward or self.state != "pointer"
         return self.state == "borrowed"
+
+    def raise_window(self):
+        """With the pointer alone a window stays as it is among its app's windows, and on the agent's desktop they
+        are all in one place, so another may be over it. Bring the app to the front after all, which raises the
+        window. Return whether that was there to try."""
+        if self.state != "pointer":
+            return False
+        self.give()
+        self.pointer_only = False
+        self.take()
+        return True
 
     def give(self):
         """Give the user's app back. Return whether there was anything to give."""
@@ -1333,6 +1347,10 @@ class ToolError(Exception):
     has `at`, the step that it stopped, and `on`, that step's element."""
     code = raw = at = on = None
     needs_place = False
+
+
+class Covered(ToolError):
+    """Another window is in front at the place of a step with the real pointer."""
 
 
 class Gone(ToolError):
@@ -1920,7 +1938,12 @@ class Server:
                 elif step.get("do") == "wait":
                     view = fresh = self.wait_for(app, window, step)
                 else:
-                    view = self.click_at(app, window, view, step, front=front.state)
+                    try:
+                        view = self.click_at(app, window, view, step, front=front.state)
+                    except Covered:
+                        if not front.raise_window():
+                            raise
+                        view = self.click_at(app, window, self.read(app, window), step, front=front.state)
                 index += 1
             except ToolError as error:
                 front.give()  # before the window is read for what the failure says
@@ -1930,7 +1953,7 @@ class Server:
         said = self.settled(app, window, key, before, whole=seen is None, fresh=fresh)
         if said.startswith("No change") and any("xy" in step for step in steps):
             said += " " + UNREAD_NOTE  # a picture or a screen in another computer changes without a word of it
-            if not front.used:
+            if not front.came_forward:  # also after a scroll with the pointer alone, which some apps ignore
                 said += " " + TRY_FRONT_NOTE
         return [{"type": "text", "text": said}]
 
@@ -2009,7 +2032,7 @@ class Server:
         if in_front and front and app_key(front) != app_key(app) and not self.same_app(front, app):
             raise ToolError(LEFT_FRONT.format(front, app))
         if at and number is not None and reply.get("top", number) != number:
-            raise ToolError(COVERED.format(app))
+            raise Covered(COVERED.format(app))
 
     @staticmethod
     def same_app(shown, asked):

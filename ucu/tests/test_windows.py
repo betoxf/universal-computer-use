@@ -215,6 +215,15 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(proxy.batched(), [])
         self.assertEqual(proxy.commands("giveBack"), [])
 
+    def test_brings_the_app_forward_after_all_when_another_of_its_windows_is_over_the_one_to_scroll(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Stacked App")
+        reply = proxy.act({"do": "scroll", "xy": [10, 20]}, app="Stacked App")
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        self.assertEqual([command["pointerOnly"] for command in proxy.commands("borrow")], [True, False])
+        self.assertEqual([entry["command"] for entry in proxy.batched()], ["mouse-wheel"])
+        self.assertIn("Stacked App was in front for the steps", proxy.text(reply))
+
     def test_makes_no_step_with_the_real_pointer_where_another_window_is_in_front(self):
         proxy = WatchingProxy(self)
         proxy.look("Covered App")

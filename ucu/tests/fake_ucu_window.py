@@ -23,6 +23,7 @@ REPORTS = os.environ["FAKE_WINDOW_REPORTS"]
 OPEN_DELAY = 0.2  # opening an app takes a while, and the engine must not get the call before it is done
 parked = set()
 lent = []  # the app that is in front for an agent's steps
+modes = {}  # how each app was last lent: "borrowed", "front" or "pointer"
 opened = set()  # apps it opened, which keep it running after `rest`
 writing = threading.Lock()
 
@@ -70,8 +71,11 @@ def answer(command):
     elif "borrow" in command:
         name = command["borrow"]
         state = "busy" if name.startswith("Busy") else "front" if name.startswith("Front") else "borrowed"
-        if name.startswith("Parked") and command.get("pointerOnly"):  # on the agent's desktop: the pointer is enough
+        # On the agent's desktop the pointer is enough for a scroll. In "Stacked…" another window of the app is over
+        # the one asked for until the app comes to the front, which raises it.
+        if name.startswith(("Parked", "Stacked")) and command.get("pointerOnly"):
             state = "pointer"
+        modes[name] = state
         if name.startswith("Own"):  # a browser with the user's windows and the chat's own
             state = "own"
         if state not in ("busy", "own"):
@@ -82,8 +86,9 @@ def answer(command):
         lent.clear()
     elif "front" in command:  # an app called "Left…" is one the user leaves while the agent works in it
         name = lent[-1] if lent else ""
-        covered = {"top": 0} if name.startswith("Covered") and "at" in command else {}  # another window is there
-        elsewhere = name.startswith(("Left", "Parked"))  # the user's own app is in front
+        under = name.startswith("Covered") or (name.startswith("Stacked") and modes.get(name) == "pointer")
+        covered = {"top": 0} if under and "at" in command else {}  # another window is there
+        elsewhere = name.startswith(("Left", "Parked")) or modes.get(name) == "pointer"  # the user's app is in front
         send({"id": command["id"], "front": "Mail" if elsewhere else name, **covered})
     elif "atWork" in command:
         send({"id": command["id"], "atWork": command["atWork"].startswith("Typing")})
