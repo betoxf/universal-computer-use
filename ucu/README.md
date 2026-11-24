@@ -233,7 +233,8 @@ When the agent needs you to do something in a window, such as to sign in or type
 you the same way and says what it needs: `focus_window` with `ask`, or the browser tools' `show` with `text`. The window
 then carries a label in the chat's color, "Waiting for you: Sign in", with a Done button:
 
-- The label shows while you are in that window, also after the agent's turn has ended to wait for you.
+- The label shows while you are in that window, also after the agent's turn has ended to wait for you. With a sheet
+  or a dialog of the app's over the window, such as a prompt to answer, it sits above the window instead of on it.
 - Done tells the agent you are finished. It hears it with its next step, so say so in the chat too if it has stopped.
 - The label goes when you click Done, when the agent goes on working in that app, when the window closes, or when the
   chat ends.

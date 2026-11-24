@@ -128,6 +128,7 @@ BORROWED_NOTE = ("{} was in front for the steps that can't be made behind, and t
 TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
 ASK_NOTE = ("The user sees what you ask of them on the window, with a Done button. Don't act in it until they are "
             "done: `wait` for what shows then, or end your turn and tell them what you need.")
+UNDER_NOTE = "A sheet of the app's is over that window, and the user sees both."
 USER_AT_WORK = ("The user is doing what you asked of them in {} right now. Leave it to them: `wait` for what shows "
                 "when they are done, or end your turn.")
 DONE_NOTE = "[ucu: The user clicked Done on what you asked of them in {}. Go on there.]"
@@ -1700,9 +1701,12 @@ class Server:
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
         else:
             text, failed = run_window_tool(name, arguments)
-            if not failed and name == "focus_window" and arguments.get("activate") and arguments.get("ask"):
-                self.ask_user(str(arguments.get("app") or ""), arguments["ask"], str(arguments.get("title") or ""))
-                text += "\n" + ASK_NOTE
+            if not failed and name == "focus_window" and arguments.get("activate"):
+                if re.search(r" under=sheet$", text, re.MULTILINE):
+                    text += "\n" + UNDER_NOTE
+                if arguments.get("ask"):
+                    self.ask_user(str(arguments.get("app") or ""), arguments["ask"], str(arguments.get("title") or ""))
+                    text += "\n" + ASK_NOTE
         if failed:
             raise ToolError(text)
         return [{"type": "text", "text": text}]

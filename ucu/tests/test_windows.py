@@ -275,6 +275,20 @@ class WatchTest(unittest.TestCase):
         self.assertIn("The user clicked Done on what you asked of them in Calculator", said)
         self.assertEqual(proxy.asks()[-1], ("", "Calculator"))
 
+    def test_says_it_on_a_window_that_has_a_dialog_over_it(self):
+        proxy = WatchingProxy(self)
+        reply = proxy.call("focus_window", app="Under App", title="Connecting", activate=True, ask="Answer it")
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        self.assertIn("A sheet of the app's is over that window, and the user sees both.", proxy.text(reply))
+        self.assertIn("The user sees what you ask of them on the window", proxy.text(reply))
+        self.assertEqual(proxy.asks(), [("Answer it", "Under App")])
+
+    def test_fails_to_make_a_window_under_a_dialog_the_main_one_behind(self):
+        proxy = WatchingProxy(self)
+        reply = proxy.call("focus_window", app="Under App", title="Connecting")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("main=false", proxy.text(reply))
+
     def test_leaves_a_window_to_the_user_while_they_do_what_it_asked_there(self):
         proxy = WatchingProxy(self)
         proxy.call("focus_window", app="Typing App", title="x", activate=True, ask="Type your password")

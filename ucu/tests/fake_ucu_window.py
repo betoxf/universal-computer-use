@@ -9,6 +9,7 @@ starts with "Busy" (the user is working), "Front" (it is in front already) or "L
 In an app whose name starts with "Typing" the user is typing whenever it is asked, and one whose name starts with
 "Covered" has another window over every place in its own. An app whose name starts with "Parked" is on the agent's
 desktop, where the pointer alone is enough for a scroll, and the user's app stays in front.
+An app whose name starts with "Under" has a sheet over its window, which can't be the app's main window.
 Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the
 other commands.
 """
@@ -105,6 +106,9 @@ def log(entry):
 def main():
     if sys.argv[1:] != ["watch"]:
         log({"args": sys.argv[1:]})
+        if sys.argv[1] == "focus" and sys.argv[2].startswith("Under"):
+            print(f'"{sys.argv[3]}" main=false fullscreen=false frame=10,20 300x200 under=sheet')
+            sys.exit(0 if "--activate" in sys.argv else 4)  # brought to the user, it is in front of them all the same
         print(f"args: {' '.join(sys.argv[1:])}")
         sys.exit(2 if "Missing" in sys.argv else 0)
     threading.Thread(target=relay_reports, daemon=True).start()

@@ -12,7 +12,8 @@
 //
 // <app> is a display name or bundle id of a running app; `list` without one covers every app.
 // `focus` un-minimizes the window and makes it the app's main window; it shows the app and brings
-// it to the front only with --activate, onto the user's screen if it was out of sight. `press` runs
+// it to the front only with --activate, onto the user's screen if it was out of sight, and then it
+// is no failure that another window stays the app's main one. `press` runs
 // the menu command a shortcut stands for, and `menu` the one at a path, which work on an app in the
 // background, even a hidden one. `watch` is what the server runs next to the engine: see Watcher.
 // Needs Accessibility permission for the process that runs it (Claude Code).
@@ -585,8 +586,10 @@ final class AskLabel: NSObject {
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in place() }
     }
 
-    // Just under the window's title bar, and only while the user is in that window. A window that has closed says so
-    // itself. One that doesn't answer is in a busy app, a page loading for instance, and is still there.
+    // Just under the window's title bar, and only while the user is in that window or in what is over it. A sheet or
+    // a dialog there is often the very thing they must answer, and the label would cover it, so it goes above the
+    // window when there is room. A window that has closed says so itself. One that doesn't answer is in a busy app,
+    // a page loading for instance, and is still there.
     func place() {
         var role: CFTypeRef?
         guard let panel, let app, let window, !app.isTerminated,
@@ -599,11 +602,36 @@ final class AskLabel: NSObject {
         let element = appElement(app.processIdentifier)
         let current: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
             ?? attribute(element, kAXMainWindowAttribute)
-        guard app.isActive, let current, CFEqual(current, window), let frame = Watcher.frame(of: window),
+        guard app.isActive, Self.belongs(current, to: window), let frame = Watcher.frame(of: window),
               !Watcher.isOutOfSight(window), let screen = NSScreen.screens.first else { return panel.orderOut(nil) }
-        let size = panel.frame.size, top = frame.minY + 36  // windows count from the top, screens up
+        let size = panel.frame.size, menuBar = screen.frame.height - screen.visibleFrame.maxY
+        let inIt = current.map { CFEqual($0, window) } ?? true
+        let above = frame.minY - size.height - 6
+        let top = (!inIt || Self.hasSheet(window)) && above >= menuBar ? above : frame.minY + 36
+        // Windows count from the top, screens up.
         panel.setFrameOrigin(NSPoint(x: frame.midX - size.width / 2, y: screen.frame.height - top - size.height))
         panel.orderFrontRegardless()
+    }
+
+    // Whether the user, in `current`, is still with the window: in it, in a sheet on it, or in a dialog of the app's,
+    // which is over whatever window they were in. In another ordinary window the label would say of that one what it
+    // says of this. An app that doesn't say where they are is a busy one.
+    static func belongs(_ current: AXUIElement?, to window: AXUIElement) -> Bool {
+        guard let current, !CFEqual(current, window) else { return true }
+        if (attribute(current, kAXRoleAttribute) as String?) == kAXSheetRole as String {
+            return isSheet(current, of: window)
+        }
+        return (attribute(current, kAXSubroleAttribute) as String?) != kAXStandardWindowSubrole as String
+    }
+
+    static func isSheet(_ element: AXUIElement, of window: AXUIElement) -> Bool {
+        (attribute(element, kAXRoleAttribute) as String?) == kAXSheetRole as String
+            && (attribute(element, kAXParentAttribute) as AXUIElement?).map { CFEqual($0, window) } ?? false
+    }
+
+    static func hasSheet(_ window: AXUIElement) -> Bool {
+        let parts: [AXUIElement] = attribute(window, kAXChildrenAttribute) ?? []
+        return parts.contains { (attribute($0, kAXRoleAttribute) as String?) == kAXSheetRole as String }
     }
 
     @objc func clicked() {
@@ -1906,9 +1934,36 @@ case "focus", "unfullscreen":
         }
         for _ in 0..<20 where !isMain(window, of: element) { usleep(10_000) }
     }
-    let isMain = isMain(window, of: element)
-    print("\"\(title(window))\" main=\(isMain) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))")
-    exit(command == "focus" && !isMain ? 4 : 0)
+    var main = isMain(window, of: element)
+    // Brought to the user, a window is in front of them once its app is in front and it is in their sight, whether
+    // or not it is the app's main window, so that alone is no failure. The app is asked itself whether it is in
+    // front, and given time: the server moves its windows to the user's screen meanwhile, and the app came forward
+    // 1.2 seconds after the call began. It can come forward with another of its windows as the one the user is in,
+    // over the one asked for, so that one is raised again once the app is there.
+    var shown = false
+    if command == "focus", !main, args.contains("--activate") {
+        func arrived() -> Bool { flag(element, kAXFrontmostAttribute) && !Watcher.isOutOfSight(window) }
+        func userIsInIt() -> Bool {
+            guard let current: AXUIElement = attribute(element, kAXFocusedWindowAttribute) else { return false }
+            return CFEqual(current, window) || AskLabel.isSheet(current, of: window)
+        }
+        for _ in 0..<250 where !arrived() { usleep(10_000) }
+        shown = arrived()
+        if shown, !userIsInIt() {
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            for _ in 0..<15 where !userIsInIt() { usleep(10_000) }
+            if !userIsInIt() {  // raised, and another window still has the keyboard
+                AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                for _ in 0..<15 where !userIsInIt() { usleep(10_000) }
+            }
+            main = isMain(window, of: element)
+        }
+    }
+    let sheet = args.contains("--activate") && AskLabel.hasSheet(window)  // which the user must answer first
+    print("\"\(title(window))\" main=\(main) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))"
+          + (sheet ? " under=sheet" : ""))
+    exit(command == "focus" && !main && !shown ? 4 : 0)
 case "press":
     guard args.count >= 3 else { fail("usage: ucu-window press <app> <shortcut>") }
     guard let (item, path) = menuItem(for: args[2], in: element) else {
