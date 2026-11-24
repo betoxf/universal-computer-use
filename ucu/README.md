@@ -195,6 +195,8 @@ back too, unless you did anything since just before it started.
 An app whose windows the agent keeps on its private desktop is put back whenever it comes forward by itself with none
 of them in your sight, and not only for those 10 seconds: in front, it would have your keyboard in a window you can't
 see. A click or a modifier key just before still counts as you coming to it, and its windows come back to your screen.
+When the app it came forward over can't have the front back, because it has quit or the agent is moving it to its
+desktop, the front goes to the app whose window you see on top.
 
 Safari and Chrome are yours while an agent works in them, because it works in tabs or a window of its own. When no step of the
 agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a
