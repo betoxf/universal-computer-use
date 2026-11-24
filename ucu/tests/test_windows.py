@@ -318,6 +318,23 @@ class WatchTest(unittest.TestCase):
         proxy.safari(op="click", text="Next")
         self.assertEqual(proxy.asks()[-1], ("", "Safari"))
 
+    def test_ends_what_it_asked_when_it_closes_the_tab_it_showed(self):
+        for browser in ("safari", "chrome"):
+            proxy = WatchingProxy(self)
+            call = getattr(proxy, browser)
+            call(op="open", url="https://a.test/sign-in")
+            call(op="show", text="Sign in")
+            self.assertEqual(len(proxy.asks()), 1)
+            call(op="close")
+            self.assertEqual(proxy.asks()[-1][0], "", browser)  # the label goes with the tab
+
+    def test_tells_the_agent_when_the_user_took_the_app_over_during_its_steps(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Took App")
+        reply = proxy.call("act", app="Took App", front=True, steps=[{"do": "click", "xy": [10, 20]}])
+        self.assertIn("The user took over Took App during your steps, so it stays where they have it.",
+                      proxy.texts(reply))
+
     def test_shows_a_hidden_app_behind_the_user_without_a_desktop(self):
         proxy = WatchingProxy(self)
         proxy.look("Closed Stuck")

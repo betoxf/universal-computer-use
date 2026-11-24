@@ -125,7 +125,7 @@ COVERED = ("Another window is over that place in {}, so the step was not made: i
            "`look` with screenshot shows the window as it is.")
 BORROWED_NOTE = ("{} was in front for the steps that can't be made behind, and the user's app is back in front "
                  "now.")
-TAKEN_NOTE = "The user took over {} during your steps, so it stays where they have it."
+TOOK_OVER_NOTE = "The user took over {} during your steps, so it stays where they have it."
 ASK_NOTE = ("The user sees what you ask of them on the window, with a Done button. Don't act in it until they are "
             "done: `wait` for what shows then, or end your turn and tell them what you need.")
 UNDER_NOTE = "A sheet of the app's is over that window, and the user sees both."
@@ -741,8 +741,10 @@ class BrowserWorkspace:
                                   "reuse_blank": created or self.tab is None})
                 self.tab = result["tab_index"]
             elif op == "close" and "tab_index" not in arguments and not self.shared:
+                self.server.resume(self.app)  # what was asked of the user there goes with it
                 result = {"closed": self.clear_window()}
             elif op == "close":  # in a window the user has too, only the chat's last tab: others may be theirs
+                self.server.resume(self.app)
                 target = self.target(arguments)
                 self.guard(target, arguments)
                 result = self.call({"op": "close_tab", **target, "keep_window": target["window_id"] == self.window})
@@ -995,6 +997,7 @@ class SafariWorkspace(BrowserWorkspace):
                 self.pages.append(self.reply["own"])
                 note = self.asleep(op, result, self.WAKE_OWN)
             elif op == "close" and "tab_index" not in arguments:
+                self.server.resume(self.app)  # what was asked of the user in a tab of the chat's goes with the tab
                 result = {"closed": self.close_window()}
             elif op == "hide":
                 self.server.resume(self.app)
@@ -1019,6 +1022,8 @@ class SafariWorkspace(BrowserWorkspace):
                     self.server.ask_user(self.app, arguments["text"])
                     result["note"] = ASK_NOTE
             elif op == "close" or op in self.OPERATIONS:
+                if op == "close":
+                    self.server.resume(self.app)
                 page, theirs = self.aim(arguments)
                 request = {key: value for key, value in arguments.items()
                            if not key.startswith("allow_") and key not in ("window_id", "tab_index")}
@@ -2027,7 +2032,7 @@ class Server:
         reply = self.windows.ask({"giveBack": True}, 5) or {}
         if reply.get("taken"):  # the user came to it: it is on their screen now, and stays
             self.user_took([app])
-            self.windows.note(TAKEN_NOTE.format(app))
+            self.windows.note(TOOK_OVER_NOTE.format(app))
 
     def still_front(self, app, at=None, number=None, in_front=True):
         """Steps with the real pointer land wherever the user is, and on whatever window is in front at their place.

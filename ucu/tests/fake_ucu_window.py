@@ -84,7 +84,8 @@ def answer(command):
             lent.append(name)
         send({"id": command["id"], "state": state, "front": "Mail"})
     elif "giveBack" in command and "id" in command:
-        send({"id": command["id"], "state": "returned" if lent else "none", "taken": False})
+        took = bool(lent) and lent[-1].startswith("Took")  # the user clicked a window of it during the steps
+        send({"id": command["id"], "state": "returned" if lent else "none", "taken": took})
         lent.clear()
     elif "front" in command:  # an app called "Left…" is one the user leaves while the agent works in it
         name = lent[-1] if lent else ""
