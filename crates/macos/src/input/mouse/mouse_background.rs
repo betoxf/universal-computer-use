@@ -14,19 +14,52 @@ fn can_press_element(event: &MouseEvent) -> bool {
         && matches!(event.kind, MouseEventKind::Click { count: 1 })
 }
 
-/// Records come front to back, so the first hit is the app's topmost window here.
-fn window_at<'a, T>(
-    windows: &'a [T],
-    bounds: impl Fn(&T) -> &Rect,
+fn contains(rect: &Rect, point: &Point) -> bool {
+    point.x >= rect.x
+        && point.y >= rect.y
+        && point.x < rect.x + rect.width
+        && point.y < rect.y + rect.height
+}
+
+/// The window a click at the point is for, as its place in `windows`: the one `wanted` names, wherever it lies
+/// among the app's others, or else the frontmost there. The flag says whether it is the frontmost at the point,
+/// which is the window the element under the point belongs to. `windows` pairs each window's number with its
+/// bounds in no stacking order; `front_to_back` numbers the windows that show, and one it leaves out lies behind.
+fn target_window(
+    windows: &[(i64, Rect)],
+    front_to_back: &[i64],
     point: &Point,
-) -> Option<&'a T> {
-    windows.iter().find(|window| {
-        let rect = bounds(window);
-        point.x >= rect.x
-            && point.y >= rect.y
-            && point.x < rect.x + rect.width
-            && point.y < rect.y + rect.height
-    })
+    wanted: Option<i64>,
+) -> Option<(usize, bool)> {
+    let depth = |number: i64| {
+        front_to_back
+            .iter()
+            .position(|shown| *shown == number)
+            .unwrap_or(usize::MAX)
+    };
+    let here = || {
+        windows
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, bounds))| contains(bounds, point))
+    };
+    let (top, _) = here().min_by_key(|(_, (number, _))| depth(*number))?;
+    let target = match wanted {
+        Some(wanted) => here().find(|(_, (number, _))| *number == wanted)?.0,
+        None => top,
+    };
+    Some((target, target == top))
+}
+
+/// Window ids are `w-` and the window's number, as `list-windows` gives them.
+fn window_number(id: &str) -> Result<i64, AdapterError> {
+    id.strip_prefix("w-")
+        .and_then(|number| number.parse::<i64>().ok())
+        .filter(|number| *number > 0)
+        .ok_or_else(|| {
+            AdapterError::new(ErrorCode::InvalidArgs, format!("'{id}' is not a window id"))
+                .with_suggestion("Pass an id from list-windows, such as w-1234")
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -34,7 +67,9 @@ mod imp {
     use super::*;
     use crate::actions::ax_perform::{advertises_action, perform_observed_action};
     use crate::actions::chain::chain_delivery::DeliveryOutcome;
-    use crate::system::window::cg_window::{WindowRecordScope, window_records_until};
+    use crate::system::window::cg_window::{
+        WindowRecord, WindowRecordScope, showing_window_records, window_records_until,
+    };
     use crate::tree::{AXElement, element_for_pid, properties::ax_ipc};
     use core_graphics::event::{CGEvent, CGEventType, CGMouseButton, EventField};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -60,6 +95,7 @@ mod imp {
 
     pub(crate) fn background_click(
         pid: i32,
+        window_id: Option<&str>,
         event: MouseEvent,
         deadline: Deadline,
     ) -> Result<OperationReport, AdapterError> {
@@ -67,27 +103,60 @@ mod imp {
         let MouseEventKind::Click { count } = event.kind else {
             return Err(AdapterError::not_supported("background pointer gesture"));
         };
-        if can_press_element(&event) && press_element_at(pid, &event.point, deadline)? {
+        let wanted = window_id.map(window_number).transpose()?;
+        let showing = match wanted {
+            Some(_) => Some(placed(&showing_window_records(pid)?)),
+            None => None,
+        };
+        let on_top = showing.as_ref().is_none_or(|showing| {
+            target_window(showing, &numbers(showing), &event.point, wanted)
+                .is_some_and(|(_, frontmost)| frontmost)
+        });
+        if on_top && can_press_element(&event) && press_element_at(pid, &event.point, deadline)? {
             return Ok(OperationReport::background_click(&event, true));
         }
         let until = Instant::now() + deadline.remaining();
         let windows = window_records_until(until, WindowRecordScope::Pid(pid))?;
-        let window =
-            window_at(&windows, |record| &record.bounds, &event.point).ok_or_else(|| {
-                AdapterError::new(
-                    ErrorCode::ElementNotFound,
-                    "No window of this app is on screen at that point",
-                )
-                .with_suggestion(
-                    "Run list-windows; a hidden or minimized app has no window to click",
-                )
-            })?;
+        let showing = match showing {
+            Some(showing) => showing,
+            None => placed(&showing_window_records(pid)?),
+        };
+        let (target, _) =
+            target_window(&placed(&windows), &numbers(&showing), &event.point, wanted)
+                .ok_or_else(|| no_window_at_point(wanted.is_some()))?;
+        let window = &windows[target];
         let location = CGPoint::new(
             event.point.x - window.bounds.x,
             event.point.y - window.bounds.y,
         );
         post_click(pid, window.window_number, location, &event, count)?;
         Ok(OperationReport::background_click(&event, false))
+    }
+
+    fn placed(records: &[WindowRecord]) -> Vec<(i64, Rect)> {
+        records
+            .iter()
+            .map(|record| (record.window_number, record.bounds))
+            .collect()
+    }
+
+    fn numbers(placed: &[(i64, Rect)]) -> Vec<i64> {
+        placed.iter().map(|(number, _)| *number).collect()
+    }
+
+    fn no_window_at_point(named: bool) -> AdapterError {
+        if named {
+            return AdapterError::new(
+                ErrorCode::ElementNotFound,
+                "That window of this app is not at that point",
+            )
+            .with_suggestion("Run list-windows for the window's bounds");
+        }
+        AdapterError::new(
+            ErrorCode::ElementNotFound,
+            "No window of this app is on screen at that point",
+        )
+        .with_suggestion("Run list-windows; a hidden or minimized app has no window to click")
     }
 
     fn press_element_at(pid: i32, point: &Point, deadline: Deadline) -> Result<bool, AdapterError> {
@@ -171,6 +240,7 @@ mod imp {
 
     pub(crate) fn background_click(
         _pid: i32,
+        _window_id: Option<&str>,
         _event: MouseEvent,
         _deadline: Deadline,
     ) -> Result<OperationReport, AdapterError> {
@@ -213,12 +283,63 @@ mod tests {
     }
 
     #[test]
-    fn the_topmost_window_at_the_point_wins() {
-        let windows = [rect(100.0, 10.0), rect(0.0, 10.0), rect(0.0, 20.0)];
+    fn the_frontmost_window_at_the_point_wins_whatever_the_inventory_order() {
+        let windows = [
+            (1, rect(100.0, 10.0)),
+            (2, rect(0.0, 10.0)),
+            (3, rect(0.0, 20.0)),
+        ];
         let point = Point { x: 5.0, y: 5.0 };
-        let found = window_at(&windows, |window| window, &point);
-        assert_eq!(found.map(|window| window.width), Some(10.0));
+        assert_eq!(
+            target_window(&windows, &[9, 3, 2, 1], &point, None),
+            Some((2, true))
+        );
+        assert_eq!(
+            target_window(&windows, &[2, 3], &point, None),
+            Some((1, true))
+        );
         let outside = Point { x: 50.0, y: 5.0 };
-        assert!(window_at(&windows, |window| window, &outside).is_none());
+        assert_eq!(target_window(&windows, &[3, 2, 1], &outside, None), None);
+    }
+
+    #[test]
+    fn a_named_window_gets_the_click_under_another_of_the_app() {
+        let windows = [(2, rect(0.0, 10.0)), (3, rect(0.0, 20.0))];
+        let point = Point { x: 5.0, y: 5.0 };
+        assert_eq!(
+            target_window(&windows, &[3, 2], &point, Some(2)),
+            Some((0, false))
+        );
+        assert_eq!(
+            target_window(&windows, &[3, 2], &point, Some(3)),
+            Some((1, true))
+        );
+    }
+
+    #[test]
+    fn a_named_window_that_is_not_at_the_point_gets_no_click() {
+        let windows = [(2, rect(0.0, 10.0)), (3, rect(100.0, 10.0))];
+        let point = Point { x: 5.0, y: 5.0 };
+        assert_eq!(target_window(&windows, &[3, 2], &point, Some(3)), None);
+        assert_eq!(target_window(&windows, &[3, 2], &point, Some(7)), None);
+    }
+
+    #[test]
+    fn a_window_that_does_not_show_lies_behind_those_that_do() {
+        let windows = [(2, rect(0.0, 10.0)), (3, rect(0.0, 20.0))];
+        let point = Point { x: 5.0, y: 5.0 };
+        assert_eq!(target_window(&windows, &[3], &point, None), Some((1, true)));
+        assert_eq!(target_window(&windows, &[], &point, None), Some((0, true)));
+    }
+
+    #[test]
+    fn a_window_id_is_w_and_a_number() {
+        assert_eq!(window_number("w-42").ok(), Some(42));
+        for bad in ["42", "w-", "w-0", "w--3", "w-x"] {
+            assert_eq!(
+                window_number(bad).map_err(|error| error.code),
+                Err(ErrorCode::InvalidArgs)
+            );
+        }
     }
 }

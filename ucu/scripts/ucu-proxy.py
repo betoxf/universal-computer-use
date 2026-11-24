@@ -103,6 +103,8 @@ SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
 TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
+OLD_ENGINE_CLICK = ("{} has another window at that place, and this ucu-engine can't aim a click at one of two, so the "
+                    "step was not made. `ucu update` builds one that can.")
 XY_ONLY_CLICKS = ("`xy` works with click, double-click, right-click and triple-click. Nothing scrolls at a place in "
                   "the background yet: scroll an element by its number, or press keys such as down or space.")
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
@@ -2038,7 +2040,8 @@ class Server:
         if not frame:
             raise ToolError("This window has no position to click.")
         scale = picture_scale(frame)
-        self.point_click(app, (frame["x"] + step["xy"][0] / scale, frame["y"] + step["xy"][1] / scale), step)
+        place = (frame["x"] + step["xy"][0] / scale, frame["y"] + step["xy"][1] / scale)
+        self.point_click(app, place, step, view.window)
         return view
 
     def click_where(self, app, window, view, number, step):
@@ -2050,15 +2053,37 @@ class Server:
         if not point or not frame or not (frame["x"] <= point[0] < frame["x"] + frame["width"]
                                           and frame["y"] <= point[1] < frame["y"] + frame["height"]):
             raise ToolError("It takes that click only where it shows, and it is out of view. Scroll to it first.")
-        self.point_click(app, point, step)
+        self.point_click(app, point, step, moved.window)
         return moved
 
-    def point_click(self, app, point, step):
+    def point_click(self, app, point, step, window=None):
+        """Click a place in an app behind. Two windows of an app can share a place, and on the agent's desktop they
+        all do, so the engine is told which one the click is for and sends it there, also under the other. Told
+        nothing, it takes the app's frontmost window at that place."""
         self.windows.send({"cursorTo": point})
         args = {"xy": f"{point[0]:.0f},{point[1]:.0f}", "app": app, **GESTURES.get(step.get("do"), {})}
-        _ran, failure = Engine.batch([{"command": "mouse-click", "args": args}])
+        aimed = {"window_id": window} if re.fullmatch(r"w-\d+", str(window or "")) else {}
+        try:
+            _ran, failure = Engine.batch([{"command": "mouse-click", "args": {**args, **aimed}}])
+        except ToolError as error:
+            # An engine from before it took a window says so. It clicks the right one where the app has no other
+            # window at that place, and where it has, nothing tells which of them it would click.
+            if not aimed or getattr(error, "code", None) != "INVALID_ARGS" or "window_id" not in str(error.raw):
+                raise
+            if self.shares_place(app, window, point):
+                raise ToolError(OLD_ENGINE_CLICK.format(app)) from None
+            _ran, failure = Engine.batch([{"command": "mouse-click", "args": args}])
         if failure:
             raise failure
+
+    @staticmethod
+    def shares_place(app, window, point):
+        """Whether another window of the app than this one is at a place too."""
+        def holds(frame):
+            return (isinstance(frame, dict) and frame["x"] <= point[0] < frame["x"] + frame["width"]
+                    and frame["y"] <= point[1] < frame["y"] + frame["height"])
+        return any(isinstance(found, dict) and found.get("id") != window and holds(found.get("bounds"))
+                   for found in Engine.run("list-windows", "--app", app) or [])
 
     # --- turn ends and idle stops -----------------------------------------
     def hide_browsers(self):

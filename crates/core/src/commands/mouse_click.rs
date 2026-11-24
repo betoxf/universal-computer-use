@@ -17,6 +17,8 @@ pub struct MouseClickArgs {
     pub modifiers: Vec<Modifier>,
     /// Sends the click to this app in the background instead of moving the pointer.
     pub app: Option<String>,
+    /// With `app`: the window the click is for, also when another window of the app is over it.
+    pub window_id: Option<String>,
 }
 
 pub fn execute(
@@ -26,6 +28,12 @@ pub fn execute(
 ) -> Result<Value, AppError> {
     if args.app.is_some() {
         return background(args, adapter);
+    }
+    if args.window_id.is_some() {
+        return Err(AppError::invalid_input_with_suggestion(
+            "--window-id names the window for a click in the background",
+            "Pass --app with it, or leave it out for a click with the pointer",
+        ));
     }
     require_cursor_policy(context, "mouse-click")?;
     require_pointer_capability(adapter)?;
@@ -73,11 +81,17 @@ fn background(args: MouseClickArgs, adapter: &dyn PlatformAdapter) -> Result<Val
         button: args.button,
         modifiers: args.modifiers,
     };
-    let report = adapter.background_click(app.pid.get() as i32, event, &lease)?;
-    operation_response(
-        &report,
-        json!({ "x": args.x, "y": args.y, "count": args.count, "app": app.name }),
-    )
+    let report = adapter.background_click(
+        app.pid.get() as i32,
+        args.window_id.as_deref(),
+        event,
+        &lease,
+    )?;
+    let mut target = json!({ "x": args.x, "y": args.y, "count": args.count, "app": app.name });
+    if let Some(window_id) = args.window_id {
+        target["window_id"] = json!(window_id);
+    }
+    operation_response(&report, target)
 }
 
 #[cfg(test)]

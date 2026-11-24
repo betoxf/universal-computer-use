@@ -322,14 +322,15 @@ class ServerTest(unittest.TestCase):
         reply = self.server.act({"do": "double-click", "on": 1}, {"do": "click", "on": 1})
         self.assertFalse(reply["result"]["isError"], self.server.text(reply))
         self.assertEqual(self.server.batched()[2:], [
-            {"command": "mouse-click", "args": {"xy": "120,210", "app": "Calculator", "count": 2}},
+            {"command": "mouse-click", "args": {"xy": "120,210", "app": "Calculator", "count": 2, "window_id": "w-1"}},
             {"command": "click", "args": {"ref_id": "@s1:e1"}}])
 
     def test_clicks_where_an_element_shows_when_the_engine_keeps_losing_it(self):
         reply = self.server.act({"do": "double-click", "name": "Shown"}, app="Ghost")
         self.assertFalse(reply["result"]["isError"], self.server.text(reply))
         self.assertEqual(self.server.batched()[-1],
-                         {"command": "mouse-click", "args": {"xy": "120,310", "app": "Ghost", "count": 2}})
+                         {"command": "mouse-click",
+                          "args": {"xy": "120,310", "app": "Ghost", "count": 2, "window_id": "w-1"}})
         typed = self.server.act({"do": "type", "name": "Shown", "text": "x"}, app="Ghost")
         self.assertIn("image Shown is no longer in the window", self.server.text(typed))
 
@@ -372,9 +373,24 @@ class ServerTest(unittest.TestCase):
         self.server.look(screenshot=True)
         reply = self.server.act({"do": "click", "xy": [100, 60]}, {"do": "right-click", "xy": [0, 0]})
         self.assertFalse(reply["result"]["isError"])
-        # the picture is the window at 100,200, a pixel to a point
+        # the picture is the window at 100,200, a pixel to a point, and the click is for the window that was read
         self.assertEqual([entry["args"] for entry in self.server.batched()], [
-            {"xy": "200,260", "app": "Calculator"}, {"xy": "100,200", "app": "Calculator", "button": "right"}])
+            {"xy": "200,260", "app": "Calculator", "window_id": "w-1"},
+            {"xy": "100,200", "app": "Calculator", "button": "right", "window_id": "w-1"}])
+
+    def test_clicks_a_place_with_an_engine_that_takes_no_window_where_only_one_is_there(self):
+        self.server.look(app="Dated", screenshot=True)
+        reply = self.server.act({"do": "click", "xy": [100, 60]}, app="Dated")
+        self.assertFalse(reply["result"]["isError"], self.server.text(reply))
+        self.assertEqual([entry["args"] for entry in self.server.batched()], [
+            {"xy": "200,260", "app": "Dated", "window_id": "w-1"}, {"xy": "200,260", "app": "Dated"}])
+
+    def test_makes_no_click_with_such_an_engine_where_two_windows_of_the_app_share_the_place(self):
+        self.server.look(app="Dated Twin", screenshot=True)
+        reply = self.server.act({"do": "click", "xy": [100, 60]}, app="Dated Twin")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("this ucu-engine can't aim a click at one of two", self.server.text(reply))
+        self.assertEqual(len(self.server.batched()), 1)  # the one the engine refused, and no other
 
     def test_adds_a_screenshot_the_size_of_the_window_when_asked(self):
         content = self.server.look(screenshot=True)["result"]["content"]
