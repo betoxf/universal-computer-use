@@ -172,10 +172,12 @@ The server sends the usage rules in its MCP `instructions`, so clients get them 
 
 ### Staying out of your way
 
-When an agent uses a closed app, UCU opens it on the agent's private desktop, a screen you never see. Its Dock icon
-shows it is running, and nothing appears on your screens. A hidden app shows itself wherever its windows are as soon as
-it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an app opens joins it there
-at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
+When an agent uses a closed app, UCU makes the agent's private desktop, a screen you never see, and opens the app
+hidden. Its windows go to that desktop, and its Dock icon shows it is running. Most apps show nothing on your screens
+meanwhile. Some show a window in spite of being opened hidden, where they last had one: on the private desktop if an
+agent used the app there last, and otherwise on your screen for a moment. A hidden app shows itself wherever its
+windows are as soon as it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an
+app opens joins it there at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
 private desktop, the app stays hidden instead, and goes back into hiding whenever it comes forward. A denied app stays
 closed.
 

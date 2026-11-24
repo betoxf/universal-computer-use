@@ -811,7 +811,8 @@ final class Watcher {
             }
         }
         if let name = command["open"] as? String {
-            open(name, deny: command["deny"] as? [String] ?? [], id: command["id"] ?? NSNull())
+            open(name, deny: command["deny"] as? [String] ?? [], id: command["id"] ?? NSNull(),
+                 desktopFirst: command["desktopFirst"] as? Bool ?? false)
         }
         if let names = command["show"] as? [String] { show(names, id: command["id"]) }
         if let names = command["park"] as? [String] {
@@ -833,7 +834,7 @@ final class Watcher {
 
     // MARK: quiet launches
 
-    func open(_ query: String, deny: [String], id: Any) {
+    func open(_ query: String, deny: [String], id: Any, desktopFirst: Bool = false) {
         var app = running(query)
         guard let url = app?.bundleURL ?? applicationURL(query) else {
             emit(["id": id, "state": app == nil ? "unknown" : "running"])  // the engine may still find it
@@ -852,15 +853,23 @@ final class Watcher {
             app = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).first
             known[key(query)] = app
         }
+        // Some apps show a window in spite of a hidden launch, where they last had one. For an app an agent used
+        // before, that is on the agent's desktop, where it shows the user nothing, if the desktop is there by then.
+        // Made after the app was open, as it used to be, the desktop came too late: the window, nearly as large as
+        // the screen, was on the user's screen for a quarter of a second, and again for a fifth.
+        func start(_ state: String, limit: Double) {
+            guard desktopFirst else { return launch(url, id: id, state: state, limit: limit) }
+            withDesktop { [self] _ in launch(url, id: id, state: state, limit: limit) }
+        }
         if let app {
             if app.activationPolicy == .regular, !Self.hasWindows(app) {
-                launch(url, id: id, state: "reopened", limit: 2)  // the engine needs a window to work on
+                start("reopened", limit: 2)  // the engine needs a window to work on
                 return
             }
             emit(["id": id, "state": "running", "active": app.isActive])
             return
         }
-        launch(url, id: id, state: "opened", limit: Self.noWindowLimit)
+        start("opened", limit: Self.noWindowLimit)
     }
 
     func launch(_ url: URL, id: Any, state: String, limit: Double) {

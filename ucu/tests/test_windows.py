@@ -85,6 +85,18 @@ class WatchTest(unittest.TestCase):
         self.assertEqual((proxy.commands("park")[0]["park"], proxy.commands("park")[0]["onlyHidden"]),
                          (["Closed App"], True))
 
+    def test_makes_the_desktop_before_it_opens_an_app_that_goes_there(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Closed App")
+        proxy.call("move_to_desktop", app="Closed Other")
+        proxy.chrome(op="open", url="https://a.test")
+        proxy.safari(op="open", url="https://a.test")  # its tab is in the user's window, on their screen
+        first = {command["open"]: command.get("desktopFirst") for command in reversed(proxy.commands("open"))}
+        self.assertEqual(first, {"Closed App": True, "Closed Other": True, "Google Chrome": True, "Safari": None})
+        # The helper answers every command a message holds, so an open that also read as another would get its answer.
+        for command in proxy.commands("open"):
+            self.assertEqual(set(command) - {"at", "id", "open", "deny", "desktopFirst"}, set())
+
     def test_keeps_an_app_it_opens_hidden_without_a_desktop(self):
         proxy = WatchingProxy(self)
         self.assertIn("Closed Stuck was closed, so ucu opened it hidden", proxy.notes(proxy.look("Closed Stuck"))[0])
