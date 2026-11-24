@@ -11,6 +11,8 @@ In an app whose name starts with "Typing" the user is typing whenever it is aske
 desktop, where the pointer alone is enough for a scroll, and the user's app stays in front.
 An app whose name starts with "Under" has a sheet over its window, which can't be the app's main window. One whose
 name starts with "Elsewhere" comes to the front with the user in another of its windows.
+In an app whose name starts with "Keys" the user presses a key once its first step is made. While $HOME/user-typing
+exists, the user is typing and doesn't pause.
 Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the
 other commands.
 """
@@ -26,6 +28,7 @@ OPEN_DELAY = 0.2  # opening an app takes a while, and the engine must not get th
 parked = set()
 lent = []  # the app that is in front for an agent's steps
 modes = {}  # how each app was last lent: "borrowed", "front" or "pointer"
+fronts = []  # each time the server asked who is in front since an app was lent
 opened = set()  # apps it opened, which keep it running after `rest`
 writing = threading.Lock()
 
@@ -82,6 +85,7 @@ def answer(command):
             state = "own"
         if state not in ("busy", "own"):
             lent.append(name)
+            fronts.clear()
         send({"id": command["id"], "state": state, "front": "Mail"})
     elif "giveBack" in command and "id" in command:
         took = bool(lent) and lent[-1].startswith("Took")  # the user clicked a window of it during the steps
@@ -92,7 +96,11 @@ def answer(command):
         under = name.startswith("Covered") or (name.startswith("Stacked") and modes.get(name) == "pointer")
         covered = {"top": 0} if under and "at" in command else {}  # another window is there
         elsewhere = name.startswith(("Left", "Parked")) or modes.get(name) == "pointer"  # the user's app is in front
-        send({"id": command["id"], "front": "Mail" if elsewhere else name, **covered})
+        fronts.append(command)  # a click at a place asks twice: for the step, then for the place
+        typed = {"typed": True} if name.startswith("Keys") and len(fronts) > 2 else {}
+        send({"id": command["id"], "front": "Mail" if elsewhere else name, **covered, **typed})
+    elif "quiet" in command:
+        send({"id": command["id"], "quiet": not os.path.exists(os.path.join(os.environ["HOME"], "user-typing"))})
     elif "atWork" in command:
         send({"id": command["id"], "atWork": command["atWork"].startswith("Typing")})
     elif "desktop" in command:

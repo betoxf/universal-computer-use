@@ -111,6 +111,10 @@ FRONT_TAKEN = "Another agent's steps have the front of the user's screen right n
 BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
 USER_BUSY = ("The user is working in {}, and these steps take their pointer, and may bring {} to the front. Do what "
              "can be done behind, try again in a while, or ask them.")
+USER_TYPED = ("The user started typing while {} was in front for your steps, so the rest of them were not made, and "
+              "their app is back. Try again when they pause.")
+USER_TYPING = ("The user is typing, and {} in front would take the keyboard from what they write, so it was not "
+               "brought to them. Try again in a moment, or say in the chat what you need.")
 LEFT_FRONT = ("{} is in front now, so the user has gone on with their own work: the rest of these steps, which need "
               "{} in front, were not made.")
 NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it there and give the user's app back: "
@@ -757,6 +761,7 @@ class BrowserWorkspace:
                 target = self.target(arguments)
                 if target["window_id"] != self.window:
                     raise RuntimeError("`show` brings your own window to the user. Theirs are where they left them.")
+                self.server.quiet(self.app)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.call({"op": "show_to_user", **target})
                 self.shared, self.shown = True, False
@@ -1014,6 +1019,7 @@ class SafariWorkspace(BrowserWorkspace):
                 page, _theirs = self.aim(arguments)
                 if page is None:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
+                self.server.quiet(self.app)
                 self.come_back(page)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.in_tab({"op": "show_tab"}, page, "tab_index" in arguments)
@@ -1695,6 +1701,7 @@ class Server:
 
     def run_tool(self, name, arguments):
         if arguments.get("activate"):
+            self.quiet(str(arguments.get("app") or ""))
             self.windows.send({"allow": str(arguments.get("app") or "")})
             with self.lock:
                 self.hidden_apps.pop(app_key(arguments.get("app") or ""), None)
@@ -2028,6 +2035,14 @@ class Server:
             raise ToolError(f"{app} couldn't come to the front for these steps.")
         return reply["state"]
 
+    def quiet(self, app):
+        """Before a window is brought to the user: wait for a pause in their typing, as a step that takes the
+        keyboard does, and refuse if none comes. A window that comes forward takes the keyboard with it."""
+        self.windows.start()
+        reply = self.windows.ask({"quiet": True, "wait": BORROW_WAIT}, BORROW_WAIT + 2)
+        if reply is not None and reply.get("quiet") is False:
+            raise ToolError(USER_TYPING.format(app))
+
     def give_back(self, app):
         reply = self.windows.ask({"giveBack": True}, 5) or {}
         if reply.get("taken"):  # the user came to it: it is on their screen now, and stays
@@ -2042,6 +2057,8 @@ class Server:
         asked = {"front": True, **({"at": [round(at[0]), round(at[1])]} if at else {})}
         reply = self.windows.ask(asked, 5) or {}
         front = reply.get("front")
+        if reply.get("typed"):
+            raise ToolError(USER_TYPED.format(app))
         if in_front and front and app_key(front) != app_key(app) and not self.same_app(front, app):
             raise ToolError(LEFT_FRONT.format(front, app))
         if at and number is not None and reply.get("top", number) != number:

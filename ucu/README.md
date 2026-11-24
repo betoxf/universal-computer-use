@@ -148,7 +148,10 @@ makes those steps with the pointer, and brings the app to the front where it mus
 behind, the agent passes `front: true`:
 
 - None of this happens while you work. It waits until you have done nothing for a moment (1.5 seconds without a key,
-  a click or a scroll), for up to 8 seconds, and then tells the agent you are busy.
+  a click or a scroll), for up to 8 seconds, and then tells the agent you are busy. An app that takes the keyboard
+  waits for a longer pause in your typing, 4 seconds without a key, because you type in bursts.
+- If you press a key while the app is in front for the agent's steps, the steps stop at the next one and your app
+  comes back. The agent's own keys go to its app alone, and don't count as yours.
 - A window stays where it is. One on the agent's desktop takes the pointer there, where you see none of it. For a
   scroll that is all, and your app keeps the keyboard. For a drag, or with `front: true`, its app is also the active
   one for the steps.
@@ -227,7 +230,8 @@ window when it is made or shown. Your window gets it back at once, so your typin
 When you ask to see what the agent is doing, or to be taken there, `focus_window` with `activate: true` brings that
 window from the private desktop to your screen and to the front, and the browser tools' `show` brings you the agent's
 window, which you both use from then on. Besides the steps that need an app in front (see `act` above), that is the
-only way UCU brings anything forward.
+only way UCU brings anything forward. A window comes with the keyboard, so neither happens while you type: UCU waits
+for 4 seconds without a key, for up to 8 seconds, and then tells the agent you are typing.
 
 When the agent needs you to do something in a window, such as to sign in or type a password, it brings the window to
 you the same way and says what it needs: `focus_window` with `ask`, or the browser tools' `show` with `text`. The window

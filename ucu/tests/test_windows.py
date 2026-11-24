@@ -195,6 +195,45 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(proxy.batched(), [])
         self.assertTrue(proxy.commands("giveBack"))
 
+    def test_stops_steps_in_front_at_the_next_one_when_the_user_starts_typing(self):
+        proxy = WatchingProxy(self)
+        proxy.look("Keys App")
+        steps = [{"do": "click", "xy": [10, 20]}, {"do": "click", "xy": [30, 40]}]
+        reply = proxy.call("act", app="Keys App", front=True, steps=steps)
+        self.assertIn("The user started typing while Keys App was in front for your steps", proxy.text(reply))
+        self.assertEqual(proxy.batched(), [{"command": "mouse-click", "args": {"xy": "110,220"}}])  # the first only
+        self.assertEqual(len(proxy.commands("giveBack")), 1)
+        self.assertEqual(set(proxy.commands("borrow")[0]), {"borrow", "window", "wait", "pointerOnly", "id", "at"})
+
+    def test_brings_no_window_to_a_user_who_is_typing(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "user-typing").touch()
+        reply = proxy.call("focus_window", app="Calculator", title="Calc", activate=True, ask="Type the code")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("The user is typing, and Calculator in front would take the keyboard", proxy.text(reply))
+        self.assertEqual(proxy.commands("allow") + proxy.commands("ask") + proxy.commands("args"), [])
+        (Path(proxy.home.name) / "user-typing").unlink()
+        reply = proxy.call("focus_window", app="Calculator", title="Calc", activate=True, ask="Type the code")
+        self.assertFalse(reply["result"]["isError"], proxy.text(reply))
+        asked = proxy.commands("quiet")
+        self.assertEqual([set(command) for command in asked], [{"quiet", "wait", "id", "at"}] * 2)
+        self.assertLess(asked[-1]["at"], proxy.commands("allow")[0]["at"])  # asked before anything comes forward
+        self.assertEqual(proxy.asks(), [("Type the code", "Calculator")])
+
+    def test_shows_no_page_to_a_user_who_is_typing(self):
+        for browser, shown in (("safari", "show_tab"), ("chrome", "show_to_user")):
+            proxy = WatchingProxy(self)
+            call = getattr(proxy, browser)
+            call(op="open", url="https://a.test/sign-in")
+            (Path(proxy.home.name) / "user-typing").touch()
+            reply = call(op="show", text="Sign in")
+            self.assertTrue(reply["isError"], browser)
+            self.assertIn("The user is typing", reply["content"][0]["text"])
+            self.assertEqual(proxy.browser_calls(browser, shown) + proxy.commands("ask"), [], browser)
+            (Path(proxy.home.name) / "user-typing").unlink()
+            self.assertFalse(call(op="show", text="Sign in").get("isError"), browser)
+            self.assertEqual(len(proxy.browser_calls(browser, shown)), 1, browser)
+
     def test_takes_only_the_pointer_for_a_scroll_in_a_window_on_the_agents_desktop(self):
         proxy = WatchingProxy(self)
         proxy.look("Parked App")

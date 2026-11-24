@@ -949,11 +949,25 @@ final class Watcher {
             borrow(name, window: command["window"] as? String ?? "", wait: command["wait"] as? Double ?? 8,
                    pointerOnly: command["pointerOnly"] as? Bool ?? false, id: id)
         }
+        if command["quiet"] != nil, let id = command["id"] {
+            // Before a window is brought to the user: whether they have stopped typing, waited for as a step that
+            // takes the keyboard waits. Six characters went to a window handed over two seconds into a pause.
+            let until = Date() + (command["wait"] as? Double ?? 0)
+            func check() {
+                if Self.secondsSince(.keyDown) >= Self.lendQuiet { return emit(["id": id, "quiet": true]) }
+                if Date() >= until { return emit(["id": id, "quiet": false]) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
+            }
+            check()
+        }
         if command["giveBack"] != nil { giveBack(id: command["id"]) }
         if command["front"] != nil, let id = command["id"] {
             if lent != nil { keepLending() }
+            if let was = lent, was.mode == "borrowed",
+               Self.secondsSince(.keyDown) < -was.started.timeIntervalSinceNow { lent?.userTyped = true }
             let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
             var reply: [String: Any] = ["id": id, "front": name]
+            if lent?.userTyped == true { reply["typed"] = true }  // the server stops here, and gives the front back
             if let at = command["at"] as? [Double], at.count == 2 {  // and which window a click at this place reaches
                 reply["top"] = Self.topWindow(at: CGPoint(x: at[0], y: at[1]))?.number ?? 0
             }
@@ -1021,9 +1035,16 @@ final class Watcher {
         var light: Bool { mode != "borrowed" }
         let started: Date
         var timer: Timer?, userTookIt = false, userActed = false
+        // A key pressed while the app is in front is the user's, typing on into a window that came over theirs: the
+        // agent's own keys go to its app's process alone, and the HID state this reads doesn't count them. The steps
+        // stop at the next one.
+        var userTyped = false
     }
 
-    static let lendIdle = 1.5, lendLimit = 20.0, lendSettle = 2.5, lendNudge = 0.3, lendStill = 0.15
+    // The keyboard goes with the front, and the user types in bursts: two characters went to a window that came
+    // forward two seconds into a pause of theirs. So an app takes the keyboard only after a longer pause in their
+    // typing than in the rest of what they do. Four seconds is twice that one pause, and no more than that.
+    static let lendIdle = 1.5, lendQuiet = 4.0, lendLimit = 20.0, lendSettle = 2.5, lendNudge = 0.3, lendStill = 0.15
     var lent: Lent?
     var userMonitor: Any?
 
@@ -1050,13 +1071,14 @@ final class Watcher {
         let until = Date() + wait
         func attempt() {
             if lent != nil { return emit(["id": id, "state": "lent", "front": lent?.app.localizedName ?? "?"]) }
+            // A scroll goes to the window under the pointer, in front or not. So for a window on an agent's desktop
+            // the pointer alone goes there, and the user's app keeps the keyboard.
+            let onDesktop = window.map { !app.isHidden && Self.isOnAgentDesktop($0) } ?? false
+            let mode = pointerOnly && onDesktop ? "pointer" : isTheirs() ? "front" : "borrowed"
+            let typing = mode == "borrowed" && Self.secondsSince(.keyDown) < Self.lendQuiet
             // Wherever the window is, the real pointer is about to move: never while the user types, clicks or
             // scrolls, least of all in that window.
-            if !Self.userIsActive(within: Self.lendIdle) {
-                // A scroll goes to the window under the pointer, in front or not. So for a window on an agent's
-                // desktop the pointer alone goes there, and the user's app keeps the keyboard.
-                let onDesktop = window.map { !app.isHidden && Self.isOnAgentDesktop($0) } ?? false
-                let mode = pointerOnly && onDesktop ? "pointer" : isTheirs() ? "front" : "borrowed"
+            if !Self.userIsActive(within: Self.lendIdle), !typing {
                 // A browser the chat works in with a window of its own has the user's windows too. Bringing it to
                 // the front for a moment brings those over the user's app, and takes their keyboard to a window
                 // they can't see, which ucu then gives back to theirs in the middle of the steps. So it isn't done.
