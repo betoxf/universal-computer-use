@@ -85,64 +85,6 @@ class WatchTest(unittest.TestCase):
         self.assertEqual((proxy.commands("park")[0]["park"], proxy.commands("park")[0]["onlyHidden"]),
                          (["Closed App"], True))
 
-    def test_tells_the_agent_where_the_user_is_when_that_is_news(self):
-        proxy = WatchingProxy(self)
-        user = Path(proxy.home.name) / "user.json"
-
-        def told():
-            return [note for note in proxy.notes(proxy.look("Calculator")) if "The user is in" in note]
-
-        self.assertEqual(told(), [])  # a helper that knows nothing says nothing
-        user.write_text(json.dumps({"app": "Mail", "doing": "typing", "fullscreen": False}))
-        self.assertEqual(told(), ["[ucu: The user is in Mail, typing.]"])
-        user.write_text(json.dumps({"app": "Mail", "doing": "idle 40 s", "fullscreen": False}))
-        self.assertEqual(told(), [])  # the same app: nothing new
-        user.write_text(json.dumps({"app": "Safari", "doing": "idle 12 s", "fullscreen": True}))
-        self.assertEqual(told(), ["[ucu: The user is in Safari in full screen, idle 12 s.]"])
-        self.assertEqual(proxy.commands("situation")[0].keys() - {"at"}, {"situation", "id"})
-
-    def test_asks_a_helper_that_cannot_say_where_the_user_is_only_once(self):
-        proxy = WatchingProxy(self)
-        (Path(proxy.home.name) / "old-helper").write_text("")
-        proxy.look("Calculator")
-        started = time.monotonic()
-        proxy.look("Calculator")
-        proxy.call("list_windows", app="Calculator")
-        self.assertLess(time.monotonic() - started, 0.9)  # each question would have waited a second
-        self.assertEqual(len(proxy.commands("situation")), 1)
-
-    def test_lists_windows_with_where_the_user_is_and_what_is_on_other_spaces(self):
-        proxy = WatchingProxy(self)
-        proxy.policy(deny=["Notes", "Mail"])
-        (Path(proxy.home.name) / "user.json").write_text(json.dumps({
-            "app": "Mail", "doing": "typing", "line": "User: in Mail, typing. Spaces: 1 desktop, full screen: Maps.",
-            "elsewhere": ['Maps: "Route" fullscreen other-space']}))
-        listed = proxy.text(proxy.call("list_windows", app="Maps")).splitlines()
-        self.assertEqual(listed[0], "User: in Mail, typing. Spaces: 1 desktop, full screen: Maps.")
-        self.assertEqual(listed[1], "args: list Maps")  # what the helper's own list gave
-        self.assertEqual(listed[2:4], ["On Spaces the user isn't looking at:", 'Maps: "Route" fullscreen other-space'])
-        asked = [command for command in proxy.commands("situation") if "detail" in command][0]
-        self.assertEqual((asked["detail"], asked["deny"]), ("Maps", ["Notes", "Mail"]))
-        self.assertEqual(asked.keys() - {"at"}, {"situation", "detail", "deny", "id"})
-        self.assertNotIn("user-screen", "".join(listed))  # the helper said nothing of the screens
-        # A deny list that can't be read names no window: the helper then takes every app for denied.
-        (Path(proxy.home.name) / "Library/Application Support/ucu/policy.json").write_text("not a policy")
-        proxy.call("list_windows")
-        asked = [command for command in proxy.commands("situation") if "detail" in command][-1]
-        self.assertEqual((asked["detail"], "deny" in asked), ("*", False))
-
-    def test_says_where_each_listed_window_is_for_the_user(self):
-        proxy = WatchingProxy(self)
-        proxy.policy(deny=[])
-        (Path(proxy.home.name) / "user.json").write_text(json.dumps({
-            "app": "Mail", "doing": "typing", "screens": [[0, 0, 1512, 982, False], [-1920, -1200, 1920, 1200, True]]}))
-        listed = proxy.texts(proxy.call("list_windows", app="Listed"))[0].splitlines()  # a note on the user follows
-        self.assertEqual(listed, ['Listed (com.example.listed, pid 1)',
-                                  '[0] "One \\"quoted\\" 1,2 3x4" main 10,40 300x200 user-screen',
-                                  '[1] "Two" minimized 20,50 300x200',
-                                  '[2] "Three" dialog fullscreen -1900,-1100 400x300 private-desktop',
-                                  '[3] "Four" 9000,9000 200x100 off-screen'])
-
     def test_keeps_an_app_it_opens_hidden_without_a_desktop(self):
         proxy = WatchingProxy(self)
         self.assertIn("Closed Stuck was closed, so ucu opened it hidden", proxy.notes(proxy.look("Closed Stuck"))[0])
@@ -225,6 +167,64 @@ class WatchTest(unittest.TestCase):
         proxy = WatchingProxy(self)
         self.assertIn("private desktop", proxy.text(proxy.call("move_to_desktop", app="Calculator")))
         self.assertEqual(proxy.commands("park")[0]["park"], ["Calculator"])
+
+    def test_tells_the_agent_where_the_user_is_when_that_is_news(self):
+        proxy = WatchingProxy(self)
+        user = Path(proxy.home.name) / "user.json"
+
+        def told():
+            return [note for note in proxy.notes(proxy.look("Calculator")) if "The user is in" in note]
+
+        self.assertEqual(told(), [])  # a helper that knows nothing says nothing
+        user.write_text(json.dumps({"app": "Mail", "doing": "typing", "fullscreen": False}))
+        self.assertEqual(told(), ["[ucu: The user is in Mail, typing.]"])
+        user.write_text(json.dumps({"app": "Mail", "doing": "idle 40 s", "fullscreen": False}))
+        self.assertEqual(told(), [])  # the same app: nothing new
+        user.write_text(json.dumps({"app": "Safari", "doing": "idle 12 s", "fullscreen": True}))
+        self.assertEqual(told(), ["[ucu: The user is in Safari in full screen, idle 12 s.]"])
+        self.assertEqual(proxy.commands("situation")[0].keys() - {"at"}, {"situation", "id"})
+
+    def test_asks_a_helper_that_cannot_say_where_the_user_is_only_once(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "old-helper").write_text("")
+        proxy.look("Calculator")
+        started = time.monotonic()
+        proxy.look("Calculator")
+        proxy.call("list_windows", app="Calculator")
+        self.assertLess(time.monotonic() - started, 0.9)  # each question would have waited a second
+        self.assertEqual(len(proxy.commands("situation")), 1)
+
+    def test_lists_windows_with_where_the_user_is_and_what_is_on_other_spaces(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=["Notes", "Mail"])
+        (Path(proxy.home.name) / "user.json").write_text(json.dumps({
+            "app": "Mail", "doing": "typing", "line": "User: in Mail, typing. Spaces: 1 desktop, full screen: Maps.",
+            "elsewhere": ['Maps: "Route" fullscreen other-space']}))
+        listed = proxy.text(proxy.call("list_windows", app="Maps")).splitlines()
+        self.assertEqual(listed[0], "User: in Mail, typing. Spaces: 1 desktop, full screen: Maps.")
+        self.assertEqual(listed[1], "args: list Maps")  # what the helper's own list gave
+        self.assertEqual(listed[2:4], ["On Spaces the user isn't looking at:", 'Maps: "Route" fullscreen other-space'])
+        asked = [command for command in proxy.commands("situation") if "detail" in command][0]
+        self.assertEqual((asked["detail"], asked["deny"]), ("Maps", ["Notes", "Mail"]))
+        self.assertEqual(asked.keys() - {"at"}, {"situation", "detail", "deny", "id"})
+        self.assertNotIn("user-screen", "".join(listed))  # the helper said nothing of the screens
+        # A deny list that can't be read names no window: the helper then takes every app for denied.
+        (Path(proxy.home.name) / "Library/Application Support/ucu/policy.json").write_text("not a policy")
+        proxy.call("list_windows")
+        asked = [command for command in proxy.commands("situation") if "detail" in command][-1]
+        self.assertEqual((asked["detail"], "deny" in asked), ("*", False))
+
+    def test_says_where_each_listed_window_is_for_the_user(self):
+        proxy = WatchingProxy(self)
+        proxy.policy(deny=[])
+        (Path(proxy.home.name) / "user.json").write_text(json.dumps({
+            "app": "Mail", "doing": "typing", "screens": [[0, 0, 1512, 982, False], [-1920, -1200, 1920, 1200, True]]}))
+        listed = proxy.texts(proxy.call("list_windows", app="Listed"))[0].splitlines()  # a note on the user follows
+        self.assertEqual(listed, ['Listed (com.example.listed, pid 1)',
+                                  '[0] "One \\"quoted\\" 1,2 3x4" main 10,40 300x200 user-screen',
+                                  '[1] "Two" minimized 20,50 300x200',
+                                  '[2] "Three" dialog fullscreen -1900,-1100 400x300 private-desktop',
+                                  '[3] "Four" 9000,9000 200x100 off-screen'])
 
     def test_tells_the_agent_when_a_running_app_got_a_window(self):
         proxy = WatchingProxy(self)
