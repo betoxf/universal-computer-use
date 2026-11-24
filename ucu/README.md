@@ -122,7 +122,11 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
 - `look {app, window?, find?, full?, screenshot?}`: an app's window as numbered text, then only what changed, up to 300
   lines. `find` shows only the lines with a text, under what they are inside of, and `full` the whole tree.
 - `act {app, window?, steps}`: steps in order, then what changed. It stops at the first step that fails.
-- `list_windows {app?}`: the windows of an app, or of every app, and which is the main window.
+- `list_windows {app?}`: the windows of an app, or of every app, and which is the main window. It begins with a line
+  about you (see "What an agent is told about you"), and says of each window whether it is on your screen
+  (`user-screen`), on an agent's desktop (`private-desktop`) or on no screen (`off-screen`). Windows on a Space you
+  aren't looking at, such as an app in full screen, follow the list as `other-space`: the app's own list leaves those
+  out.
 - `focus_window {app, title, unfullscreen?, activate?}`: makes a window the main window. With `activate: true`, the
   window comes to your screen and the front, only when you ask to see it.
 - `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
@@ -205,6 +209,22 @@ window, which you both use from then on. That is the only way UCU brings anythin
 
 Every time an app comes forward during agent work, `~/Library/Logs/ucu/focus.log` says what UCU did, naming the apps but
 no window titles, and `ucu doctor` sums up the last day.
+
+### What an agent is told about you
+
+So that an agent can choose when and where to work, UCU tells it where you are:
+
+- `list_windows` begins with a line such as `User: in Mail, window "Inbox", typing. Spaces: 2 desktops, full screen:
+  Safari; showing a desktop.` It names the app and the window you are in, says whether you are typing, active, or how
+  long you have been idle, and describes your Spaces: how many desktops, which apps are in full screen, and which you
+  are looking at.
+- When you move to another app, or into or out of full screen, the agent's next result ends with a note such as
+  `[ucu: The user is in Safari in full screen, idle 12 s.]` That note names the app only.
+
+It is a picture of this moment: UCU keeps no history of what you did. A window's title is left out for an app on the
+deny list, and what is in your windows is never read for this. These lines are part of the tool results, so they go to
+whichever model drives UCU. Spaces come from the window server through calls macOS doesn't document. Where those are
+missing, nothing is said of Spaces. The title of a window on another Space needs Screen Recording permission.
 
 ### The private desktop
 

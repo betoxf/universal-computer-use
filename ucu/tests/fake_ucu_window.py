@@ -60,6 +60,12 @@ def answer(command):
         fresh = not set(command["park"]) <= parked
         parked.update(command["park"])
         send({"id": command["id"], "state": "no desktop" if stuck else "parked", "moved": fresh})
+    elif "situation" in command:  # where the user is: what a test wrote in ~/user.json, or nothing known
+        said = os.path.join(os.environ["HOME"], "user.json")
+        known = json.load(open(said)) if os.path.exists(said) else {}
+        if "detail" not in command:  # the line and the windows elsewhere go with a list only
+            known = {key: value for key, value in known.items() if key not in ("line", "elsewhere")}
+        send({"id": command["id"], **known})
     elif "desktop" in command:
         moved = os.path.exists(os.path.join(os.environ["HOME"], "desktop-moved"))  # another chat's desktop left
         send({"id": command["id"], "bounds": [-3840 if moved else -1920, -2400 if moved else -1200, 1920, 1200]})
@@ -73,6 +79,11 @@ def log(entry):
 def main():
     if sys.argv[1:] != ["watch"]:
         log({"args": sys.argv[1:]})
+        if sys.argv[1:] == ["list", "Listed"]:  # as the real one lists an app's windows
+            print('Listed (com.example.listed, pid 1)\n[0] "One \\"quoted\\" 1,2 3x4" main 10,40 300x200\n'
+                  '[1] "Two" minimized 20,50 300x200\n[2] "Three" dialog fullscreen -1900,-1100 400x300\n'
+                  '[3] "Four" 9000,9000 200x100')
+            sys.exit(0)
         print(f"args: {' '.join(sys.argv[1:])}")
         sys.exit(2 if "Missing" in sys.argv else 0)
     threading.Thread(target=relay_reports, daemon=True).start()
