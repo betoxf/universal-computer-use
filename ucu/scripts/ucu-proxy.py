@@ -1493,6 +1493,7 @@ class Server:
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
         self.user_seen = None               # the app the agent was last told the user is in, and whether in full screen
+        self.silent_helper = None           # a helper that didn't say where the user is, and isn't asked again
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
         self.parked_apps = set()            # those of them on the agent's desktop, as app_key names
@@ -1580,7 +1581,7 @@ class Server:
         if finished:
             self.windows.send({"busy": False})
         notes = self.windows.take_notes()
-        where = self.windows.ask({"situation": True}, SITUATION_TIMEOUT) or {}
+        where = self.situation()
         if where.get("app") and (where["app"], where.get("fullscreen")) != self.user_seen:
             self.user_seen = (where["app"], where.get("fullscreen"))
             notes.append(USER_NOTE.format(where["app"], " in full screen" if where.get("fullscreen") else "",
@@ -1617,15 +1618,27 @@ class Server:
             raise ToolError(text)
         return [{"type": "text", "text": text}]
 
+    def situation(self, **more):
+        """Ask the helper where the user is. One built before it knew the question never answers, such as the one a
+        chat gets that starts while an update is still building the new one. It is asked once, not after every call:
+        each time would cost the wait."""
+        helper = self.windows.process
+        if helper is None or helper is self.silent_helper:
+            return {}
+        where = self.windows.ask({"situation": True, **more}, SITUATION_TIMEOUT)
+        if where is None:
+            self.silent_helper = helper
+        return where or {}
+
     def with_the_user(self, listed, app):
         """A list of windows, with where the user is before it and, after it, the windows on Spaces they aren't
         looking at, which an app's own list leaves out. The window they are in is named unless its app is denied,
         and a deny list that can't be read names none."""
-        request = {"situation": True, "detail": app}
+        request = {"detail": app}
         denied = self.denied_apps()
         if denied is not None:
             request["deny"] = denied
-        where = self.windows.ask(request, SITUATION_TIMEOUT) or {}
+        where = self.situation(**request)
         elsewhere, screens = where.get("elsewhere") or [], where.get("screens") or []
         lines = [placed(line, screens) for line in listed.splitlines()] if screens else [listed]
         return "\n".join([*([where["line"]] if where.get("line") else []), *lines,

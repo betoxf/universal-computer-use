@@ -61,6 +61,8 @@ def answer(command):
         parked.update(command["park"])
         send({"id": command["id"], "state": "no desktop" if stuck else "parked", "moved": fresh})
     elif "situation" in command:  # where the user is: what a test wrote in ~/user.json, or nothing known
+        if os.path.exists(os.path.join(os.environ["HOME"], "old-helper")):
+            return  # one built before this question existed says nothing
         said = os.path.join(os.environ["HOME"], "user.json")
         known = json.load(open(said)) if os.path.exists(said) else {}
         if "detail" not in command:  # the line and the windows elsewhere go with a list only

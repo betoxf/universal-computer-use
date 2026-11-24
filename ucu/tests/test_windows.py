@@ -101,6 +101,16 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(told(), ["[ucu: The user is in Safari in full screen, idle 12 s.]"])
         self.assertEqual(proxy.commands("situation")[0].keys() - {"at"}, {"situation", "id"})
 
+    def test_asks_a_helper_that_cannot_say_where_the_user_is_only_once(self):
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "old-helper").write_text("")
+        proxy.look("Calculator")
+        started = time.monotonic()
+        proxy.look("Calculator")
+        proxy.call("list_windows", app="Calculator")
+        self.assertLess(time.monotonic() - started, 0.9)  # each question would have waited a second
+        self.assertEqual(len(proxy.commands("situation")), 1)
+
     def test_lists_windows_with_where_the_user_is_and_what_is_on_other_spaces(self):
         proxy = WatchingProxy(self)
         proxy.policy(deny=["Notes", "Mail"])
