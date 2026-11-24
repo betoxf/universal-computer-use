@@ -283,6 +283,15 @@ class WatchTest(unittest.TestCase):
         self.assertIn("The user sees what you ask of them on the window", proxy.text(reply))
         self.assertEqual(proxy.asks(), [("Answer it", "Under App")])
 
+    def test_says_so_when_the_user_ends_up_in_another_window_of_the_app(self):
+        proxy = WatchingProxy(self)
+        reply = proxy.call("focus_window", app="Elsewhere App", title="Connecting", activate=True, ask="Answer it")
+        said = proxy.text(reply)
+        self.assertFalse(reply["result"]["isError"], said)
+        self.assertIn("in another of its windows", said)
+        self.assertNotIn("The user sees what you ask of them on the window", said)
+        self.assertEqual(proxy.asks(), [("Answer it", "Elsewhere App")])
+
     def test_fails_to_make_a_window_under_a_dialog_the_main_one_behind(self):
         proxy = WatchingProxy(self)
         reply = proxy.call("focus_window", app="Under App", title="Connecting")

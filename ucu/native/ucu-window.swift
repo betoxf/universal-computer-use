@@ -1937,10 +1937,10 @@ case "focus", "unfullscreen":
     var main = isMain(window, of: element)
     // Brought to the user, a window is in front of them once its app is in front and it is in their sight, whether
     // or not it is the app's main window, so that alone is no failure. The app is asked itself whether it is in
-    // front, and given time: the server moves its windows to the user's screen meanwhile, and the app came forward
-    // 1.2 seconds after the call began. It can come forward with another of its windows as the one the user is in,
-    // over the one asked for, so that one is raised again once the app is there.
-    var shown = false
+    // front, and given a moment: the server moves its windows to the user's screen meanwhile. It can come forward
+    // with another of its windows as the one the user is in, over the one asked for, so that one is raised again
+    // once the app is there. If they still aren't in it, the result says so: a label shows only once they are.
+    var shown = false, elsewhere = false
     if command == "focus", !main, args.contains("--activate") {
         func arrived() -> Bool { flag(element, kAXFrontmostAttribute) && !Watcher.isOutOfSight(window) }
         func userIsInIt() -> Bool {
@@ -1959,10 +1959,13 @@ case "focus", "unfullscreen":
             }
             main = isMain(window, of: element)
         }
+        let current = (attribute(element, kAXFocusedWindowAttribute) as AXUIElement?)
+            ?? attribute(element, kAXMainWindowAttribute)
+        elsewhere = shown && !AskLabel.belongs(current, to: window)
     }
     let sheet = args.contains("--activate") && AskLabel.hasSheet(window)  // which the user must answer first
     print("\"\(title(window))\" main=\(main) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))"
-          + (sheet ? " under=sheet" : ""))
+          + (sheet ? " under=sheet" : "") + (elsewhere ? " user=elsewhere" : ""))
     exit(command == "focus" && !main && !shown ? 4 : 0)
 case "press":
     guard args.count >= 3 else { fail("usage: ucu-window press <app> <shortcut>") }
