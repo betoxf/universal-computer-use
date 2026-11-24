@@ -1,0 +1,37 @@
+{
+  "manifest_version": "0.3",
+  "name": "ucu",
+  "display_name": "UCU: Universal Computer Use",
+  "version": "0.1.0",
+  "description": "Let AI agents use your Mac's apps in the background, without touching your mouse or taking focus.",
+  "long_description": "UCU is a local MCP server that lets agents read and operate native Mac apps through the accessibility tree. Apps it drives stay on a private desktop and can't take your focus, the `safari` and `chrome` tools work in the agent's own window, and every app is approved except the ones you deny in ~/Library/Application Support/ucu/policy.json. It runs on agent-desktop from Vercel Labs.\n\nThis bundle is for Apple silicon Macs. The app that runs your MCP client needs Accessibility permission, and Screen Recording for screenshots.",
+  "author": {
+    "name": "Humberto Prado",
+    "url": "https://github.com/betoxf"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/betoxf/universal-computer-use"
+  },
+  "homepage": "https://github.com/betoxf/universal-computer-use",
+  "documentation": "https://github.com/betoxf/universal-computer-use/blob/main/ucu/README.md",
+  "support": "https://github.com/betoxf/universal-computer-use/issues",
+  "license": "Apache-2.0",
+  "keywords": ["macos", "computer-use", "accessibility", "automation", "desktop"],
+  "server": {
+    "type": "python",
+    "entry_point": "server/launch.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["-I", "${__dirname}/server/launch.py"],
+      "env": {}
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": {
+      "python": ">=3.9"
+    }
+  }
+}
