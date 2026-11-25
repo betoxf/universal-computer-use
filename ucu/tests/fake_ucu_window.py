@@ -73,6 +73,14 @@ def answer(command):
         fresh = not set(command["park"]) <= parked
         parked.update(command["park"])
         send({"id": command["id"], "state": "no desktop" if stuck else "parked", "moved": fresh})
+    elif "situation" in command:  # where the user is: what a test wrote in ~/user.json, or nothing known
+        if os.path.exists(os.path.join(os.environ["HOME"], "old-helper")):
+            return  # one built before this question existed says nothing
+        said = os.path.join(os.environ["HOME"], "user.json")
+        known = json.load(open(said)) if os.path.exists(said) else {}
+        if "detail" not in command:  # the line and the windows elsewhere go with a list only
+            known = {key: value for key, value in known.items() if key not in ("line", "elsewhere")}
+        send({"id": command["id"], **known})
     elif "borrow" in command:
         name = command["borrow"]
         state = "busy" if name.startswith("Busy") else "front" if name.startswith("Front") else "borrowed"
@@ -116,6 +124,11 @@ def log(entry):
 def main():
     if sys.argv[1:] != ["watch"]:
         log({"args": sys.argv[1:]})
+        if sys.argv[1:] == ["list", "Listed"]:  # as the real one lists an app's windows
+            print('Listed (com.example.listed, pid 1)\n[0] "One \\"quoted\\" 1,2 3x4" main 10,40 300x200\n'
+                  '[1] "Two" minimized 20,50 300x200\n[2] "Three" dialog fullscreen -1900,-1100 400x300\n'
+                  '[3] "Four" 9000,9000 200x100')
+            sys.exit(0)
         if sys.argv[1] == "focus" and sys.argv[2].startswith(("Under", "Elsewhere")):
             token = "under=sheet" if sys.argv[2].startswith("Under") else "user=elsewhere"
             print(f'"{sys.argv[3]}" main=false fullscreen=false frame=10,20 300x200 {token}')

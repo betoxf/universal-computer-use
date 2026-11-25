@@ -122,7 +122,11 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
 - `look {app, window?, find?, full?, screenshot?}`: an app's window as numbered text, then only what changed, up to 300
   lines. `find` shows only the lines with a text, under what they are inside of, and `full` the whole tree.
 - `act {app, window?, steps, front?}`: steps in order, then what changed. It stops at the first step that fails.
-- `list_windows {app?}`: the windows of an app, or of every app, and which is the main window.
+- `list_windows {app?}`: the windows of an app, or of every app, and which is the main window. It begins with a line
+  about you (see "What an agent is told about you"), and says of each window whether it is on your screen
+  (`user-screen`), on an agent's desktop (`private-desktop`) or on no screen (`off-screen`). Windows on a Space you
+  aren't looking at, such as an app in full screen, follow the list as `other-space`: the app's own list leaves those
+  out.
 - `focus_window {app, title, unfullscreen?, activate?, ask?}`: makes a window the main window. With `activate: true`,
   the window comes to your screen and the front, when you ask to see it or have to do something in it. `ask` says on
   the window what that is.
@@ -200,10 +204,12 @@ The server sends the usage rules in its MCP `instructions`, so clients get them 
 
 ### Staying out of your way
 
-When an agent uses a closed app, UCU opens it on the agent's private desktop, a screen you never see. Its Dock icon
-shows it is running, and nothing appears on your screens. A hidden app shows itself wherever its windows are as soon as
-it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an app opens joins it there
-at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
+When an agent uses a closed app, UCU makes the agent's private desktop, a screen you never see, and opens the app
+hidden. Its windows go to that desktop, and its Dock icon shows it is running. Most apps show nothing on your screens
+meanwhile. Some show a window in spite of being opened hidden, where they last had one: on the private desktop if an
+agent used the app there last, and otherwise on your screen for a moment. A hidden app shows itself wherever its
+windows are as soon as it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an
+app opens joins it there at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
 private desktop, the app stays hidden instead, and goes back into hiding whenever it comes forward. A denied app stays
 closed.
 
@@ -212,13 +218,14 @@ app's menu, which works even on a hidden app. The usage rules tell agents to bri
 see it or be taken there, never to make an action work, and to leave your clipboard alone.
 
 Apps still come forward by themselves, such as Chrome when it opens a window or an extension's popup. UCU puts your app
-back at once, usually within a few hundredths of a second, and tells the agent: for an app it opened, whenever that
-happens while the chat runs; for an app you use too, while the chat works on it and for 10 seconds after. When the
-agent's own step is what brings it forward, such as making its Chrome window, that always happens, unless you clicked a
-window of that app just then. Otherwise UCU leaves the app in front if you clicked, pressed a modifier key, or hold
-Return just before, or if your app is no longer in sight, because you may have switched apps or Spaces yourself. Typing
-in your app doesn't count, since that is when a stolen focus hurts most. A new app that starts during a call is held
-back too, unless you did anything since just before it started.
+back, a tenth or two of a second later when the app came forward as it opened, and tells the agent: for an app it
+opened, whenever that happens while the chat runs; for an app you use too, while the chat works on it and for 10
+seconds after. When the agent's own step is what brings it forward, such as making its Chrome window, that always
+happens, unless you clicked a window of that app just then. Otherwise UCU leaves the app in front if you clicked,
+pressed a modifier key, or hold Return just before, or if your app is no longer in sight, because you may have switched
+apps or Spaces yourself. Typing in your app doesn't count, since that is when a stolen focus hurts most. An app UCU
+itself is opening is held back whatever you are doing, unless you click its Dock icon. Any other new app that starts
+during a call is held back too, unless you did anything since just before it started.
 
 Safari and Chrome are yours while an agent works in them, because it works in tabs or a window of its own. When no step of the
 agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a
@@ -249,6 +256,22 @@ then carries a label in the chat's color, "Waiting for you: Sign in", with a Don
 
 Every time an app comes forward during agent work, `~/Library/Logs/ucu/focus.log` says what UCU did, naming the apps but
 no window titles, and `ucu doctor` sums up the last day.
+
+### What an agent is told about you
+
+So that an agent can choose when and where to work, UCU tells it where you are:
+
+- `list_windows` begins with a line such as `User: in Mail, window "Inbox", typing. Spaces: 2 desktops, full screen:
+  Safari; showing a desktop.` It names the app and the window you are in, says whether you are typing, active, or how
+  long you have been idle, and describes your Spaces: how many desktops, which apps are in full screen, and which you
+  are looking at.
+- When you move to another app, or into or out of full screen, the agent's next result ends with a note such as
+  `[ucu: The user is in Safari in full screen, idle 12 s.]` That note names the app only.
+
+It is a picture of this moment: UCU keeps no history of what you did. A window's title is left out for an app on the
+deny list, and what is in your windows is never read for this. These lines are part of the tool results, so they go to
+whichever model drives UCU. Spaces come from the window server through calls macOS doesn't document. Where those are
+missing, nothing is said of Spaces. The title of a window on another Space needs Screen Recording permission.
 
 ### The private desktop
 
