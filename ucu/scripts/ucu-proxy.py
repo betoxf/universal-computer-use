@@ -99,6 +99,7 @@ ALERT_LINE = re.compile(r"actionID 4096, inClientPID \d+\((.+?)\)")  # 4096 is t
 ALERT_LATE = 1  # seconds after a call in which a sound still belongs to it
 OPEN_TIMEOUT, SHOW_TIMEOUT = 50, 3  # seconds; the helper gives up on an app before OPEN_TIMEOUT
 PARK_TIMEOUT, SHOT_TIMEOUT = 6, 15
+SITUATION_TIMEOUT = 1  # the helper answers from what it already knows
 SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
@@ -124,6 +125,7 @@ BROWSER_NOTE = ("[ucu: The user is working in {}, and this acts on the window th
 OWN_BROWSER = "Your own {} window works out of the user's sight already: use the `{}` tool."
 SHARED_NOTE = ("[ucu: Another agent ({}) is using {}. Two agents on one app undo each other's work: wait for it, or "
                "ask the user.]")
+USER_NOTE = "[ucu: The user is in {}{}, {}.]"
 FOCUS_NOTE = ("[ucu: {} came to the front during your actions, so ucu put {} back: the user keeps their focus. Check "
               "that the app did what you meant.]")
 WINDOW_FOCUS_NOTE = ("[ucu: {} gave one of your windows the user's keyboard, so ucu gave it back to their window. "
@@ -295,6 +297,23 @@ def run_window_tool(name, arguments):
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"ucu-window could not run ({error}); `ucu install` builds it", True
     return (result.stdout + result.stderr).strip(), result.returncode != 0
+
+
+LISTED_WINDOW = re.compile(r'\[\d+\] ".*" (?:[a-z]+ )*(-?\d+),(-?\d+) (\d+)x(\d+)')
+
+
+def placed(line, screens):
+    """A line of `ucu-window list` for a window, with where that window is for the user: on a screen of theirs, on an
+    agent's desktop, or on none. Its title bar says which, as in ucu-window. A minimized window is in the Dock."""
+    found = LISTED_WINDOW.fullmatch(line)
+    if not found or " minimized " in line[line.rindex('"'):]:
+        return line
+    x, y, width, height = map(int, found.groups())
+    across, down = x + width / 2, y + min(height / 2, 20)
+    for left, top, wide, high, agents in screens:
+        if left <= across < left + wide and top <= down < top + high:
+            return line + (" private-desktop" if agents else " user-screen")
+    return line + " off-screen"
 
 
 def working_folder():
@@ -1473,6 +1492,8 @@ class Server:
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
+        self.user_seen = None               # the app the agent was last told the user is in, and whether in full screen
+        self.silent_helper = None           # a helper that didn't say where the user is, and isn't asked again
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
         self.parked_apps = set()            # those of them on the agent's desktop, as app_key names
@@ -1560,6 +1581,11 @@ class Server:
         if finished:
             self.windows.send({"busy": False})
         notes = self.windows.take_notes()
+        where = self.situation()
+        if where.get("app") and (where["app"], where.get("fullscreen")) != self.user_seen:
+            self.user_seen = (where["app"], where.get("fullscreen"))
+            notes.append(USER_NOTE.format(where["app"], " in full screen" if where.get("fullscreen") else "",
+                                          where.get("doing") or "doing something"))
         if names:
             apps = [name if times == 1 else f"{name} ({times} times)"
                     for name, times in collections.Counter(names).items()]
@@ -1586,9 +1612,37 @@ class Server:
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
         else:
             text, failed = run_window_tool(name, arguments)
+            if name == "list_windows" and not failed:
+                text = self.with_the_user(text, str(arguments.get("app") or "*"))
         if failed:
             raise ToolError(text)
         return [{"type": "text", "text": text}]
+
+    def situation(self, **more):
+        """Ask the helper where the user is. One built before it knew the question never answers, such as the one a
+        chat gets that starts while an update is still building the new one. It is asked once, not after every call:
+        each time would cost the wait."""
+        helper = self.windows.process
+        if helper is None or helper is self.silent_helper:
+            return {}
+        where = self.windows.ask({"situation": True, **more}, SITUATION_TIMEOUT)
+        if where is None:
+            self.silent_helper = helper
+        return where or {}
+
+    def with_the_user(self, listed, app):
+        """A list of windows, with where the user is before it and, after it, the windows on Spaces they aren't
+        looking at, which an app's own list leaves out. The window they are in is named unless its app is denied,
+        and a deny list that can't be read names none."""
+        request = {"detail": app}
+        denied = self.denied_apps()
+        if denied is not None:
+            request["deny"] = denied
+        where = self.situation(**request)
+        elsewhere, screens = where.get("elsewhere") or [], where.get("screens") or []
+        lines = [placed(line, screens) for line in listed.splitlines()] if screens else [listed]
+        return "\n".join([*([where["line"]] if where.get("line") else []), *lines,
+                          *(["On Spaces the user isn't looking at:", *elsewhere] if elsewhere else [])])
 
     # --- apps -------------------------------------------------------------
     @staticmethod

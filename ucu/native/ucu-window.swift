@@ -114,6 +114,155 @@ func printWindows(of app: NSRunningApplication, element: AXUIElement, list: [AXU
     }
 }
 
+// MARK: where the user is
+
+// What the window server knows of Spaces. These calls aren't public, so each is looked up, and where one is missing
+// nothing is said of Spaces.
+enum Spaces {
+    private static func found<T>(_ name: String, as type: T.Type) -> T? {
+        dlsym(UnsafeMutableRawPointer(bitPattern: -2), name).map { unsafeBitCast($0, to: type) }
+    }
+    private static let connection = found("CGSMainConnectionID", as: (@convention(c) () -> Int32).self)
+    private static let managed = found("CGSCopyManagedDisplaySpaces",
+                                       as: (@convention(c) (Int32) -> Unmanaged<CFArray>?).self)
+    private static let forWindows = found("CGSCopySpacesForWindows",
+                                          as: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
+
+    struct Layout {
+        var desktops = 0
+        var fullScreen = [Int]()  // the user's full-screen Spaces, in their order
+        var showing = Set<Int>()  // the Space each of the user's displays shows
+        var all = Set<Int>()
+    }
+
+    // The Spaces of the user's displays. An agent's desktop has Spaces of its own, which aren't theirs.
+    static func layout() -> Layout? {
+        guard let connection, let managed,
+              let displays = managed(connection())?.takeRetainedValue() as? [[String: Any]] else { return nil }
+        let agents = agentDisplays()
+        var layout = Layout()
+        for display in displays where !agents.contains(display["Display Identifier"] as? String ?? "") {
+            if let now = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int {
+                layout.showing.insert(now)
+            }
+            for space in display["Spaces"] as? [[String: Any]] ?? [] {
+                guard let id = space["ManagedSpaceID"] as? Int else { continue }
+                layout.all.insert(id)
+                if space["type"] as? Int == 4 { layout.fullScreen.append(id) } else { layout.desktops += 1 }
+            }
+        }
+        return layout
+    }
+
+    static func agentDisplays() -> Set<String> {
+        var count: UInt32 = 0
+        var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+        guard CGGetActiveDisplayList(32, &displays, &count) == .success else { return [] }
+        let agents = displays.prefix(Int(count)).filter { CGDisplayVendorNumber($0) == AgentDesktop.vendor }
+        return Set(agents.compactMap { display in
+            CGDisplayCreateUUIDFromDisplayID(display).map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String }
+        })
+    }
+
+    static func of(window number: Int) -> [Int] {
+        guard let connection, let forWindows else { return [] }
+        return forWindows(connection(), 7, [number] as CFArray)?.takeRetainedValue() as? [Int] ?? []
+    }
+}
+
+// Every window the window server has. It takes 15 ms, so it is read only where there is more than one Space.
+func allWindows() -> [[String: Any]] {
+    CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+}
+
+// An app goes by several names, and the deny list may give any of them. One that can't be read denies every app, as
+// it does everywhere else.
+func isDenied(_ app: NSRunningApplication, by deny: Set<String>?) -> Bool {
+    guard let deny else { return true }
+    let info = app.bundleURL.flatMap { Bundle(url: $0) }?.infoDictionary
+    let names = [app.localizedName, app.bundleIdentifier, app.bundleURL?.deletingPathExtension().lastPathComponent,
+                 info?["CFBundleName"] as? String, info?["CFBundleDisplayName"] as? String]
+    return !Set(names.compactMap { $0 }.map(key)).isDisjoint(with: deny)
+}
+
+// Whether the user is typing, doing something else, or how long they have done nothing.
+func userActivity() -> String {
+    let key = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+    let any = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
+    if key < 2 { return "typing" }
+    if any < 2 { return "active" }
+    return any < 90 ? "idle \(Int(any)) s" : "idle \(Int(any / 60)) min"
+}
+
+// The user's Spaces in a few words: how many desktops, which apps are in full screen, and what they are looking at.
+func spacesLine(_ layout: Spaces.Layout, windows: [[String: Any]]) -> String {
+    var apps = [Int: [String]]()
+    if !layout.fullScreen.isEmpty {
+        for window in windows where (window[kCGWindowLayer as String] as? Int) == 0 {
+            guard let number = window[kCGWindowNumber as String] as? Int,
+                  let owner = window[kCGWindowOwnerName as String] as? String,
+                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+                  (bounds["Height"] ?? 0) > 100 else { continue }  // not the strip a full-screen app keeps for its toolbar
+            for space in Spaces.of(window: number) where layout.fullScreen.contains(space) {
+                if !(apps[space] ?? []).contains(owner) { apps[space, default: []].append(owner) }
+            }
+        }
+    }
+    func name(_ space: Int) -> String { apps[space].map { $0.joined(separator: " + ") } ?? "an app" }
+    var said = "Spaces: \(layout.desktops) desktop\(layout.desktops == 1 ? "" : "s")"
+    if !layout.fullScreen.isEmpty { said += ", full screen: " + layout.fullScreen.map(name).joined(separator: ", ") }
+    let shown = layout.fullScreen.filter(layout.showing.contains)
+    return said + (shown.isEmpty ? "; showing a desktop" : "; showing full screen (\(shown.map(name).joined(separator: ", ")))")
+}
+
+// What the user is doing, in a line: the app and window they are in, whether they type, and their Spaces. The title
+// of a window is left out for an app on the deny list.
+func userLine(deny: Set<String>?, layout: Spaces.Layout?, windows: [[String: Any]]) -> String? {
+    guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+    var said = "User: in \(app.localizedName ?? "an app")"
+    if !isDenied(app, by: deny) {
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.3)  // a busy app must not hold up the list
+        let window: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
+            ?? attribute(element, kAXMainWindowAttribute)
+        if let name = window.map(title), !name.isEmpty { said += ", window \"\(name.prefix(80))\"" }
+    }
+    return said + ", " + userActivity() + (layout.map { ". " + spacesLine($0, windows: windows) } ?? "") + "."
+}
+
+// The displays, as x, y, width, height and whether each is an agent's desktop: the server tells from them where a
+// listed window is. `list` itself would have to connect to the display system for it, which took 27 ms.
+func screens() -> [[Any]] {
+    var count: UInt32 = 0
+    var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+    guard CGGetActiveDisplayList(32, &displays, &count) == .success else { return [] }
+    return displays.prefix(Int(count)).map { display in
+        let bounds = CGDisplayBounds(display)
+        return [Int(bounds.minX), Int(bounds.minY), Int(bounds.width), Int(bounds.height),
+                CGDisplayVendorNumber(display) == AgentDesktop.vendor]
+    }
+}
+
+// The windows of an app on a Space the user isn't looking at, such as one in full screen: the app's own list leaves
+// them out. They are told by their titles, which the window server gives only with Screen Recording permission.
+func windowsElsewhere(of app: NSRunningApplication, layout: Spaces.Layout, windows: [[String: Any]]) -> [String] {
+    let listed: [AXUIElement] = attribute(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+    let known = Set(listed.map(title))
+    var lines = [String]()
+    for window in windows where (window[kCGWindowOwnerPID as String] as? pid_t) == app.processIdentifier {
+        guard (window[kCGWindowLayer as String] as? Int) == 0,
+              !((window[kCGWindowIsOnscreen as String] as? Bool) ?? false),
+              let number = window[kCGWindowNumber as String] as? Int,
+              let name = window[kCGWindowName as String] as? String, !name.isEmpty, !known.contains(name) else { continue }
+        let spaces = Spaces.of(window: number)
+        guard !spaces.isEmpty, layout.showing.isDisjoint(with: spaces), !layout.all.isDisjoint(with: spaces) else { continue }
+        let full = layout.fullScreen.contains(where: spaces.contains) ? "fullscreen " : ""
+        let line = "\(app.localizedName ?? "?"): \"\(name)\" \(full)other-space"
+        if !lines.contains(line) { lines.append(line) }
+    }
+    return lines
+}
+
 func find(_ query: String, in list: [AXUIElement]) -> AXUIElement {
     let matches = list.filter { title($0).localizedCaseInsensitiveContains(query) }
     if matches.count == 1 { return matches[0] }
@@ -816,6 +965,29 @@ final class Watcher {
                  desktopFirst: command["desktopFirst"] as? Bool ?? false)
         }
         if let names = command["show"] as? [String] { show(names, id: command["id"]) }
+        if command["situation"] != nil, let id = command["id"] {
+            // Where the user is. After every call the server asks only for what tells it of a change, which no
+            // app has to answer. For `list_windows` it asks for the line that goes with the list, `detail` being
+            // the app listed or "*", and for that app's windows on Spaces the user isn't looking at. This helper
+            // answers in half a millisecond, where the `list` command, started anew each time, took 55 ms more.
+            let layout = Spaces.layout()
+            var reply: [String: Any] = ["id": id, "doing": userActivity()]
+            if let app = NSWorkspace.shared.frontmostApplication { reply["app"] = app.localizedName ?? "an app" }
+            if let layout { reply["fullscreen"] = !layout.showing.isDisjoint(with: layout.fullScreen) }
+            if let detail = command["detail"] as? String {
+                let deny = (command["deny"] as? [String]).map { Set($0.map(key)) }
+                let windows = (layout?.all.count ?? 0) > 1 ? allWindows() : []
+                reply["line"] = userLine(deny: deny, layout: layout, windows: windows)
+                reply["screens"] = screens()
+                if let layout, !windows.isEmpty {
+                    let apps = detail == "*" ? NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+                                             : [running(detail)].compactMap { $0 }
+                    reply["elsewhere"] = apps.filter { !isDenied($0, by: deny) }
+                        .flatMap { windowsElsewhere(of: $0, layout: layout, windows: windows) }
+                }
+            }
+            emit(reply)
+        }
         if let names = command["park"] as? [String] {
             park(names, onlyHidden: command["onlyHidden"] as? Bool ?? false, id: command["id"])
         }
