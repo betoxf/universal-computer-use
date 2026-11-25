@@ -33,6 +33,33 @@ if action == "add-json":
 config.write_text(json.dumps(data))
 sys.exit(0 if found else 1)
 """
+# `codex mcp add|remove|get --json` on $CODEX_HOME/config.toml, writing each server's table afresh as Codex does.
+FAKE_CODEX = """
+config = Path(os.environ["CODEX_HOME"]) / "config.toml"
+text = config.read_text() if config.exists() else ""
+action, name = sys.argv[2], sys.argv[3]
+header = f"[mcp_servers.{name}]"
+tables, current = {}, None
+for line in text.splitlines():
+    if line.startswith("["):
+        current = line
+        tables[current] = []
+    elif current:
+        tables[current].append(line)
+if action == "get":
+    if header not in tables:
+        sys.exit(f"No MCP server named '{name}' found.")
+    values = {key.strip(): json.loads(value) for key, value in (line.split("=", 1) for line in tables[header] if "=" in line)}
+    print(json.dumps({"name": name, "transport": {"type": "stdio", "command": values.get("command"),
+                      "args": values.get("args")}, "tool_timeout_sec": values.get("tool_timeout_sec")}))
+    sys.exit(0)
+tables.pop(header, None)
+if action == "add":
+    command = sys.argv[sys.argv.index("--") + 1:]
+    tables[header] = [f"command = {json.dumps(command[0])}", f"args = {json.dumps(command[1:])}"]
+config.parent.mkdir(parents=True, exist_ok=True)
+config.write_text("".join(f"{key}\\n" + "".join(f"{line}\\n" for line in lines) for key, lines in tables.items()))
+"""
 FAKE_SWIFTC = """
 out = Path(sys.argv[sys.argv.index("-o") + 1])
 out.write_text("#!/bin/sh\\nexit 0\\n")
@@ -57,13 +84,14 @@ class CliTest(unittest.TestCase):
         self.home = Path(home.name)
         bin_dir = self.home / ".local/bin"
         bin_dir.mkdir(parents=True)
-        for name, body in (("claude", FAKE_CLAUDE), ("swiftc", FAKE_SWIFTC), ("cargo", FAKE_CARGO)):
+        for name, body in (("claude", FAKE_CLAUDE), ("codex", FAKE_CODEX), ("swiftc", FAKE_SWIFTC),
+                           ("cargo", FAKE_CARGO)):
             path = bin_dir / name
-            path.write_text(f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n" + body)
+            path.write_text(f"#!{sys.executable}\nimport json, os, sys\nfrom pathlib import Path\n" + body)
             path.chmod(0o755)
         self.env = {**os.environ, "HOME": str(self.home), "PATH": f"{bin_dir}:/usr/bin:/bin",
-                    "CARGO_TARGET_DIR": str(self.home / "target"), "GIT_AUTHOR_NAME": "Test",
-                    "GIT_AUTHOR_EMAIL": "test@example.com", "GIT_COMMITTER_NAME": "Test",
+                    "CARGO_TARGET_DIR": str(self.home / "target"), "CODEX_HOME": str(self.home / ".codex"),
+                    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com", "GIT_COMMITTER_NAME": "Test",
                     "GIT_COMMITTER_EMAIL": "test@example.com"}
         self.assertEqual(shutil.which("claude", path=self.env["PATH"]), str(bin_dir / "claude"))
         self.updates_off = self.home / "Library/Application Support/ucu/no-auto-update"
@@ -89,6 +117,11 @@ class CliTest(unittest.TestCase):
     def stop_hooks(self):
         return self.read_json(".claude/settings.json")["hooks"]["Stop"]
 
+    def codex_servers(self):
+        config = self.home / ".codex/config.toml"
+        text = config.read_text() if config.exists() else ""
+        return [line[len("[mcp_servers."):-1] for line in text.splitlines() if line.startswith("[mcp_servers.")]
+
     def test_install_doctor_uninstall(self):
         self.opencode()
         (self.home / CHROME_HOST).parent.parent.mkdir(parents=True)  # Chrome is set up
@@ -104,6 +137,11 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.stop_hooks()[1]["hooks"][0]["command"], 'pkill -INFO -P "$PPID" -f ucu-proxy.py; exit 0')
         self.assertEqual(self.read_json(".config/opencode/opencode.json"), {**OPENCODE, "mcp": {
             **OPENCODE["mcp"], "ucu": {"type": "local", "command": [sys.executable, "-I", PROXY], "enabled": True}}})
+        self.assertEqual((self.home / ".codex/config.toml").read_text(),
+                         f'[mcp_servers.ucu]\ntool_timeout_sec = 300\ncommand = "{sys.executable}"\n'
+                         f'args = ["-I", "{PROXY}"]\n')
+        self.assertIn("ucu is set up for Claude Code and Codex and opencode", output)
+        self.assertFalse((self.home / ".claude/CLAUDE.md").exists())  # no rule unless asked
         policy = self.read_json(POLICY)
         self.assertIn("Keychain Access", policy["deny"])
         self.assertNotIn("allow", policy)
@@ -144,6 +182,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.read_json(".claude.json")["mcpServers"], {"other": {"command": "x"}})
         self.assertEqual(self.read_json(".claude/settings.json"), {"model": "opus", "hooks": {"Stop": [OTHER_HOOK]}})
         self.assertEqual(self.read_json(".config/opencode/opencode.json"), OPENCODE)
+        self.assertEqual(self.codex_servers(), [])
+        self.assertFalse((self.home / "Library/Application Support/ucu/install.json").exists())
         self.assertFalse((self.home / ".local/bin/ucu-window").exists())
         self.assertFalse((self.home / CHROME_HOST).exists())
         self.assertFalse((self.home / ".local/bin/ucu-chrome-host").exists())
@@ -154,7 +194,7 @@ class CliTest(unittest.TestCase):
 
     def test_install_on_a_mac_with_no_claude_settings_or_opencode(self):
         (self.home / ".claude/settings.json").unlink()
-        code, output = self.ucu("install", "--python", sys.executable)
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "claude")
         self.assertEqual(code, 0, output)
         self.assertEqual(len(self.stop_hooks()), 1)
         self.assertFalse((self.home / ".config/opencode").exists())
@@ -171,26 +211,132 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertTrue((self.home / ".local/bin/ucu-engine").exists())
 
-    @unittest.skipIf(any(os.access(f"{folder}/claude", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin")),
-                     "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
-    def test_install_for_opencode_alone_and_for_neither(self):
+    @unittest.skipIf(any(os.access(f"{folder}/{name}", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin")
+                         for name in ("claude", "codex", "opencode")),
+                     "a claude, codex or opencode command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
+    def test_install_with_no_agent_and_for_the_one_found(self):
         (self.home / ".local/bin/claude").unlink()
+        (self.home / ".local/bin/codex").unlink()
         code, output = self.ucu("install", "--python", sys.executable)
         self.assertEqual(code, 1, output)
-        self.assertIn("neither the claude CLI nor", output)
+        self.assertIn("no agent was found", output)
         self.assertFalse((self.home / ".local/bin/ucu-engine").exists())
 
         self.opencode()
         code, output = self.ucu("install", "--python", sys.executable)
         self.assertEqual(code, 0, output)
-        self.assertIn("ucu was set up for opencode only", output)
+        self.assertIn("ucu is set up for opencode.", output)
+        self.assertEqual(self.read_json(".config/opencode/opencode.json")["mcp"]["ucu"]["command"][1:], ["-I", PROXY])
+
+    def test_install_for_the_agents_chosen_and_remember_them(self):
+        self.opencode()
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "opencode")
+        self.assertEqual(code, 0, output)
+        self.assertIn("ucu is set up for opencode.", output)
         self.assertEqual(sorted(self.read_json(".claude.json")["mcpServers"]), ["other"])
         self.assertEqual(self.stop_hooks(), [OTHER_HOOK])
+        self.assertEqual(self.codex_servers(), [])
         self.assertEqual(self.read_json(".config/opencode/opencode.json")["mcp"]["ucu"]["command"][1:], ["-I", PROXY])
         code, output = self.ucu("doctor")
-        self.assertEqual(code, 0, output)
-        self.assertIn("only opencode's setup is checked", output)
+        self.assertEqual(code, 0, output)  # Claude Code wasn't chosen, so its missing setup is no problem
+        self.assertIn("ucu is set up for opencode", output)
         self.assertIn("the server answers an MCP initialize", output)
+        self.assertNotIn("Stop hook", output)
+
+        code, output = self.ucu("install", "--python", sys.executable)  # again, with no --clients: the same choice
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.codex_servers(), [])
+
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "Claude-Code,codex")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sorted(self.read_json(".claude.json")["mcpServers"]), ["other", "ucu"])
+        self.assertEqual(self.codex_servers(), ["ucu"])
+        self.assertNotIn("ucu", self.read_json(".config/opencode/opencode.json")["mcp"])  # no longer chosen
+
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "all")
+        self.assertEqual(code, 0, output)
+        self.assertIn("ucu", self.read_json(".config/opencode/opencode.json")["mcp"])
+
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "cursor")
+        self.assertEqual(code, 1, output)
+        self.assertIn("--clients takes `all` or a list of claude, codex, opencode", output)
+
+    @unittest.skipIf(any(os.access(f"{folder}/claude", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin")),
+                     "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
+    def test_an_agent_chosen_that_is_not_here_changes_nothing(self):
+        (self.home / ".local/bin/claude").unlink()
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "codex,claude")
+        self.assertEqual(code, 1, output)
+        self.assertIn("Claude Code was not found on this Mac", output)
+        self.assertEqual(self.codex_servers(), [])
+        self.assertFalse((self.home / ".local/bin/ucu-engine").exists())
+
+    def test_the_global_rule_goes_in_each_file_once_and_comes_out_cleanly(self):
+        self.opencode()
+        claude_md = self.home / ".claude/CLAUDE.md"
+        mine = "# My rules\n\nBe brief.\n"
+        claude_md.write_text(mine)
+        (self.home / ".codex").mkdir()
+        (self.home / ".codex/AGENTS.md").symlink_to(claude_md)  # one file for both, as many people keep it
+        code, output = self.ucu("install", "--python", sys.executable, "--rule", "global")
+        self.assertEqual(code, 0, output)
+        text = claude_md.read_text()
+        self.assertTrue(text.startswith(mine + "\n<!-- ucu:start -->\nUse the `ucu` MCP server"), text)
+        self.assertEqual(text.count("<!-- ucu:start -->"), 1)
+        self.assertTrue((self.home / ".codex/AGENTS.md").is_symlink())
+        opencode_md = self.home / ".config/opencode/AGENTS.md"
+        self.assertTrue(opencode_md.read_text().startswith("<!-- ucu:start -->"))
+        backup = next((self.home / "Library/Application Support/ucu/backups").iterdir())
+        self.assertEqual((backup / "files" / claude_md.resolve().relative_to("/")).read_text(), mine)
+
+        text += "\nWritten after the rule.\n"
+        claude_md.write_text(text)
+        code, output = self.ucu("install", "--python", sys.executable)  # again: the choice stays, nothing moves
+        self.assertEqual(code, 0, output)
+        self.assertEqual(claude_md.read_text(), text)
+        code, output = self.ucu("doctor")
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"the rule to use ucu is in {claude_md.resolve()}", output)
+
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "claude,codex")
+        self.assertEqual(code, 0, output)
+        self.assertFalse(opencode_md.exists())  # it held only the rule, for an agent no longer chosen
+        self.assertEqual(claude_md.read_text(), text)
+
+        code, output = self.ucu("install", "--python", sys.executable, "--rule", "none")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(claude_md.read_text(), mine + "\nWritten after the rule.\n")
+        self.assertTrue((self.home / ".codex/AGENTS.md").is_symlink())
+
+    def test_the_rule_in_a_project_and_uninstall_takes_it_out(self):
+        code, output = self.ucu("install", "--python", sys.executable)
+        self.assertEqual(code, 0, output)
+        project = self.home / "my project"
+        project.mkdir()
+        theirs = "# Agents\n\nRun the tests.\n"
+        (project / "AGENTS.md").write_text(theirs)
+        code, output = self.ucu("rule", "add", str(project))
+        self.assertEqual(code, 0, output)
+        self.assertEqual((project / "CLAUDE.md").read_text().count("<!-- ucu:start -->"), 1)
+        self.assertTrue((project / "AGENTS.md").read_text().startswith(theirs + "\n<!-- ucu:start -->"))
+        self.assertFalse((self.home / ".claude/CLAUDE.md").exists())  # only the project
+
+        code, output = self.ucu("rule", "remove", str(project))
+        self.assertEqual(code, 0, output)
+        self.assertEqual((project / "AGENTS.md").read_text(), theirs)
+        self.assertFalse((project / "CLAUDE.md").exists())
+
+        self.assertEqual(self.ucu("rule", "add", "--global", str(project))[0], 0)
+        self.assertIn("<!-- ucu:start -->", (self.home / ".claude/CLAUDE.md").read_text())
+        code, output = self.ucu("uninstall")
+        self.assertEqual(code, 0, output)
+        self.assertEqual((project / "AGENTS.md").read_text(), theirs)
+        self.assertFalse((project / "CLAUDE.md").exists())
+        self.assertFalse((self.home / ".claude/CLAUDE.md").exists())
+
+        code, output = self.ucu("rule", "add")
+        self.assertEqual(code, 1, output)
+        self.assertIn("name --global, a project folder, or both", output)
 
     def test_deny_allow_and_denied(self):
         self.assertEqual(self.ucu("denied")[1].strip(), "No apps are denied: every app is approved.")

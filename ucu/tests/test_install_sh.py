@@ -1,6 +1,6 @@
 """install.sh, the one-line installer, in a temporary HOME with a PATH of its own.
 
-PATH holds only the commands a test gives it, so a missing git or python3 can be tested. claude, swiftc and cargo are
+PATH holds only the commands a test gives it, so a missing git or python3 can be tested. claude, codex, swiftc and cargo are
 the fakes test_cli uses, in $HOME/.local/bin, and the clone comes from a throwaway repository with a copy of ucu/.
 The script runs in a session of its own, so it has no terminal to ask in, as under `curl | bash` with no TTY.
 """
@@ -19,14 +19,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
-from test_cli import FAKE_CARGO, FAKE_CLAUDE, FAKE_SWIFTC  # noqa: E402
+from test_cli import FAKE_CARGO, FAKE_CLAUDE, FAKE_CODEX, FAKE_SWIFTC  # noqa: E402
 
 SCRIPT = ROOT / "install.sh"
 SYSTEM = "/usr/bin:/bin"
 TOOLS = ("cat", "dirname", "ls", "mkdir", "sh", "git")
 OPENCODE = {"$schema": "https://opencode.ai/config.json"}
-# ucu looks for claude in these folders as well as on PATH, so a claude there can't be hidden from it.
-SYSTEM_CLAUDE = any(os.access(f"{folder}/claude", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin"))
 
 
 class InstallScriptTest(unittest.TestCase):
@@ -43,9 +41,11 @@ class InstallScriptTest(unittest.TestCase):
         self.fake("xcode-select", 'echo /Library/Developer/CommandLineTools')
         self.local = self.home / ".local/bin"
         self.local.mkdir(parents=True)
-        for name, body in (("claude", FAKE_CLAUDE), ("swiftc", FAKE_SWIFTC), ("cargo", FAKE_CARGO)):
+        for name, body in (("claude", FAKE_CLAUDE), ("codex", FAKE_CODEX), ("swiftc", FAKE_SWIFTC),
+                           ("cargo", FAKE_CARGO)):
             self.python_fake(self.local / name, body)
         self.env = {"HOME": str(self.home), "PATH": str(self.bin), "CARGO_TARGET_DIR": str(self.home / "target"),
+                    "CODEX_HOME": str(self.home / ".codex"),
                     "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com", "GIT_COMMITTER_NAME": "Test",
                     "GIT_COMMITTER_EMAIL": "test@example.com", "LANG": "en_US.UTF-8"}
         updates_off = self.home / "Library/Application Support/ucu/no-auto-update"
@@ -61,7 +61,7 @@ class InstallScriptTest(unittest.TestCase):
         path.chmod(0o755)
 
     def python_fake(self, path, body):
-        path.write_text(f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n" + body)
+        path.write_text(f"#!{sys.executable}\nimport json, os, sys\nfrom pathlib import Path\n" + body)
         path.chmod(0o755)
 
     def calls(self):
@@ -129,9 +129,13 @@ class InstallScriptTest(unittest.TestCase):
         code, output = self.install("--help")
         self.assertEqual(code, 0, output)
         self.assertIn("UCU_DIR", output)
+        self.assertIn("--clients LIST", output)
         code, output = self.install("--frobnicate")
         self.assertEqual(code, 2, output)
         self.assertIn("unknown option: --frobnicate", output)
+        code, output = self.install("--rule")
+        self.assertEqual(code, 2, output)
+        self.assertIn("--rule needs a value", output)
         self.assertEqual(self.calls(), "")
 
     def test_only_on_macos(self):
@@ -169,12 +173,13 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("git was not found", output)
         self.assert_nothing_installed()
 
-    @unittest.skipIf(SYSTEM_CLAUDE, "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
-    def test_needs_claude_code_or_opencode(self):
+    def test_needs_an_agent(self):
         (self.local / "claude").unlink()
+        (self.local / "codex").unlink()
         code, output = self.install()
         self.assertEqual(code, 1, output)
-        self.assertIn("neither Claude Code (the claude command) nor opencode", output)
+        self.assertIn("no agent was found: neither Claude Code (the claude command), Codex (the codex command) nor "
+                      "opencode", output)
         self.assert_nothing_installed()
 
     def test_without_rust_or_a_terminal_it_explains_and_stops(self):
@@ -275,23 +280,38 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(self.clone.exists())
         self.assertEqual(json.loads((self.home / ".claude.json").read_text()), config)
 
-    @unittest.skipIf(SYSTEM_CLAUDE, "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
-    def test_opencode_only(self):
+        (self.home / ".claude.json").write_text(json.dumps({"mcpServers": {}}))
+        subprocess.run([str(self.local / "codex"), "mcp", "add", "ucu", "--", "python3", "-I", proxy],
+                       env=self.env, check=True)
+        code, output = self.install()
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"UCU is already installed from {other}, so nothing was changed", output)
+        self.assertFalse(self.clone.exists())
+
+    def test_the_agents_and_the_rule_chosen(self):
         self.origin()
-        (self.local / "claude").unlink()
         opencode = self.home / ".config/opencode/opencode.json"
         opencode.parent.mkdir(parents=True)
         opencode.write_text(json.dumps(OPENCODE))
-        code, output = self.install()
+        code, output = self.install("--clients", "opencode", "--rule", "global")
         self.assertEqual(code, 0, output)
-        self.assertIn("UCU will be set up for opencode only", output)
-        self.assertIn("ucu was set up for opencode only", output)
+        self.assertIn("ucu is set up for opencode.", output)
         self.assertEqual(json.loads(opencode.read_text())["mcp"]["ucu"]["command"][1:],
                          ["-I", str(self.clone / "ucu/scripts/ucu-proxy.py")])
         self.assertIsNone(self.registered())
+        self.assertFalse((self.home / ".codex/config.toml").exists())
         self.assertFalse((self.home / ".claude/settings.json").exists())
+        self.assertIn("<!-- ucu:start -->", (self.home / ".config/opencode/AGENTS.md").read_text())
+        self.assertFalse((self.home / ".claude/CLAUDE.md").exists())
         self.assertNotIn("✗", output)
         self.assertIn("the server answers an MCP initialize", output)
+
+        code, output = self.install("--clients=claude,codex", "--rule=none")
+        self.assertEqual(code, 0, output)
+        self.assertIsNotNone(self.registered())
+        self.assertIn("[mcp_servers.ucu]", (self.home / ".codex/config.toml").read_text())
+        self.assertNotIn("ucu", json.loads(opencode.read_text()).get("mcp", {}))
+        self.assertFalse((self.home / ".config/opencode/AGENTS.md").exists())
 
     def test_uninstall_keeps_the_clone(self):
         self.origin()

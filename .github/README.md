@@ -40,14 +40,37 @@ Reading a small window such as Calculator takes about 260 ms and 169 tokens; the
 
 ## Install
 
+Paste this into Claude Code, Codex, opencode or another coding agent on your Mac. It asks which agents get UCU and
+where they should prefer it, then installs it and tells you what is left for you to do:
+
+```text
+Install Universal Computer Use (UCU) on this Mac: https://github.com/betoxf/universal-computer-use
+
+1. Before you change anything, ask me these, unless this message already answers them:
+   - Which coding agents should get UCU: every one installed here (Claude Code, Codex, opencode), or only some?
+   - Should agents use UCU instead of their built-in computer use everywhere, only in project folders I name, or
+     nowhere?
+2. Download the installer and read it before you run it:
+   curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh -o /tmp/ucu-install.sh
+3. Run it with my answers. --clients is all, or a list such as claude,codex. --rule is global for everywhere, else none:
+   bash /tmp/ucu-install.sh --clients <all or list> --rule <global or none>
+   If it stops because Rust is missing, ask me before you run it again with --yes added, which installs Rust.
+4. For each project folder I named, run: ~/.ucu/ucu/ucu rule add <folder>
+5. Run ~/.ucu/ucu/ucu doctor and tell me what it reports. Then tell me what only I can do: give the app that runs you
+   Accessibility and Screen Recording permission in System Settings > Privacy & Security, and start a new session.
+```
+
+Or install it yourself:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash
 ```
 
 The installer checks for macOS with the Xcode Command Line Tools, Python 3.9 or newer, git, and
-[Claude Code](https://claude.com/claude-code) or opencode. If Rust is missing, it asks before installing it with
+an agent: [Claude Code](https://claude.com/claude-code), Codex or opencode. If Rust is missing, it asks before installing it with
 [rustup](https://rustup.rs); add `-s -- --yes` after `bash` to let it go ahead without asking. It then clones UCU to
-`~/.ucu` and runs `ucu install` and `ucu doctor` from there. To read the script before you run it, open
+`~/.ucu` and runs `ucu install` and `ucu doctor` from there, for every agent it finds unless you choose
+([Choosing agents](https://github.com/betoxf/universal-computer-use/blob/main/ucu/README.md#choosing-agents)). To read the script before you run it, open
 [`ucu/install.sh`](https://github.com/betoxf/universal-computer-use/blob/main/ucu/install.sh), or download it first:
 
 ```bash
@@ -65,8 +88,8 @@ cd universal-computer-use/ucu
 ./ucu doctor
 ```
 
-UCU runs from its clone and updates itself there. Start a new Claude Code session to pick it up. The app that runs
-Claude Code needs Accessibility permission, and Screen Recording for screenshots.
+UCU runs from its clone and updates itself there. Start a new session of your agent to pick it up. The app that runs
+your agent needs Accessibility permission, and Screen Recording for screenshots.
 
 Before you use it: agents get real access to every app you don't deny. Read
 [Before you use it](https://github.com/betoxf/universal-computer-use/blob/main/ucu/README.md#before-you-use-it) and
