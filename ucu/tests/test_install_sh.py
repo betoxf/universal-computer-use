@@ -281,6 +281,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(json.loads((self.home / ".claude.json").read_text()), config)
 
         (self.home / ".claude.json").write_text(json.dumps({"mcpServers": {}}))
+        (self.home / ".codex").mkdir()
         subprocess.run([str(self.local / "codex"), "mcp", "add", "ucu", "--", "python3", "-I", proxy],
                        env=self.env, check=True)
         code, output = self.install()
