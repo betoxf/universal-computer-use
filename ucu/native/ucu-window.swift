@@ -830,6 +830,7 @@ final class Watcher {
                                             "AuthenticationServicesAgent", "coreautha"]
     static let quietTail = 1.5, windowSettle = 0.3, hideGuard = 3.0, noWindowLimit = 6.0, openLimit = 45.0
     static let inputWindow = 1.5, longestCall = 300.0, moveSettle = 0.3
+    static let secondLookWait = 3.0  // longer than a move to a desktop takes, which is up to 2.3 s
     // Apps come forward by themselves seconds after an action too, such as a browser once a page has loaded.
     static let guardTail = 10.0, allowGrace = 5.0, switchWindow = 1.0, modifierWindow = 0.5, focusTick = 0.1
     static let putBackCheck = 0.1, putBackTries = 3, oursGrace = 3.0, quitWait = 3.0, dockWindow = 5.0
@@ -837,6 +838,7 @@ final class Watcher {
     var watched = Set<String>()
     var own = Set<String>()  // the watched apps where the agent works in a window of its own, never in the user's
     var driven = [NSRunningApplication]()  // the watched apps that were running when the last call began
+    var doubted = Set<String>()  // windows a sweep found on a desktop without showing there: see rescueStranded
     var seenWindows = [pid_t: [AXUIElement]]()
     var seenDialogs = Set<Int>()
     var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
@@ -998,7 +1000,14 @@ final class Watcher {
     // belongs to the user's screen. The user clicks the app's Dock icon and nothing comes. A window that an agent
     // keeps on a desktop shows there, so it isn't one of these. Such a window gets a place on the user's main screen,
     // as far from its corner as it was from the desktop's; one in the Dock stays there, and comes out in sight.
-    func rescueStranded(of only: NSRunningApplication? = nil) {
+    //
+    // Another chat's ucu may be putting a window on its desktop this very moment: it moves the window while the app is
+    // hidden, and the window shows there a moment after the app is back. A sweep that finds it in between took it
+    // for stranded and moved it away, and the other chat was told it had no desktop. So on a sweep, a window that
+    // lies on a desktop without being in the Dock is only noted, and moved if a second look finds it there still.
+    func rescueStranded(of only: NSRunningApplication? = nil, secondLook: Bool = false) {
+        let noted = doubted
+        if secondLook { doubted = [] }
         let shown = Set((CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []).compactMap { window -> String? in
             guard let pid = window[kCGWindowOwnerPID as String] as? Int else { return nil }
@@ -1013,14 +1022,25 @@ final class Watcher {
             for window in windows where Self.isOutOfSight(window) {
                 var movable = DarwinBoolean(false)  // Finder's desktop on a display is a window too, and stays
                 AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &movable)
-                guard movable.boolValue, let frame = Self.frame(of: window), frame.height > 60,
-                      !shown.contains("\(pid) \(Int(frame.minX)) \(Int(frame.minY))") else { continue }
+                guard movable.boolValue, let frame = Self.frame(of: window), frame.height > 60 else { continue }
+                let place = "\(pid) \(Int(frame.minX)) \(Int(frame.minY))"
+                guard !shown.contains(place) else { continue }
+                if only == nil, Self.isOnAgentDesktop(window), !flag(window, kAXMinimizedAttribute),
+                   !(secondLook && noted.contains(place)) {
+                    if !secondLook { doubted.insert(place) }
+                    continue
+                }
                 var display: CGDirectDisplayID = 0, count: UInt32 = 0
                 let on = CGGetDisplaysWithPoint(frame.origin, 1, &display, &count) == .success && count > 0
                 let corner = on ? CGDisplayBounds(display).origin : CGPoint(x: frame.minX - 120, y: frame.minY - 120)
                 move(window, to: CGPoint(x: max(frame.minX - corner.x, 0), y: max(frame.minY - corner.y, 30)))
                 log("a window of \(app.localizedName ?? "?") was out of the user's sight, where an agent's desktop is "
                     + "or was: it has a place on their screen again")
+            }
+        }
+        if !secondLook, !doubted.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.secondLookWait) {
+                self.rescueStranded(secondLook: true)
             }
         }
     }
@@ -1625,7 +1645,12 @@ final class Watcher {
             let started = Date()
             func placed() -> Bool { targets.allSatisfy { !$0.0.isHidden && Self.isOnScreen($0.0, at: $0.1) } }
             func finish() {
-                if let id { emit(["id": id, "state": placed() ? "parked" : "no desktop", "moved": moved]) }
+                let done = placed()
+                // An app whose window was moved away from there meanwhile is as it was before. Left as one that is on
+                // the desktop, every later try would find it done and not there, and say again that there is no
+                // desktop. One whose windows are there and only don't show yet is left: the next try finds them.
+                if !done { for (app, target) in targets where self.strayed(app, from: target) { self.unpark(app) } }
+                if let id { emit(["id": id, "state": done ? "parked" : "no desktop", "moved": moved]) }
             }
             apps.filter(\.isHidden).forEach { $0.unhide() }
             if placed() { return finish() }
@@ -1636,6 +1661,13 @@ final class Watcher {
                 }
             }
         }
+    }
+
+    // Whether a window that was moved to the desktop with its app is somewhere else now.
+    func strayed(_ app: NSRunningApplication, from target: CGPoint) -> Bool {
+        parked[app.processIdentifier]?.places.contains {
+            Self.frame(of: $0.0).map { abs($0.minX - target.x) > 2 || abs($0.minY - target.y) > 2 } ?? false
+        } ?? false
     }
 
     func move(_ window: AXUIElement, to point: CGPoint) {
@@ -1694,6 +1726,11 @@ final class Watcher {
 
     func bringBack(_ app: NSRunningApplication) {
         launchedHidden.remove(app.processIdentifier)
+        unpark(app)
+    }
+
+    // An app's windows go back from the agent's desktop to where they were, and it is no longer kept there.
+    func unpark(_ app: NSRunningApplication) {
         guard let place = parked.removeValue(forKey: app.processIdentifier) else { return }
         stopWatchingWindows(of: app.processIdentifier)
         place.places.forEach { move($0.0, to: $0.1) }
