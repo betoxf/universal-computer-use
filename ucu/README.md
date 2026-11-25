@@ -121,10 +121,15 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
 
 - `look {app, window?, find?, full?, screenshot?}`: an app's window as numbered text, then only what changed, up to 300
   lines. `find` shows only the lines with a text, under what they are inside of, and `full` the whole tree.
-- `act {app, window?, steps}`: steps in order, then what changed. It stops at the first step that fails.
-- `list_windows {app?}`: the windows of an app, or of every app, and which is the main window.
-- `focus_window {app, title, unfullscreen?, activate?}`: makes a window the main window. With `activate: true`, the
-  window comes to your screen and the front, only when you ask to see it.
+- `act {app, window?, steps, front?}`: steps in order, then what changed. It stops at the first step that fails.
+- `list_windows {app?}`: the windows of an app, or of every app, and which is the main window. It begins with a line
+  about you (see "What an agent is told about you"), and says of each window whether it is on your screen
+  (`user-screen`), on an agent's desktop (`private-desktop`) or on no screen (`off-screen`). Windows on a Space you
+  aren't looking at, such as an app in full screen, follow the list as `other-space`: the app's own list leaves those
+  out.
+- `focus_window {app, title, unfullscreen?, activate?, ask?}`: makes a window the main window. With `activate: true`,
+  the window comes to your screen and the front, when you ask to see it or have to do something in it. `ask` says on
+  the window what that is.
 - `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
 - `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own tabs.
 
@@ -139,8 +144,35 @@ no `look` first:
 `collapse`, `clear`, `scroll-to`, `type` or `set-value` (with `text`), `select` (with `text`), `scroll` (with `direction`
 and `amount`), `press` (with `keys`), `menu` (with `text` such as `File > New Window`) or `wait` (until `text` shows in
 the window, for up to `amount` seconds; without `text` it pauses for `amount` seconds). For a click where there is
-neither number nor name, pass `xy` with pixels from a `look` screenshot. Nothing scrolls at a place in the background
-yet.
+neither number nor name, pass `xy` with pixels from a `look` screenshot: `click` and its kin, `scroll`, or `drag` with
+`to`, the place it ends.
+
+A scroll or a drag at a place takes the real pointer, and some apps take input only while they are in front. `act`
+makes those steps with the pointer, and brings the app to the front where it must. For an app that ignores steps made
+behind, the agent passes `front: true`:
+
+- None of this happens while you work. It waits until you have done nothing for a moment (1.5 seconds without a key,
+  a click or a scroll), for up to 8 seconds, and then tells the agent you are busy. An app that takes the keyboard
+  waits for a longer pause in your typing, 4 seconds without a key, because you type in bursts.
+- If you press a key while the app is in front for the agent's steps, the steps stop at the next one and your app
+  comes back. The agent's own keys go to its app alone, and don't count as yours.
+- A window stays where it is. One on the agent's desktop takes the pointer there, where you see none of it. For a
+  scroll that is all, and your app keeps the keyboard. For a drag, or with `front: true`, its app is also the active
+  one for the steps.
+- A window on your screen is raised over the others for the steps. Then your app, or the window of that app you were
+  in, is in front again.
+- The pointer is back where you had it afterwards, unless you moved it.
+- The front is taken only for the steps that need it, and given back before a `wait` step.
+- A step with the real pointer is made only if the window it is for is the one in front at that place.
+- A browser that holds your windows and the agent's own is never brought to the front for steps. A scroll works in
+  the agent's window where it is, and the browser tools do the rest.
+- If you click the app's window meanwhile, you have taken it over, and it stays as you have it. If you go to another
+  app, you stay there. Either way the remaining steps aren't made.
+- A window you are in already is worked in where it is.
+- One agent at a time has the front, across chats. A second one waits up to 8 seconds, then is told to try again.
+- If the server stops mid-step, `ucu-window` gives your app back by itself, 20 seconds after it last heard from it.
+
+A drag stays within one window: both of its places are in that window's picture.
 
 A model's round trip costs far more than the action it asks for, so these are made to save them. A named element is
 looked up in the window as it is now, waited for briefly if a step before brings it, and found again if the window
@@ -172,10 +204,12 @@ The server sends the usage rules in its MCP `instructions`, so clients get them 
 
 ### Staying out of your way
 
-When an agent uses a closed app, UCU opens it on the agent's private desktop, a screen you never see. Its Dock icon
-shows it is running, and nothing appears on your screens. A hidden app shows itself wherever its windows are as soon as
-it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an app opens joins it there
-at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
+When an agent uses a closed app, UCU makes the agent's private desktop, a screen you never see, and opens the app
+hidden. Its windows go to that desktop, and its Dock icon shows it is running. Most apps show nothing on your screens
+meanwhile. Some show a window in spite of being opened hidden, where they last had one: on the private desktop if an
+agent used the app there last, and otherwise on your screen for a moment. A hidden app shows itself wherever its
+windows are as soon as it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an
+app opens joins it there at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
 private desktop, the app stays hidden instead, and goes back into hiding whenever it comes forward. A denied app stays
 closed.
 
@@ -184,13 +218,20 @@ app's menu, which works even on a hidden app. The usage rules tell agents to bri
 see it or be taken there, never to make an action work, and to leave your clipboard alone.
 
 Apps still come forward by themselves, such as Chrome when it opens a window or an extension's popup. UCU puts your app
-back at once, usually within a few hundredths of a second, and tells the agent: for an app it opened, whenever that
-happens while the chat runs; for an app you use too, while the chat works on it and for 10 seconds after. When the
-agent's own step is what brings it forward, such as making its Chrome window, that always happens, unless you clicked a
-window of that app just then. Otherwise UCU leaves the app in front if you clicked, pressed a modifier key, or hold
-Return just before, or if your app is no longer in sight, because you may have switched apps or Spaces yourself. Typing
-in your app doesn't count, since that is when a stolen focus hurts most. A new app that starts during a call is held
-back too, unless you did anything since just before it started.
+back, a tenth or two of a second later when the app came forward as it opened, and tells the agent: for an app it
+opened, whenever that happens while the chat runs; for an app you use too, while the chat works on it and for 10
+seconds after. When the agent's own step is what brings it forward, such as making its Chrome window, that always
+happens, unless you clicked a window of that app just then. Otherwise UCU leaves the app in front if you clicked,
+pressed a modifier key, or hold Return just before, or if your app is no longer in sight, because you may have switched
+apps or Spaces yourself. Typing in your app doesn't count, since that is when a stolen focus hurts most. An app UCU
+itself is opening is held back whatever you are doing, unless you click its Dock icon. Any other new app that starts
+during a call is held back too, unless you did anything since just before it started.
+
+An app whose windows the agent keeps on its private desktop is put back whenever it comes forward by itself with none
+of them in your sight, and not only for those 10 seconds: in front, it would have your keyboard in a window you can't
+see. A click or a modifier key just before still counts as you coming to it, and its windows come back to your screen.
+When the app it came forward over can't have the front back, because it has quit or the agent is moving it to its
+desktop, the front goes to the app whose window you see on top.
 
 Safari and Chrome are yours while an agent works in them, because it works in tabs or a window of its own. When no step of the
 agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a
@@ -201,10 +242,42 @@ window when it is made or shown. Your window gets it back at once, so your typin
 
 When you ask to see what the agent is doing, or to be taken there, `focus_window` with `activate: true` brings that
 window from the private desktop to your screen and to the front, and the browser tools' `show` brings you the agent's
-window, which you both use from then on. That is the only way UCU brings anything forward.
+window, which you both use from then on. Besides the steps that need an app in front (see `act` above), that is the
+only way UCU brings anything forward. A window comes with the keyboard, so neither happens while you type: UCU waits
+for 4 seconds without a key, for up to 8 seconds, and then tells the agent you are typing.
+
+When the agent needs you to do something in a window, such as to sign in or type a password, it brings the window to
+you the same way and says what it needs: `focus_window` with `ask`, or the browser tools' `show` with `text`. The window
+then carries a label in the chat's color, "Waiting for you: Sign in", with a Done button:
+
+- The label shows while you are in that window, also after the agent's turn has ended to wait for you. With a sheet
+  or a dialog of the app's over the window, such as a prompt to answer, it sits above the window instead of on it.
+- Done tells the agent you are finished. It hears it with its next step, so say so in the chat too if it has stopped.
+- The label goes when you click Done, when the agent goes on working in that app, when the window closes, or when the
+  chat ends.
+- While the label is there, a step of the agent's in that app waits while you type, click or scroll in it, and is
+  refused if you don't pause within 8 seconds.
+
+"Doing nothing" means no key, click or scroll: reading or watching counts as idle.
 
 Every time an app comes forward during agent work, `~/Library/Logs/ucu/focus.log` says what UCU did, naming the apps but
 no window titles, and `ucu doctor` sums up the last day.
+
+### What an agent is told about you
+
+So that an agent can choose when and where to work, UCU tells it where you are:
+
+- `list_windows` begins with a line such as `User: in Mail, window "Inbox", typing. Spaces: 2 desktops, full screen:
+  Safari; showing a desktop.` It names the app and the window you are in, says whether you are typing, active, or how
+  long you have been idle, and describes your Spaces: how many desktops, which apps are in full screen, and which you
+  are looking at.
+- When you move to another app, or into or out of full screen, the agent's next result ends with a note such as
+  `[ucu: The user is in Safari in full screen, idle 12 s.]` That note names the app only.
+
+It is a picture of this moment: UCU keeps no history of what you did. A window's title is left out for an app on the
+deny list, and what is in your windows is never read for this. These lines are part of the tool results, so they go to
+whichever model drives UCU. Spaces come from the window server through calls macOS doesn't document. Where those are
+missing, nothing is said of Spaces. The title of a window on another Space needs Screen Recording permission.
 
 ### The private desktop
 

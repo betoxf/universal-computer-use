@@ -12,7 +12,8 @@
 //
 // <app> is a display name or bundle id of a running app; `list` without one covers every app.
 // `focus` un-minimizes the window and makes it the app's main window; it shows the app and brings
-// it to the front only with --activate, onto the user's screen if it was out of sight. `press` runs
+// it to the front only with --activate, onto the user's screen if it was out of sight, and then it
+// is no failure that another window stays the app's main one. `press` runs
 // the menu command a shortcut stands for, and `menu` the one at a path, which work on an app in the
 // background, even a hidden one. `watch` is what the server runs next to the engine: see Watcher.
 // Needs Accessibility permission for the process that runs it (Claude Code).
@@ -112,6 +113,155 @@ func printWindows(of app: NSRunningApplication, element: AXUIElement, list: [AXU
                      flag(window, "AXFullScreen") ? "fullscreen" : nil, frame(window)]
         print("[\(index)] \"\(title(window))\" " + marks.compactMap { $0 }.joined(separator: " "))
     }
+}
+
+// MARK: where the user is
+
+// What the window server knows of Spaces. These calls aren't public, so each is looked up, and where one is missing
+// nothing is said of Spaces.
+enum Spaces {
+    private static func found<T>(_ name: String, as type: T.Type) -> T? {
+        dlsym(UnsafeMutableRawPointer(bitPattern: -2), name).map { unsafeBitCast($0, to: type) }
+    }
+    private static let connection = found("CGSMainConnectionID", as: (@convention(c) () -> Int32).self)
+    private static let managed = found("CGSCopyManagedDisplaySpaces",
+                                       as: (@convention(c) (Int32) -> Unmanaged<CFArray>?).self)
+    private static let forWindows = found("CGSCopySpacesForWindows",
+                                          as: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
+
+    struct Layout {
+        var desktops = 0
+        var fullScreen = [Int]()  // the user's full-screen Spaces, in their order
+        var showing = Set<Int>()  // the Space each of the user's displays shows
+        var all = Set<Int>()
+    }
+
+    // The Spaces of the user's displays. An agent's desktop has Spaces of its own, which aren't theirs.
+    static func layout() -> Layout? {
+        guard let connection, let managed,
+              let displays = managed(connection())?.takeRetainedValue() as? [[String: Any]] else { return nil }
+        let agents = agentDisplays()
+        var layout = Layout()
+        for display in displays where !agents.contains(display["Display Identifier"] as? String ?? "") {
+            if let now = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int {
+                layout.showing.insert(now)
+            }
+            for space in display["Spaces"] as? [[String: Any]] ?? [] {
+                guard let id = space["ManagedSpaceID"] as? Int else { continue }
+                layout.all.insert(id)
+                if space["type"] as? Int == 4 { layout.fullScreen.append(id) } else { layout.desktops += 1 }
+            }
+        }
+        return layout
+    }
+
+    static func agentDisplays() -> Set<String> {
+        var count: UInt32 = 0
+        var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+        guard CGGetActiveDisplayList(32, &displays, &count) == .success else { return [] }
+        let agents = displays.prefix(Int(count)).filter { CGDisplayVendorNumber($0) == AgentDesktop.vendor }
+        return Set(agents.compactMap { display in
+            CGDisplayCreateUUIDFromDisplayID(display).map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String }
+        })
+    }
+
+    static func of(window number: Int) -> [Int] {
+        guard let connection, let forWindows else { return [] }
+        return forWindows(connection(), 7, [number] as CFArray)?.takeRetainedValue() as? [Int] ?? []
+    }
+}
+
+// Every window the window server has. It takes 15 ms, so it is read only where there is more than one Space.
+func allWindows() -> [[String: Any]] {
+    CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+}
+
+// An app goes by several names, and the deny list may give any of them. One that can't be read denies every app, as
+// it does everywhere else.
+func isDenied(_ app: NSRunningApplication, by deny: Set<String>?) -> Bool {
+    guard let deny else { return true }
+    let info = app.bundleURL.flatMap { Bundle(url: $0) }?.infoDictionary
+    let names = [app.localizedName, app.bundleIdentifier, app.bundleURL?.deletingPathExtension().lastPathComponent,
+                 info?["CFBundleName"] as? String, info?["CFBundleDisplayName"] as? String]
+    return !Set(names.compactMap { $0 }.map(key)).isDisjoint(with: deny)
+}
+
+// Whether the user is typing, doing something else, or how long they have done nothing.
+func userActivity() -> String {
+    let key = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+    let any = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
+    if key < 2 { return "typing" }
+    if any < 2 { return "active" }
+    return any < 90 ? "idle \(Int(any)) s" : "idle \(Int(any / 60)) min"
+}
+
+// The user's Spaces in a few words: how many desktops, which apps are in full screen, and what they are looking at.
+func spacesLine(_ layout: Spaces.Layout, windows: [[String: Any]]) -> String {
+    var apps = [Int: [String]]()
+    if !layout.fullScreen.isEmpty {
+        for window in windows where (window[kCGWindowLayer as String] as? Int) == 0 {
+            guard let number = window[kCGWindowNumber as String] as? Int,
+                  let owner = window[kCGWindowOwnerName as String] as? String,
+                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+                  (bounds["Height"] ?? 0) > 100 else { continue }  // not the strip a full-screen app keeps for its toolbar
+            for space in Spaces.of(window: number) where layout.fullScreen.contains(space) {
+                if !(apps[space] ?? []).contains(owner) { apps[space, default: []].append(owner) }
+            }
+        }
+    }
+    func name(_ space: Int) -> String { apps[space].map { $0.joined(separator: " + ") } ?? "an app" }
+    var said = "Spaces: \(layout.desktops) desktop\(layout.desktops == 1 ? "" : "s")"
+    if !layout.fullScreen.isEmpty { said += ", full screen: " + layout.fullScreen.map(name).joined(separator: ", ") }
+    let shown = layout.fullScreen.filter(layout.showing.contains)
+    return said + (shown.isEmpty ? "; showing a desktop" : "; showing full screen (\(shown.map(name).joined(separator: ", ")))")
+}
+
+// What the user is doing, in a line: the app and window they are in, whether they type, and their Spaces. The title
+// of a window is left out for an app on the deny list.
+func userLine(deny: Set<String>?, layout: Spaces.Layout?, windows: [[String: Any]]) -> String? {
+    guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+    var said = "User: in \(app.localizedName ?? "an app")"
+    if !isDenied(app, by: deny) {
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.3)  // a busy app must not hold up the list
+        let window: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
+            ?? attribute(element, kAXMainWindowAttribute)
+        if let name = window.map(title), !name.isEmpty { said += ", window \"\(name.prefix(80))\"" }
+    }
+    return said + ", " + userActivity() + (layout.map { ". " + spacesLine($0, windows: windows) } ?? "") + "."
+}
+
+// The displays, as x, y, width, height and whether each is an agent's desktop: the server tells from them where a
+// listed window is. `list` itself would have to connect to the display system for it, which took 27 ms.
+func screens() -> [[Any]] {
+    var count: UInt32 = 0
+    var displays = [CGDirectDisplayID](repeating: 0, count: 32)
+    guard CGGetActiveDisplayList(32, &displays, &count) == .success else { return [] }
+    return displays.prefix(Int(count)).map { display in
+        let bounds = CGDisplayBounds(display)
+        return [Int(bounds.minX), Int(bounds.minY), Int(bounds.width), Int(bounds.height),
+                CGDisplayVendorNumber(display) == AgentDesktop.vendor]
+    }
+}
+
+// The windows of an app on a Space the user isn't looking at, such as one in full screen: the app's own list leaves
+// them out. They are told by their titles, which the window server gives only with Screen Recording permission.
+func windowsElsewhere(of app: NSRunningApplication, layout: Spaces.Layout, windows: [[String: Any]]) -> [String] {
+    let listed: [AXUIElement] = attribute(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+    let known = Set(listed.map(title))
+    var lines = [String]()
+    for window in windows where (window[kCGWindowOwnerPID as String] as? pid_t) == app.processIdentifier {
+        guard (window[kCGWindowLayer as String] as? Int) == 0,
+              !((window[kCGWindowIsOnscreen as String] as? Bool) ?? false),
+              let number = window[kCGWindowNumber as String] as? Int,
+              let name = window[kCGWindowName as String] as? String, !name.isEmpty, !known.contains(name) else { continue }
+        let spaces = Spaces.of(window: number)
+        guard !spaces.isEmpty, layout.showing.isDisjoint(with: spaces), !layout.all.isDisjoint(with: spaces) else { continue }
+        let full = layout.fullScreen.contains(where: spaces.contains) ? "fullscreen " : ""
+        let line = "\(app.localizedName ?? "?"): \"\(name)\" \(full)other-space"
+        if !lines.contains(line) { lines.append(line) }
+    }
+    return lines
 }
 
 func find(_ query: String, in list: [AXUIElement]) -> AXUIElement {
@@ -528,6 +678,124 @@ final class AgentCursor {
     }
 }
 
+// What an agent needs from the user, said on the window it brought to them: "Waiting for you: Sign in", with a Done
+// button, in the chat's color. It sits at the top of the window the agent brought them, while that window is the one
+// they are in, until the user clicks Done, the agent goes on working there, the window closes, or the chat ends. It
+// stays between turns too, which is when an agent that has stopped to wait for the user needs it most. Over another
+// window, even one of the same app, it would say nothing of where the user is needed.
+final class AskLabel: NSObject {
+    var panel: NSPanel?
+    var app: NSRunningApplication?
+    var window: AXUIElement?
+    var timer: Timer?
+    var done: ((Bool) -> Void)?  // true when the user clicked Done, false when the window is gone
+    var isShowing: Bool { panel != nil }
+
+    func show(_ text: String, on app: NSRunningApplication, window: AXUIElement, color: NSColor?,
+              done: @escaping (Bool) -> Void) {
+        hide()
+        NSApplication.shared.setActivationPolicy(.accessory)  // no Dock icon, and it never becomes the active app
+        let label = NSTextField(labelWithString: "Waiting for you: " + text)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .white
+        label.lineBreakMode = .byTruncatingTail
+        // It fits in the window it is on: in a narrow one the text is cut short, and reads whole in the chat.
+        let room = (Watcher.frame(of: window)?.width ?? 600) - 120
+        label.widthAnchor.constraint(lessThanOrEqualToConstant: min(460, max(120, room))).isActive = true
+        let button = NSButton(title: "", target: self, action: #selector(clicked))
+        button.isBordered = false  // a system button's dark title can't be read on the chat's color
+        button.attributedTitle = NSAttributedString(string: "Done", attributes: [
+            .foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.24).cgColor
+        button.layer?.cornerRadius = 10
+        button.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let stack = NSStackView(views: [label, button])
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 7, left: 14, bottom: 7, right: 10)
+        let size = stack.fittingSize, bounds = NSRect(origin: .zero, size: size)
+        let panel = NSPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+                            defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        let back = NSView(frame: bounds)
+        back.wantsLayer = true
+        let tint = color ?? .darkGray
+        back.layer?.backgroundColor = (tint.blended(withFraction: 0.45, of: .black) ?? tint).cgColor
+        back.layer?.cornerRadius = size.height / 2
+        stack.frame = bounds
+        back.addSubview(stack)
+        panel.contentView = back
+        (self.panel, self.app, self.window, self.done) = (panel, app, window, done)
+        place()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in place() }
+    }
+
+    // Just under the window's title bar, and only while the user is in that window or in what is over it. A sheet or
+    // a dialog there is often the very thing they must answer, and the label would cover it, so it goes above the
+    // window when there is room. A window that has closed says so itself. One that doesn't answer is in a busy app,
+    // a page loading for instance, and is still there.
+    func place() {
+        var role: CFTypeRef?
+        guard let panel, let app, let window, !app.isTerminated,
+              AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) != .invalidUIElement else {
+            let ended = done
+            hide()
+            ended?(false)
+            return
+        }
+        let element = appElement(app.processIdentifier)
+        let current: AXUIElement? = attribute(element, kAXFocusedWindowAttribute)
+            ?? attribute(element, kAXMainWindowAttribute)
+        guard app.isActive, Self.belongs(current, to: window), let frame = Watcher.frame(of: window),
+              !Watcher.isOutOfSight(window), let screen = NSScreen.screens.first else { return panel.orderOut(nil) }
+        let size = panel.frame.size, menuBar = screen.frame.height - screen.visibleFrame.maxY
+        let inIt = current.map { CFEqual($0, window) } ?? true
+        let above = frame.minY - size.height - 6
+        let top = (!inIt || Self.hasSheet(window)) && above >= menuBar ? above : frame.minY + 36
+        // Windows count from the top, screens up.
+        panel.setFrameOrigin(NSPoint(x: frame.midX - size.width / 2, y: screen.frame.height - top - size.height))
+        panel.orderFrontRegardless()
+    }
+
+    // Whether the user, in `current`, is still with the window: in it, in a sheet on it, or in a dialog of the app's,
+    // which is over whatever window they were in. In another ordinary window the label would say of that one what it
+    // says of this. An app that doesn't say where they are is a busy one.
+    static func belongs(_ current: AXUIElement?, to window: AXUIElement) -> Bool {
+        guard let current, !CFEqual(current, window) else { return true }
+        if (attribute(current, kAXRoleAttribute) as String?) == kAXSheetRole as String {
+            return isSheet(current, of: window)
+        }
+        return (attribute(current, kAXSubroleAttribute) as String?) != kAXStandardWindowSubrole as String
+    }
+
+    static func isSheet(_ element: AXUIElement, of window: AXUIElement) -> Bool {
+        (attribute(element, kAXRoleAttribute) as String?) == kAXSheetRole as String
+            && (attribute(element, kAXParentAttribute) as AXUIElement?).map { CFEqual($0, window) } ?? false
+    }
+
+    static func hasSheet(_ window: AXUIElement) -> Bool {
+        let parts: [AXUIElement] = attribute(window, kAXChildrenAttribute) ?? []
+        return parts.contains { (attribute($0, kAXRoleAttribute) as String?) == kAXSheetRole as String }
+    }
+
+    @objc func clicked() {
+        let done = done
+        hide()
+        done?(true)
+    }
+
+    func hide() {
+        timer?.invalidate()
+        panel?.orderOut(nil)
+        (panel, app, window, timer, done) = (nil, nil, nil, nil, nil)
+    }
+}
+
 // Runs next to the server for as long as its stdin stays open, so it can't outlive the proxy. Commands come as one
 // JSON object per line on stdin; replies and reports go out the same way on stdout.
 //
@@ -545,16 +813,24 @@ final class AgentCursor {
 //   {"cursor": "#E5484D"}                               draw the agent's cursor in this color
 //   {"cursorTo": [640, 480]}                            move the cursor to this place on screen
 //   {"turnEnded": true}                                 the turn ended, so the cursor can go
+//   {"id": 5, "borrow": "Blender", "wait": 8}           bring this app to the front for an agent's steps, once the
+//                                                       user has done nothing for a moment
+//   {"id": 6, "giveBack": true}                         those steps are done: the user's app comes back
+//   {"id": 7, "front": true, "at": [640, 480]}          say which app is in front, and whose window is at a place
+//   {"id": 8, "atWork": "Safari"}                       say whether the user is typing or clicking in this app now
+//   {"ask": "Sign in", "app": "Safari", "window": "…"}  say on that window what the user must do ("": no more)
 //
 // Reports are {"event": "window", ...} for a new window, and {"event": "focus", ...} when an app that an agent's
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
 // it gave one of its windows out of sight the keyboard, while the user was in that app, and their window got it back.
 // {"event": "taken", ...} says the user came to an app ucu kept out of their sight, which is on their screen now.
+// {"event": "done", ...} says the user clicked Done on what the agent asked of them in an app.
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
                                             "AuthenticationServicesAgent", "coreautha"]
     static let quietTail = 1.5, windowSettle = 0.3, hideGuard = 3.0, noWindowLimit = 6.0, openLimit = 45.0
     static let inputWindow = 1.5, longestCall = 300.0, moveSettle = 0.3
+    static let secondLookWait = 3.0  // longer than a move to a desktop takes, which is up to 2.3 s
     // Apps come forward by themselves seconds after an action too, such as a browser once a page has loaded.
     static let guardTail = 10.0, allowGrace = 5.0, switchWindow = 1.0, modifierWindow = 0.5, focusTick = 0.1
     static let putBackCheck = 0.1, putBackTries = 3, oursGrace = 3.0, quitWait = 3.0, dockWindow = 5.0
@@ -562,12 +838,14 @@ final class Watcher {
     var watched = Set<String>()
     var own = Set<String>()  // the watched apps where the agent works in a window of its own, never in the user's
     var driven = [NSRunningApplication]()  // the watched apps that were running when the last call began
+    var doubted = Set<String>()  // windows a sweep found on a desktop without showing there: see rescueStranded
     var seenWindows = [pid_t: [AXUIElement]]()
     var seenDialogs = Set<Int>()
     var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
     var keptHidden = Set<pid_t>()
     let desktop = AgentDesktop()
     let cursor = AgentCursor()
+    let ask = AskLabel()
     var parked = [pid_t: (app: NSRunningApplication, places: [(AXUIElement, CGPoint)], target: CGPoint)]()
     var busySince = Date.distantFuture
     var busyUntil = Date.distantPast
@@ -580,6 +858,7 @@ final class Watcher {
     // Apps ucu opened for the agent, which stay out of the user's sight, on the desktop or else hidden, until the user
     // takes one: they can't come forward at any time while the chat runs.
     var launchedHidden = Set<pid_t>()
+    var opening = Set<URL>()  // the apps ucu is opening this moment: one can come forward before ucu has its process
     var launchedFresh = Set<pid_t>()  // those that weren't running before: they quit when the chat ends
     var resting = false  // between turns, this runs only to keep ucu's apps out of sight
     var observers = [pid_t: AXObserver]()  // new windows of parked apps, which join the others on the desktop
@@ -644,13 +923,14 @@ final class Watcher {
     // Between turns this goes, and the agent's desktop with it, unless it keeps apps ucu opened: with nothing here to
     // put the user's app back, one of them could come forward over it at any time.
     func restIfDone() {
-        if resting, keptApps().isEmpty { finish() }
+        if resting, keptApps().isEmpty, !ask.isShowing { finish() }  // a user who is asked something still sees it
     }
 
     // When the chat ends, the apps ucu opened for it are quit, so that none can come forward later with nothing to put
     // the user's app back. One that won't quit yet, such as one asking about unsaved changes, stays hidden. Without the
     // desktop, macOS moves its windows back to the user's screens, so they are hidden first.
     func finish() {
+        giveBack(id: nil)
         let leaving = keptApps(), started = Date()
         leaving.forEach { $0.terminate() }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [self] timer in
@@ -720,7 +1000,14 @@ final class Watcher {
     // belongs to the user's screen. The user clicks the app's Dock icon and nothing comes. A window that an agent
     // keeps on a desktop shows there, so it isn't one of these. Such a window gets a place on the user's main screen,
     // as far from its corner as it was from the desktop's; one in the Dock stays there, and comes out in sight.
-    func rescueStranded(of only: NSRunningApplication? = nil) {
+    //
+    // Another chat's ucu may be putting a window on its desktop this very moment: it moves the window while the app is
+    // hidden, and the window shows there a moment after the app is back. A sweep that finds it in between took it
+    // for stranded and moved it away, and the other chat was told it had no desktop. So on a sweep, a window that
+    // lies on a desktop without being in the Dock is only noted, and moved if a second look finds it there still.
+    func rescueStranded(of only: NSRunningApplication? = nil, secondLook: Bool = false) {
+        let noted = doubted
+        if secondLook { doubted = [] }
         let shown = Set((CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []).compactMap { window -> String? in
             guard let pid = window[kCGWindowOwnerPID as String] as? Int else { return nil }
@@ -735,14 +1022,25 @@ final class Watcher {
             for window in windows where Self.isOutOfSight(window) {
                 var movable = DarwinBoolean(false)  // Finder's desktop on a display is a window too, and stays
                 AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &movable)
-                guard movable.boolValue, let frame = Self.frame(of: window), frame.height > 60,
-                      !shown.contains("\(pid) \(Int(frame.minX)) \(Int(frame.minY))") else { continue }
+                guard movable.boolValue, let frame = Self.frame(of: window), frame.height > 60 else { continue }
+                let place = "\(pid) \(Int(frame.minX)) \(Int(frame.minY))"
+                guard !shown.contains(place) else { continue }
+                if only == nil, Self.isOnAgentDesktop(window), !flag(window, kAXMinimizedAttribute),
+                   !(secondLook && noted.contains(place)) {
+                    if !secondLook { doubted.insert(place) }
+                    continue
+                }
                 var display: CGDirectDisplayID = 0, count: UInt32 = 0
                 let on = CGGetDisplaysWithPoint(frame.origin, 1, &display, &count) == .success && count > 0
                 let corner = on ? CGDisplayBounds(display).origin : CGPoint(x: frame.minX - 120, y: frame.minY - 120)
                 move(window, to: CGPoint(x: max(frame.minX - corner.x, 0), y: max(frame.minY - corner.y, 30)))
                 log("a window of \(app.localizedName ?? "?") was out of the user's sight, where an agent's desktop is "
                     + "or was: it has a place on their screen again")
+            }
+        }
+        if !secondLook, !doubted.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.secondLookWait) {
+                self.rescueStranded(secondLook: true)
             }
         }
     }
@@ -811,17 +1109,363 @@ final class Watcher {
             }
         }
         if let name = command["open"] as? String {
-            open(name, deny: command["deny"] as? [String] ?? [], id: command["id"] ?? NSNull())
+            open(name, deny: command["deny"] as? [String] ?? [], id: command["id"] ?? NSNull(),
+                 desktopFirst: command["desktopFirst"] as? Bool ?? false)
         }
         if let names = command["show"] as? [String] { show(names, id: command["id"]) }
+        if command["situation"] != nil, let id = command["id"] {
+            // Where the user is. After every call the server asks only for what tells it of a change, which no
+            // app has to answer. For `list_windows` it asks for the line that goes with the list, `detail` being
+            // the app listed or "*", and for that app's windows on Spaces the user isn't looking at. This helper
+            // answers in half a millisecond, where the `list` command, started anew each time, took 55 ms more.
+            let layout = Spaces.layout()
+            var reply: [String: Any] = ["id": id, "doing": userActivity()]
+            if let app = NSWorkspace.shared.frontmostApplication { reply["app"] = app.localizedName ?? "an app" }
+            if let layout { reply["fullscreen"] = !layout.showing.isDisjoint(with: layout.fullScreen) }
+            if let detail = command["detail"] as? String {
+                let deny = (command["deny"] as? [String]).map { Set($0.map(key)) }
+                let windows = (layout?.all.count ?? 0) > 1 ? allWindows() : []
+                reply["line"] = userLine(deny: deny, layout: layout, windows: windows)
+                reply["screens"] = screens()
+                if let layout, !windows.isEmpty {
+                    let apps = detail == "*" ? NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+                                             : [running(detail)].compactMap { $0 }
+                    reply["elsewhere"] = apps.filter { !isDenied($0, by: deny) }
+                        .flatMap { windowsElsewhere(of: $0, layout: layout, windows: windows) }
+                }
+            }
+            emit(reply)
+        }
         if let names = command["park"] as? [String] {
             park(names, onlyHidden: command["onlyHidden"] as? Bool ?? false, id: command["id"])
+        }
+        if let name = command["borrow"] as? String, let id = command["id"] {
+            borrow(name, window: command["window"] as? String ?? "", wait: command["wait"] as? Double ?? 8,
+                   pointerOnly: command["pointerOnly"] as? Bool ?? false, id: id)
+        }
+        if command["quiet"] != nil, let id = command["id"] {
+            // Before a window is brought to the user: whether they have stopped typing, waited for as a step that
+            // takes the keyboard waits. Six characters went to a window handed over two seconds into a pause.
+            let until = Date() + (command["wait"] as? Double ?? 0)
+            func check() {
+                if Self.secondsSince(.keyDown) >= Self.lendQuiet { return emit(["id": id, "quiet": true]) }
+                if Date() >= until { return emit(["id": id, "quiet": false]) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
+            }
+            check()
+        }
+        if command["giveBack"] != nil { giveBack(id: command["id"]) }
+        if command["front"] != nil, let id = command["id"] {
+            if lent != nil { keepLending() }
+            if let was = lent, was.mode == "borrowed",
+               Self.secondsSince(.keyDown) < -was.started.timeIntervalSinceNow { lent?.userTyped = true }
+            let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+            var reply: [String: Any] = ["id": id, "front": name]
+            if lent?.userTyped == true { reply["typed"] = true }  // the server stops here, and gives the front back
+            if let at = command["at"] as? [Double], at.count == 2 {  // and which window a click at this place reaches
+                reply["top"] = Self.topWindow(at: CGPoint(x: at[0], y: at[1]))?.number ?? 0
+            }
+            emit(reply)
+        }
+        if let name = command["atWork"] as? String, let id = command["id"] {
+            // Whether the user is at work in this app right now: in it, and typing, clicking or scrolling.
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let inIt = running(name).map { $0.processIdentifier == front } ?? false
+            emit(["id": id, "atWork": inIt && Self.userIsActive(within: Self.lendIdle)])
+        }
+        if command["rest"] != nil { giveBack(id: nil) }  // a turn never ends with the user's screen still lent
+        if let text = command["ask"] as? String {
+            // The window is the one named, or the one the agent has just brought to the user, which the app is in.
+            let app = (command["app"] as? String).flatMap(running)
+            let element = app.map { appElement($0.processIdentifier) }
+            let named = key(command["window"] as? String ?? "")
+            let windows: [AXUIElement] = element.flatMap { attribute($0, kAXWindowsAttribute) } ?? []
+            let window = (named.isEmpty ? nil : windows.first { key(title($0)).contains(named) })
+                ?? element.flatMap { attribute($0, kAXFocusedWindowAttribute) }
+                ?? element.flatMap { attribute($0, kAXMainWindowAttribute) }
+            if !text.isEmpty, let app, let window {
+                let name = app.localizedName ?? "?"
+                ask.show(text, on: app, window: window, color: cursor.color) { [self] clicked in
+                    if clicked { emit(["event": "done", "app": name]) }
+                    restIfDone()
+                }
+            } else {
+                ask.hide()
+                restIfDone()
+            }
         }
         if command["desktop"] != nil, let id = command["id"] {
             withDesktop { area in
                 let bounds = area.map { [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] }
                 emit(["id": id, "bounds": bounds as Any])
             }
+        }
+    }
+
+    // MARK: lending the front
+
+    // Some steps can't be made behind the user's windows: a scroll or a drag at a place takes the real pointer, and
+    // some apps, such as one that shows another computer's screen, take input only while they are in front. For
+    // those the app comes to the front, but only once the user has done nothing for a moment, and when the steps are
+    // done their app and the pointer are as they were. That also happens by itself when the server stops saying
+    // it is at its steps, so one that crashed can't leave the user's screen taken.
+    //
+    // A window stays where it is. One on an agent's desktop takes the real pointer there, where the user sees none
+    // of it: brought to their screen it slides across it, is made to fit there, and ends up under their own windows
+    // of that app, which then get the agent's steps. One on their screen is raised over the others for the steps.
+    // Only a window on no screen at all comes into sight, and goes back.
+    //
+    // A user who clicks a window of the app meanwhile has taken it over: it stays as they left it. One who goes to
+    // another app stays there, and nothing comes to the front over them.
+    struct Lent {
+        let app: NSRunningApplication, previous: NSRunningApplication?, pointer: CGPoint?
+        let stray: AXUIElement?, strayFrame: CGRect?  // a window that was on no screen, and where it was
+        let userWindow: AXUIElement?  // the window of the same app the user was in
+        let knownWindow: AXUIElement?  // the window of the app that was known as the user's, for giveKeyboardBack
+        let wasHidden: Bool, wasKept: Bool
+        // "borrowed": the app came to the front. "front": the user was in that window already. "pointer": the window
+        // is on an agent's desktop and only the pointer goes to it. In the last two nothing changed but the pointer.
+        let mode: String
+        var light: Bool { mode != "borrowed" }
+        let started: Date
+        var timer: Timer?, userTookIt = false, userActed = false
+        // A key pressed while the app is in front is the user's, typing on into a window that came over theirs: the
+        // agent's own keys go to its app's process alone, and the HID state this reads doesn't count them. The steps
+        // stop at the next one.
+        var userTyped = false
+    }
+
+    // The keyboard goes with the front, and the user types in bursts: two characters went to a window that came
+    // forward two seconds into a pause of theirs. So an app takes the keyboard only after a longer pause in their
+    // typing than in the rest of what they do. Four seconds is twice that one pause, and no more than that.
+    static let lendIdle = 1.5, lendQuiet = 4.0, lendLimit = 20.0, lendSettle = 2.5, lendNudge = 0.3, lendStill = 0.15
+    var lent: Lent?
+    var userMonitor: Any?
+
+    func borrow(_ query: String, window named: String, wait: Double, pointerOnly: Bool, id: Any) {
+        guard let app = running(query) else { return emit(["id": id, "state": "unknown"]) }
+        let pid = app.processIdentifier
+        if let lent {  // one app at a time: a second would forget whose turn it is to come back
+            if lent.app.processIdentifier != pid {
+                return emit(["id": id, "state": "lent", "front": lent.app.localizedName ?? "?"])
+            }
+            keepLending()
+            return emit(["id": id, "state": lent.mode])
+        }
+        let element = appElement(pid)
+        let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
+        let wanted = named.isEmpty ? nil : windows.first { key(title($0)).contains(key(named)) }
+        let window = wanted ?? attribute(element, kAXMainWindowAttribute) ?? windows.first
+        // Whether the user is in that very window: the agent then works there with them, and nothing moves.
+        func isTheirs() -> Bool {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, let window,
+                  let focused: AXUIElement = attribute(element, kAXFocusedWindowAttribute) else { return false }
+            return CFEqual(window, focused) && !Self.isOutOfSight(window)
+        }
+        let until = Date() + wait
+        func attempt() {
+            if lent != nil { return emit(["id": id, "state": "lent", "front": lent?.app.localizedName ?? "?"]) }
+            // A scroll goes to the window under the pointer, in front or not. So for a window on an agent's desktop
+            // the pointer alone goes there, and the user's app keeps the keyboard.
+            let onDesktop = window.map { !app.isHidden && Self.isOnAgentDesktop($0) } ?? false
+            let mode = pointerOnly && onDesktop ? "pointer" : isTheirs() ? "front" : "borrowed"
+            let typing = mode == "borrowed" && Self.secondsSince(.keyDown) < Self.lendQuiet
+            // Wherever the window is, the real pointer is about to move: never while the user types, clicks or
+            // scrolls, least of all in that window.
+            if !Self.userIsActive(within: Self.lendIdle), !typing {
+                // A browser the chat works in with a window of its own has the user's windows too. Bringing it to
+                // the front for a moment brings those over the user's app, and takes their keyboard to a window
+                // they can't see, which ucu then gives back to theirs in the middle of the steps. So it isn't done.
+                if mode == "borrowed", isOwn(app) { return emit(["id": id, "state": "own"]) }
+                guard mode != "borrowed" else { return lend(app, window: window, id: id) }
+                lent = Lent(app: app, previous: nil, pointer: CGEvent(source: nil)?.location, stray: nil,
+                            strayFrame: nil, userWindow: nil, knownWindow: nil, wasHidden: false, wasKept: false,
+                            mode: mode, started: Date())
+                watchUser()
+                keepLending()
+                return emit(["id": id, "state": mode])
+            }
+            if Date() >= until {
+                let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
+                return emit(["id": id, "state": "busy", "front": front])
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { attempt() }
+        }
+        attempt()
+    }
+
+    func lend(_ app: NSRunningApplication, window: AXUIElement?, id: Any) {
+        let pid = app.processIdentifier, name = app.localizedName ?? "?", element = appElement(pid)
+        let previous = NSWorkspace.shared.frontmostApplication
+        let sameApp = previous?.processIdentifier == pid
+        // On no screen at all. A hidden app's windows keep their places, and one on an agent's desktop stays there.
+        let stray = window.flatMap { !app.isHidden && Self.isOutOfSight($0) && !Self.isOnAgentDesktop($0) ? $0 : nil }
+        lent = Lent(app: app, previous: previous, pointer: CGEvent(source: nil)?.location, stray: stray,
+                    strayFrame: stray.flatMap(Self.frame(of:)),
+                    userWindow: sameApp ? attribute(element, kAXFocusedWindowAttribute) : nil,
+                    knownWindow: userWindows[pid], wasHidden: app.isHidden, wasKept: keptHidden.contains(pid),
+                    mode: "borrowed", started: Date())
+        allowed = pid
+        allowedUntil = Date() + Self.lendLimit + 1  // it stays in front until it is given back
+        keptHidden.remove(pid)
+        if app.isHidden { app.unhide() }
+        if let stray { bringIntoSight(stray) }
+        func raise() {
+            guard let window else { return }
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+        raise()
+        // Activating brings the app's main window forward and leaves its others behind the user's app. Asking the app
+        // itself to be frontmost brings them all, so that is kept for an app that macOS doesn't activate.
+        app.activate()
+        watchUser()
+        keepLending()
+        log("\(name) is in front for steps of the agent's that can't be made behind: "
+            + (sameApp ? "the window the user was in" : previous?.localizedName ?? "the user's app")
+            + " comes back after them")
+        final class Settling {
+            var cameForward = false, nudged = false, frame: CGRect?, stillSince = Date()
+        }
+        let asked = Date(), settling = Settling()
+        Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [self] timer in
+            let waited = -asked.timeIntervalSinceNow
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                if waited > Self.lendNudge, !settling.nudged {
+                    settling.nudged = true
+                    AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                }
+                guard waited > Self.lendSettle else { return }
+                timer.invalidate()
+                giveBack(id: nil)
+                return emit(["id": id, "state": "failed"])
+            }
+            if !settling.cameForward {
+                settling.cameForward = true
+                raise()  // the app came forward with the window that was its main one, which may be another
+            }
+            // A window that has just come into sight, or to the front, may still be on its way.
+            let frame = window.flatMap(Self.frame(of:))
+            if frame != settling.frame {
+                settling.frame = frame
+                settling.stillSince = Date()
+            }
+            let still = -settling.stillSince.timeIntervalSinceNow >= Self.lendStill
+            guard still || waited > Self.lendSettle else { return }
+            timer.invalidate()
+            emit(["id": id, "state": "borrowed"])
+        }
+    }
+
+    // The server says it is still at its steps, each time it asks which app is in front. When it stops saying so,
+    // the user's app comes back by itself.
+    func keepLending() {
+        lent?.timer?.invalidate()
+        lent?.timer = Timer.scheduledTimer(withTimeInterval: Self.lendLimit, repeats: false) { [self] _ in
+            let name = lent?.app.localizedName ?? "?"
+            log("\(name) was not given back in \(Int(Self.lendLimit)) seconds, so ucu gives the user's app back itself")
+            giveBack(id: nil)
+        }
+    }
+
+    // The window at a place that a click there reaches: the one in front, of those that apps show in the usual way.
+    // An agent's cursor, this chat's or another's, is a window too, just above the one it works in: it takes no
+    // clicks, so it doesn't count.
+    static func topWindow(at point: CGPoint) -> (number: Int, pid: pid_t)? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let helper = ProcessInfo.processInfo.processName
+        let top = list.first {
+            ($0[kCGWindowLayer as String] as? Int) == 0 && ($0[kCGWindowOwnerName as String] as? String) != helper
+                && bounds(of: $0).contains(point)
+        }
+        guard let number = top?[kCGWindowNumber as String] as? Int,
+              let pid = top?[kCGWindowOwnerPID as String] as? Int else { return nil }
+        return (number, pid_t(pid))
+    }
+
+    // What the user does with the mouse while an app is lent. An agent's events carry the process that sent them.
+    // A click on a window of the app that the user can see is theirs to keep it.
+    func watchUser() {
+        guard userMonitor == nil else { return }
+        let kinds: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown, .mouseMoved]
+        userMonitor = NSEvent.addGlobalMonitorForEvents(matching: kinds) { [self] event in
+            guard let app = lent?.app, event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) == 0
+            else { return }
+            lent?.userActed = true
+            if event.type != .mouseMoved, let pointer = CGEvent(source: nil)?.location, !AgentDesktop.holds(pointer),
+               Self.topWindow(at: pointer)?.pid == app.processIdentifier {
+                lent?.userTookIt = true
+            }
+        }
+    }
+
+    func giveBack(id: Any?) {
+        guard let was = lent else {
+            if let id { emit(["id": id, "state": "none"]) }
+            return
+        }
+        lent = nil
+        was.timer?.invalidate()
+        let app = was.app, pid = app.processIdentifier, name = app.localizedName ?? "?"
+        let spent = "\(name) was in front for the agent's steps for "
+            + String(format: "%.1f", -was.started.timeIntervalSinceNow) + " s: "
+        // The pointer goes back where the user had it, unless they have moved it since. From an agent's desktop it
+        // always goes back: there they can't see it.
+        func pointerBack() {
+            guard let pointer = was.pointer else { return }
+            if !was.userActed || CGEvent(source: nil).map({ AgentDesktop.holds($0.location) }) == true {
+                CGWarpMouseCursorPosition(pointer)
+            }
+        }
+        if was.light {  // nothing changed but where the pointer is
+            pointerBack()
+            if let id { emit(["id": id, "state": "returned", "taken": false]) }
+            return
+        }
+        allowedUntil = .distantPast
+        var settle = 0.0
+        if was.userTookIt {
+            if parked[pid] != nil || launchedHidden.contains(pid) {  // an app ucu kept out of sight is theirs now
+                bringBack(app)
+                rescueStranded(of: app)
+            }
+            log(spent + "the user took it over, so it stays as it is")
+        } else {
+            let stillFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            if let stray = was.stray, let frame = was.strayFrame, !app.isTerminated {
+                var size = frame.size
+                move(stray, to: frame.origin)
+                if let value = AXValueCreate(.cgSize, &size) {
+                    AXUIElementSetAttributeValue(stray, kAXSizeAttribute as CFString, value)
+                }
+                settle = Self.moveSettle + 0.4
+            }
+            if was.wasHidden {
+                app.hide()
+                if was.wasKept { keptHidden.insert(pid) }
+            }
+            // While it was in front, the window the agent worked in counted as the one the user has in that app,
+            // which their keyboard goes back to. It is the one from before again.
+            userWindows[pid] = was.knownWindow
+            if !stillFront {
+                log(spent + "the user went elsewhere meanwhile, and stays there")
+            } else if let theirWindow = was.userWindow {
+                AXUIElementSetAttributeValue(theirWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementPerformAction(theirWindow, kAXRaiseAction as CFString)
+                log(spent + "the window the user was in is back")
+            } else if let previous = was.previous, !previous.isTerminated {
+                front = previous
+                AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
+                                             kCFBooleanTrue)
+                log(spent + "\(previous.localizedName ?? "the user's app") is back")
+            }
+            pointerBack()
+        }
+        guard let id else { return }
+        // A window on its way back to where it was is read only once it is there.
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
+            emit(["id": id, "state": "returned", "taken": was.userTookIt])
         }
     }
 
@@ -833,7 +1477,7 @@ final class Watcher {
 
     // MARK: quiet launches
 
-    func open(_ query: String, deny: [String], id: Any) {
+    func open(_ query: String, deny: [String], id: Any, desktopFirst: Bool = false) {
         var app = running(query)
         guard let url = app?.bundleURL ?? applicationURL(query) else {
             emit(["id": id, "state": app == nil ? "unknown" : "running"])  // the engine may still find it
@@ -852,15 +1496,23 @@ final class Watcher {
             app = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).first
             known[key(query)] = app
         }
+        // Some apps show a window in spite of a hidden launch, where they last had one. For an app an agent used
+        // before, that is on the agent's desktop, where it shows the user nothing, if the desktop is there by then.
+        // Made after the app was open, as it used to be, the desktop came too late: the window, nearly as large as
+        // the screen, was on the user's screen for a quarter of a second, and again for a fifth.
+        func start(_ state: String, limit: Double) {
+            guard desktopFirst else { return launch(url, id: id, state: state, limit: limit) }
+            withDesktop { [self] _ in launch(url, id: id, state: state, limit: limit) }
+        }
         if let app {
             if app.activationPolicy == .regular, !Self.hasWindows(app) {
-                launch(url, id: id, state: "reopened", limit: 2)  // the engine needs a window to work on
+                start("reopened", limit: 2)  // the engine needs a window to work on
                 return
             }
             emit(["id": id, "state": "running", "active": app.isActive])
             return
         }
-        launch(url, id: id, state: "opened", limit: Self.noWindowLimit)
+        start("opened", limit: Self.noWindowLimit)
     }
 
     func launch(_ url: URL, id: Any, state: String, limit: Double) {
@@ -869,8 +1521,10 @@ final class Watcher {
         configuration.hides = true
         configuration.addsToRecentItems = false
         configuration.promptsUserIfNeeded = false
+        opening.insert(url.standardizedFileURL)
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
             DispatchQueue.main.async { [self] in
+                opening.remove(url.standardizedFileURL)
                 if let app {
                     launchedHidden.insert(app.processIdentifier)
                     if state == "opened" { launchedFresh.insert(app.processIdentifier) }
@@ -991,7 +1645,12 @@ final class Watcher {
             let started = Date()
             func placed() -> Bool { targets.allSatisfy { !$0.0.isHidden && Self.isOnScreen($0.0, at: $0.1) } }
             func finish() {
-                if let id { emit(["id": id, "state": placed() ? "parked" : "no desktop", "moved": moved]) }
+                let done = placed()
+                // An app whose window was moved away from there meanwhile is as it was before. Left as one that is on
+                // the desktop, every later try would find it done and not there, and say again that there is no
+                // desktop. One whose windows are there and only don't show yet is left: the next try finds them.
+                if !done { for (app, target) in targets where self.strayed(app, from: target) { self.unpark(app) } }
+                if let id { emit(["id": id, "state": done ? "parked" : "no desktop", "moved": moved]) }
             }
             apps.filter(\.isHidden).forEach { $0.unhide() }
             if placed() { return finish() }
@@ -1002,6 +1661,13 @@ final class Watcher {
                 }
             }
         }
+    }
+
+    // Whether a window that was moved to the desktop with its app is somewhere else now.
+    func strayed(_ app: NSRunningApplication, from target: CGPoint) -> Bool {
+        parked[app.processIdentifier]?.places.contains {
+            Self.frame(of: $0.0).map { abs($0.minX - target.x) > 2 || abs($0.minY - target.y) > 2 } ?? false
+        } ?? false
     }
 
     func move(_ window: AXUIElement, to point: CGPoint) {
@@ -1060,6 +1726,11 @@ final class Watcher {
 
     func bringBack(_ app: NSRunningApplication) {
         launchedHidden.remove(app.processIdentifier)
+        unpark(app)
+    }
+
+    // An app's windows go back from the agent's desktop to where they were, and it is no longer kept there.
+    func unpark(_ app: NSRunningApplication) {
         guard let place = parked.removeValue(forKey: app.processIdentifier) else { return }
         stopWatchingWindows(of: app.processIdentifier)
         place.places.forEach { move($0.0, to: $0.1) }
@@ -1090,6 +1761,25 @@ final class Watcher {
             guard let point, let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] else { return true }
             return abs((bounds["X"] ?? .infinity) - point.x) < 2 && abs((bounds["Y"] ?? .infinity) - point.y) < 2
         }
+    }
+
+    // The app whose window the user sees on top: the owner of the first ordinary window, front to back, that lies on
+    // a screen of theirs. An agent's desktop is a screen for macOS too, and the windows of the app in front come first
+    // wherever they are, so those are passed over. Only an app with a Dock icon is one to hand the keyboard to, and
+    // not one whose place is the agent's desktop.
+    func appInSight(besides skipped: [pid_t]) -> NSRunningApplication? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for window in list where (window[kCGWindowLayer as String] as? Int) == 0 {
+            let frame = bounds(of: window), bar = CGPoint(x: frame.midX, y: frame.minY + min(frame.height / 2, 20))
+            guard frame.height > 60, (window[kCGWindowAlpha as String] as? Double ?? 0) > 0,
+                  !AgentDesktop.isOutOfSight(bar),
+                  let pid = (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init), !skipped.contains(pid),
+                  !isKept(pid), let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
+                  !app.isHidden, !app.isTerminated else { continue }
+            return app
+        }
+        return nil
     }
 
     // MARK: new windows
@@ -1204,10 +1894,14 @@ final class Watcher {
         let isNew = launched > busySince && Date() < busyUntil  // started during the call that is running
         let ours = Date() < oursUntil[pid] ?? .distantPast
         let owned = launchedHidden.contains(pid), name = app.localizedName ?? "?"
+        // An app ucu itself is opening is not one the user opened, whatever they do meanwhile. Taken for theirs
+        // because they were typing as it started, Windows App kept the front for 6.7 seconds, out of sight on the
+        // agent's desktop, and got what they typed. Their click on its Dock icon is still theirs.
+        let opened = isNew && (owned || app.bundleURL.map { opening.contains($0.standardizedFileURL) } ?? false)
         // Whether the user came to it is settled here, once, before the app is asked anything: a busy app answers
         // seconds later, and by then their click is no longer new, so it would be undone.
         let onDock = clickedDockIcon(of: app)
-        let theirs = onDock || (!ours && Self.userSwitched())
+        let theirs = onDock || (!ours && !opened && Self.userSwitched())
         // Once it has brought its app forward, the click holds for a moment more and no longer: if they leave the
         // app again, an agent's step that brings it forward seconds later isn't their doing.
         if onDock { dockClick?.at = Date() - Self.dockWindow + Self.switchWindow }
@@ -1222,15 +1916,20 @@ final class Watcher {
                 emit(["event": "taken", "app": name, "names": names])
             }
         }
-        guard let previous, previous.processIdentifier != pid, !previous.isTerminated,
-              !(pid == allowed && Date() < allowedUntil) else { return }
+        guard let previous, previous.processIdentifier != pid, !(pid == allowed && Date() < allowedUntil)
+        else { return }
+        // An app that has quit can't have the front back, so the one macOS brings forward then is left alone. Unless
+        // that one has no window in the user's sight: the front goes on to the app whose window they see on top.
+        if previous.isTerminated {
+            if isUnseen(app) { passOn(from: app, past: previous) }
+            return
+        }
         let over = "\(name) came forward over \(previous.localizedName ?? "?")"
         // A new app is held back while a call runs, unless the user did anything since just before it started.
         if isNew {
-            guard !theirs, !Self.userIsActive(within: -launched.timeIntervalSinceNow + Self.inputWindow) else {
-                return log("\(over) as it started: left in front, as the user may have opened it")
-            }
-            putBack(previous, over: app, why: "it started while the agent worked")
+            guard !theirs, opened || !Self.userIsActive(within: -launched.timeIntervalSinceNow + Self.inputWindow)
+            else { return log("\(over) as it started: left in front, as the user may have opened it") }
+            putBack(previous, over: app, why: opened ? "ucu was opening it" : "it started while the agent worked")
             if parked[pid] == nil { keepHidden(app, id: nil) }
             return
         }
@@ -1238,7 +1937,10 @@ final class Watcher {
         // opened, whose place is out of sight, while the chat runs. When the agent is bringing it forward, the user's
         // clicks elsewhere have nothing to do with it. The user's app must still be in sight: if it isn't, they went to
         // another Space themselves.
-        guard (Date() < guardUntil && driven.contains(app)) || owned || ours else { return }
+        // Nor can one whose windows the agent keeps on its desktop, while none of them is in the user's sight: in front,
+        // it has their keyboard in a window they can't see.
+        let unseen = parked[pid] != nil && !hasWindowInSight(app)
+        guard (Date() < guardUntil && driven.contains(app)) || owned || ours || unseen else { return }
         // A click on the app's own window is the user's, even as the agent's step brings the app forward.
         if ours, Self.clicked(app) {
             giveKeyboardBack(in: app)
@@ -1255,8 +1957,12 @@ final class Watcher {
             giveKeyboardBack(in: app)
             return log("\(over): left in front, as the user clicked \(onDock ? "its Dock icon" : "or switched apps")")
         }
-        if previous.isHidden || !Self.isOnScreen(previous) {
-            return log("\(over): left in front, as the user's app was out of sight")
+        if isGone(previous) {
+            // That holds for an app with a window on a Space of theirs. One with no window in their sight is on no
+            // Space they could have gone to: macOS brought it because it was next in line, as when ucu hides the app in
+            // front to move it to the agent's desktop. So the front goes to the app whose window they see on top.
+            guard unseen else { return log("\(over): left in front, as the user's app was out of sight") }
+            return passOn(from: app, past: previous)
         }
         putBack(previous, over: app, ours: ours, why: ours ? "the agent's step brought it" : "it came by itself")
         if owned, parked[pid] == nil { app.hide() }  // without a desktop, ucu's app goes back into hiding
@@ -1271,6 +1977,22 @@ final class Watcher {
         return windows.contains { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
     }
 
+    // Whether an app's windows are all where the agent keeps them, on its desktop, with none in the user's sight.
+    func isUnseen(_ app: NSRunningApplication) -> Bool {
+        parked[app.processIdentifier] != nil && !hasWindowInSight(app)
+    }
+
+    // Whether ucu keeps an app's windows on the agent's desktop while no request of the agent's has it in front.
+    func isKept(_ pid: pid_t) -> Bool {
+        parked[pid] != nil && !(pid == allowed && Date() < allowedUntil)
+    }
+
+    // Whether an app can't have the front back: it has quit, is hidden or shows no window, or its place is the
+    // agent's desktop. One that ucu is moving there is hidden for the move, and says so itself a moment late.
+    func isGone(_ app: NSRunningApplication) -> Bool {
+        app.isTerminated || app.isHidden || !Self.isOnScreen(app) || isKept(app.processIdentifier)
+    }
+
     // Whether the user's last click, a moment ago, was on a window of this app.
     static func clicked(_ app: NSRunningApplication) -> Bool {
         guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(where: { secondsSince($0) < switchWindow }),
@@ -1281,22 +2003,45 @@ final class Watcher {
         return (top?[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier)
     }
 
-    // The user's app comes back to the front. Asking it can fail while it is busy, so it is asked again.
-    func putBack(_ previous: NSRunningApplication, over app: NSRunningApplication, ours: Bool = false, why: String,
-                 tries: Int = putBackTries) {
+    // The front goes from an app with no window in the user's sight to the app whose window they see on top, when the
+    // one it came forward over can't have it back. The windows on screen change while an app quits or hides, so with
+    // no such app it looks again.
+    func passOn(from app: NSRunningApplication, past lost: NSRunningApplication, tries: Int = putBackTries) {
+        if let seen = appInSight(besides: [app.processIdentifier, lost.processIdentifier]) {
+            let why = "neither has a window in the user's sight, so \(seen.localizedName ?? "?") has the front"
+            return putBack(seen, over: app, past: lost, why: why)
+        }
+        guard tries > 1 else {
+            return log("\(app.localizedName ?? "?") came forward over \(lost.localizedName ?? "?"): left in front, "
+                       + "as the user's app was out of sight")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.putBackCheck) { [self] in
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier, isUnseen(app)
+            else { return }
+            passOn(from: app, past: lost, tries: tries - 1)
+        }
+    }
+
+    // The user's app comes back to the front. Asking it can fail while it is busy, so it is asked again. `lost` is the
+    // app that was in front, when that one can't have the front back and another app of the user's gets it.
+    func putBack(_ previous: NSRunningApplication, over app: NSRunningApplication, past lost: NSRunningApplication? = nil,
+                 ours: Bool = false, why: String, tries: Int = putBackTries) {
         front = previous
         AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
                                      kCFBooleanTrue)
         if tries == Self.putBackTries {
+            let over = (lost ?? previous).localizedName ?? "?"
             emit(["event": "focus", "app": app.localizedName ?? "?", "back": previous.localizedName ?? "?"])
-            log("\(app.localizedName ?? "?") came forward over \(previous.localizedName ?? "?"), as \(why): put back")
+            log("\(app.localizedName ?? "?") came forward over \(over), as \(why): put back")
         }
         guard tries > 1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.putBackCheck) { [self] in
             let stays = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
             guard stays, ours ? !Self.clicked(app) : !Self.userSwitched() else { return }
+            // The app that was asked may have gone since: it was on its way out as this one came forward.
+            if isUnseen(app), isGone(previous) { return passOn(from: app, past: lost ?? previous) }
             if tries == 2 { log("\(app.localizedName ?? "?") stayed in front after ucu asked twice: asking once more") }
-            putBack(previous, over: app, ours: ours, why: why, tries: tries - 1)
+            putBack(previous, over: app, past: lost, ours: ours, why: why, tries: tries - 1)
         }
     }
 
@@ -1496,13 +2241,49 @@ case "focus", "unfullscreen":
             if Watcher.isOutOfSight(window) { bringIntoSight(window) }  // the user asked to see it
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             app.unhide()
+            // macOS doesn't activate every app it is asked to, and says nothing of it: a program run from a terminal
+            // stayed behind while its window was reported as main. The app itself, asked to be in front, comes.
+            AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
             app.activate()
+            for _ in 0..<50 where NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+                usleep(10_000)
+            }
         }
         for _ in 0..<20 where !isMain(window, of: element) { usleep(10_000) }
     }
-    let isMain = isMain(window, of: element)
-    print("\"\(title(window))\" main=\(isMain) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))")
-    exit(command == "focus" && !isMain ? 4 : 0)
+    var main = isMain(window, of: element)
+    // Brought to the user, a window is in front of them once its app is in front and it is in their sight, whether
+    // or not it is the app's main window, so that alone is no failure. The app is asked itself whether it is in
+    // front, and given a moment: the server moves its windows to the user's screen meanwhile. It can come forward
+    // with another of its windows as the one the user is in, over the one asked for, so that one is raised again
+    // once the app is there. If they still aren't in it, the result says so: a label shows only once they are.
+    var shown = false, elsewhere = false
+    if command == "focus", !main, args.contains("--activate") {
+        func arrived() -> Bool { flag(element, kAXFrontmostAttribute) && !Watcher.isOutOfSight(window) }
+        func userIsInIt() -> Bool {
+            guard let current: AXUIElement = attribute(element, kAXFocusedWindowAttribute) else { return false }
+            return CFEqual(current, window) || AskLabel.isSheet(current, of: window)
+        }
+        for _ in 0..<250 where !arrived() { usleep(10_000) }
+        shown = arrived()
+        if shown, !userIsInIt() {
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            for _ in 0..<15 where !userIsInIt() { usleep(10_000) }
+            if !userIsInIt() {  // raised, and another window still has the keyboard
+                AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                for _ in 0..<15 where !userIsInIt() { usleep(10_000) }
+            }
+            main = isMain(window, of: element)
+        }
+        let current = (attribute(element, kAXFocusedWindowAttribute) as AXUIElement?)
+            ?? attribute(element, kAXMainWindowAttribute)
+        elsewhere = shown && !AskLabel.belongs(current, to: window)
+    }
+    let sheet = args.contains("--activate") && AskLabel.hasSheet(window)  // which the user must answer first
+    print("\"\(title(window))\" main=\(main) fullscreen=\(flag(window, "AXFullScreen")) frame=\(frame(window))"
+          + (sheet ? " under=sheet" : "") + (elsewhere ? " user=elsewhere" : ""))
+    exit(command == "focus" && !main && !shown ? 4 : 0)
 case "press":
     guard args.count >= 3 else { fail("usage: ucu-window press <app> <shortcut>") }
     guard let (item, path) = menuItem(for: args[2], in: element) else {

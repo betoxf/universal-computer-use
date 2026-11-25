@@ -334,11 +334,20 @@ class ServerTest(unittest.TestCase):
         typed = self.server.act({"do": "type", "name": "Shown", "text": "x"}, app="Ghost")
         self.assertIn("image Shown is no longer in the window", self.server.text(typed))
 
-    def test_refuses_a_scroll_at_a_place_instead_of_clicking_there(self):
+    def test_makes_no_scroll_at_a_place_without_a_helper_to_give_the_users_app_back(self):
         self.server.look()
         reply = self.server.act({"do": "scroll", "xy": [10, 10], "direction": "down"})
-        self.assertIn("`xy` works with click", self.server.text(reply))
+        self.assertIn("These steps need Calculator in front", self.server.text(reply))
         self.assertEqual(self.server.batched(), [])
+        typed = self.server.act({"do": "type", "xy": [10, 10], "text": "x"})
+        self.assertIn("`xy` works with click", self.server.text(typed))
+
+    def test_clicks_a_place_in_a_window_where_the_window_is_now(self):
+        self.server.look(app="Moved")
+        reply = self.server.act({"do": "click", "xy": [10, 20]}, app="Moved")
+        self.assertFalse(reply["result"]["isError"], self.server.text(reply))
+        self.assertEqual(self.server.batched(),
+                         [{"command": "mouse-click", "args": {"xy": "510,620", "app": "Moved", "window_id": "w-1"}}])
 
     def test_pauses_when_a_wait_names_no_text(self):
         self.server.look()

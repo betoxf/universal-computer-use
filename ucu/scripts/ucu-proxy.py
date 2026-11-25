@@ -47,6 +47,7 @@ Its tests are in tests/test_proxy.py, tests/test_policy.py, tests/test_alerts.py
 import argparse
 import base64
 import collections
+import fcntl
 import hashlib
 import itertools
 import json
@@ -99,18 +100,53 @@ ALERT_LINE = re.compile(r"actionID 4096, inClientPID \d+\((.+?)\)")  # 4096 is t
 ALERT_LATE = 1  # seconds after a call in which a sound still belongs to it
 OPEN_TIMEOUT, SHOW_TIMEOUT = 50, 3  # seconds; the helper gives up on an app before OPEN_TIMEOUT
 PARK_TIMEOUT, SHOT_TIMEOUT = 6, 15
+SITUATION_TIMEOUT = 1  # the helper answers from what it already knows
 SESSIONS = Path.home() / "Library/Application Support/ucu/sessions"
 SHARED_APP_AGE = 180  # seconds since another chat last got an app
 CURSOR_COLORS = ("#E5484D", "#2B9A66", "#3358D4", "#E8590C", "#8E4EC6", "#0D9488", "#D6409F", "#C99700")
 TAB_NOTE_LIMIT = 8    # tabs of a window that a note about the user's changes lists
 OLD_ENGINE_CLICK = ("{} has another window at that place, and this ucu-engine can't aim a click at one of two, so the "
                     "step was not made. `ucu update` builds one that can.")
-XY_ONLY_CLICKS = ("`xy` works with click, double-click, right-click and triple-click. Nothing scrolls at a place in "
-                  "the background yet: scroll an element by its number, or press keys such as down or space.")
+XY_ONLY_CLICKS = "`xy` works with click, double-click, right-click, triple-click, scroll and drag."
+ASK_LIMIT = 120       # characters of what an agent asks of the user that show on the window
+FRONT_LOCK = Path.home() / "Library/Application Support/ucu/front.lock"  # held by the chat whose app is in front
+FRONT_TAKEN = "Another agent's steps have the front of the user's screen right now. Try again in a moment."
+BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
+USER_BUSY = ("The user is working in {}, and these steps take their pointer, and may bring {} to the front. Do what "
+             "can be done behind, try again in a while, or ask them.")
+USER_TYPED = ("The user started typing while {} was in front for your steps, so the rest of them were not made, and "
+              "their app is back. Try again when they pause.")
+USER_TYPING = ("The user is typing, and {} in front would take the keyboard from what they write, so it was not "
+               "brought to them. Try again in a moment, or say in the chat what you need.")
+LEFT_FRONT = ("{} is in front now, so the user has gone on with their own work: the rest of these steps, which need "
+              "{} in front, were not made.")
+NO_BORROW = ("These steps need {} in front, and this ucu-window can't bring it there and give the user's app back: "
+             "`ucu install` builds one that can.")
+OWN_FRONT = ("{} has the user's own windows too, so it isn't brought to the front for your steps. Use the browser "
+             "tool, which clicks and types in the page. A scroll by `xy` works in a window of your own on your "
+             "desktop.")
+FRONT_DWELL = 0.25    # seconds an app stays in front after the last step, which an app that is left at once can lose
+POINTER_MISSED = ("The pointer didn't get to that place, so the step was not made: the user may be moving it. Try "
+                  "again in a moment.")
+COVERED = ("Another window is over that place in {}, so the step was not made: it would have landed in that one. "
+           "`look` with screenshot shows the window as it is.")
+BORROWED_NOTE = ("{} was in front for the steps that can't be made behind, and the user's app is back in front "
+                 "now.")
+TOOK_OVER_NOTE = "The user took over {} during your steps, so it stays where they have it."
+ASK_NOTE = ("The user sees what you ask of them on the window, with a Done button. Don't act in it until they are "
+            "done: `wait` for what shows then, or end your turn and tell them what you need.")
+UNDER_NOTE = "A sheet of the app's is over that window, and the user sees both."
+ASK_ELSEWHERE_NOTE = ("The app is in front of the user, in another of its windows. What you ask of them shows on this "
+                      "window, with a Done button, once they are in it: say in the chat which window it is. Don't act "
+                      "in it until they are done: `wait` for what shows then, or end your turn.")
+USER_AT_WORK = ("The user is doing what you asked of them in {} right now. Leave it to them: `wait` for what shows "
+                "when they are done, or end your turn.")
+DONE_NOTE = "[ucu: The user clicked Done on what you asked of them in {}. Go on there.]"
+TRY_FRONT_NOTE = "If the picture shows no change either, the app may take input only in front: pass `front: true`."
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
                "screenshot shows.")
-SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab first and leave it "
-                "open: they can't see it where it is.")
+SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab, with `text` saying "
+                "what to do, and leave it open: they can't see it where it is.")
 SAFARI_TIMEOUT = 45   # seconds; a page showing a dialog blocks every script until it is answered
 SAFARI_PAINT = 0.45   # seconds Safari takes to paint a page that has been hidden
 ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
@@ -126,6 +162,7 @@ BROWSER_NOTE = ("[ucu: The user is working in {}, and this acts on the window th
 OWN_BROWSER = "Your own {} window works out of the user's sight already: use the `{}` tool."
 SHARED_NOTE = ("[ucu: Another agent ({}) is using {}. Two agents on one app undo each other's work: wait for it, or "
                "ask the user.]")
+USER_NOTE = "[ucu: The user is in {}{}, {}.]"
 FOCUS_NOTE = ("[ucu: {} came to the front during your actions, so ucu put {} back: the user keeps their focus. Check "
               "that the app did what you meant.]")
 WINDOW_FOCUS_NOTE = ("[ucu: {} gave one of your windows the user's keyboard, so ucu gave it back to their window. "
@@ -153,18 +190,20 @@ USAGE_RULES = """ucu rules:
 it, and when you know an element's name, act on it by `name` without looking first.
 - Prefer numbers over positions. Use `xy` for what has no number, with pixels from a `look` screenshot.
 - With several windows, pass part of a title as `window`. Calls for different apps can run together.
-- Everything works in the background. Bring an app to the front only when the user asks to see it or be taken \
-there, or has to act in it themselves, such as to sign in (focus_window with activate, or `show` in the browser \
-tools): they can't see your windows, so do it before you ask them. Never do it to make an action work, and never use \
-the clipboard, which is theirs. If something can't be done in the background, ask the user.
+- Everything works in the background. A scroll or drag by `xy` takes the real pointer, and a drag the front too: \
+`act` takes them once the user is idle, and gives them back after. If steps by `xy` change nothing in an app's \
+picture, it may take input only in front: do them again with `front: true`. When `act` says the user is busy, do \
+other work and try again, or ask them.
+- Bring an app to the user yourself only when they ask to see it or be taken there, or have to act in it, such as \
+to sign in (focus_window with activate, or `show` in the browser tools): they can't see your windows, so do it \
+before you ask them, and say what you need with `ask` or `text`, which shows on the window until they are done. \
+Never use the clipboard, which is theirs.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in tabs of your own while the user is in \
 theirs. Put what belongs together in one call's `steps`.
-- If an action has no visible effect, stop and tell the user: remote-desktop and canvas apps can ignore background \
-input.
 - Don't let two agents drive the same app at the same time."""
-APP_PROPERTY = {"type": "string", "description": 'Name or bundle id of an app, e.g. "Calculator".'}
-WINDOW_PROPERTY = {"type": "string", "description": "Part of a window's title, for an app with several windows."}
+APP_PROPERTY = {"type": "string", "description": "An app's name or bundle id."}
+WINDOW_PROPERTY = {"type": "string", "description": "Part of a window's title, when the app has several."}
 SIMPLE_STEPS = ("click", "double-click", "right-click", "triple-click", "focus", "toggle", "check", "uncheck", "expand",
                 "collapse", "clear", "scroll-to")
 TEXT_STEPS = {"type": "text", "set-value": "value", "select": "value"}
@@ -175,61 +214,63 @@ WINDOW_TOOLS = [
                     "for what the tree doesn't show.",
      "inputSchema": {"type": "object", "required": ["app"], "properties": {
          "app": APP_PROPERTY, "window": WINDOW_PROPERTY, "find": {"type": "string"},
-         "full": {"type": "boolean", "description": "The whole tree, however long, instead of what changed."},
+         "full": {"type": "boolean", "description": "The whole tree, not what changed."},
          "screenshot": {"type": "boolean"}}},
      "annotations": {"readOnlyHint": True}},
     {"name": "act",
-     "description": "Do steps in an app, in order, without moving the user's pointer or taking focus, then return what "
-                    "changed. It stops at the first step that fails. A step is {do, on, ...}: `do` is "
+     "description": "Do steps in an app, in order, in the background, then return what changed. It stops at the "
+                    "first step that fails. A step is {do, on, ...}: `do` is "
                     + ", ".join(SIMPLE_STEPS) + ", type or set-value (with text), select (with text), scroll (with "
                     "direction and optional amount), press (with keys such as cmd+n or Return), menu (with text such "
                     "as File > New Window) or wait (amount seconds, or until text shows). The last three take "
-                    "no `on`. `on` is a number from look; or pass `name`, the element's name, and skip the look. For a "
-                    "click where there is neither, pass xy: [x, y].",
+                    "no `on`. `on` is a number from look; or pass `name`, the element's name, and skip the look. With "
+                    "neither, click or scroll at xy: [x, y], or drag from xy to `to`. That scroll or drag, and steps "
+                    "with `front: true`, bring the app to the front once the user is idle, then theirs back.",
      "inputSchema": {"type": "object", "required": ["app", "steps"], "properties": {
-         "app": APP_PROPERTY, "window": WINDOW_PROPERTY,
+         "app": APP_PROPERTY, "window": WINDOW_PROPERTY, "front": {"type": "boolean"},
          "steps": {"type": "array", "items": {"type": "object", "required": ["do"], "properties": {
              "do": {"type": "string"}, "on": {"type": "integer"}, "name": {"type": "string"},
              "text": {"type": "string"},
              "keys": {"type": "string"}, "direction": {"enum": ["up", "down", "left", "right"]},
-             "amount": {"type": "integer"}, "xy": {"type": "array", "items": {"type": "number"}}}}}}}},
+             "amount": {"type": "integer"}, "xy": {"type": "array"},
+             "to": {"type": "array"}}}}}}},
     {"name": "list_windows",
      "description": "List an app's windows, or every app's without `app`: title, main (the one `look` reads by default), "
                     "dialog or panel, minimized, fullscreen, and frame. A header shows if the app is hidden.",
      "inputSchema": {"type": "object", "properties": {"app": APP_PROPERTY}},
      "annotations": {"readOnlyHint": True}},
     {"name": "focus_window",
-     "description": "Make a window its app's main window. It stays where it is unless `activate` is set. Fails if "
-                    "the title matches no window or several.",
+     "description": "Make a window its app's main window. It stays where it is unless `activate` is set. Fails "
+                    "unless the title matches one window.",
      "inputSchema": {"type": "object", "properties": {
          "app": APP_PROPERTY,
-         "title": {"type": "string", "description": "Part of the window's title, as list_windows shows it."},
-         "unfullscreen": {"type": "boolean", "description": "Leave full screen first (default false)."},
-         "activate": {"type": "boolean", "description": "Bring the window to the user's screen and the front, only "
-                                                        "when they asked to see it or must act in it (default "
-                                                        "false)."}},
+         "title": {"type": "string", "description": "Part of its title, as list_windows shows it."},
+         "unfullscreen": {"type": "boolean", "description": "Leave full screen first."},
+         "activate": {"type": "boolean", "description": "Bring it to the user's screen, in front: only when they "
+                                                        "ask or must act in it."},
+         "ask": {"type": "string", "description": "With activate: what they must do, shown there."}},
          "required": ["app", "title"]}},
     {"name": "move_to_desktop",
-     "description": "Move an app's windows to your private desktop, a display the user can't see. They keep working, "
-                    "with clicks by coordinates and screenshots too. focus_window with activate: true brings them "
-                    "back.",
+     "description": "Move an app's windows to your private desktop, a display the user can't see. They keep "
+                    "working, clicks by xy and screenshots too. focus_window with activate brings them back.",
      "inputSchema": {"type": "object", "properties": {"app": APP_PROPERTY}, "required": ["app"]}},
     {"name": "safari",
      "description": "Work in Safari in tabs of your own, behind the tab the user is on in their window, without "
-                    "taking focus. `list` shows every window and tab, and which are yours. `open` "
+                    "taking focus. `list` shows every window and tab, and whose. `open` "
                     "loads a URL in a new tab of yours. In your tabs: "
                     "`navigate`, `read` (what: text, html, links, or interactive, which gives refs), `click`, `type`, "
-                    "`wait`, `eval` (a function body that returns a value, and may await), `upload` and `shot` (a "
+                    "`wait`, `eval` (a function body that returns a value; may await), `upload` and `shot` (a "
                     "screenshot). "
                     "`close` closes a tab, or all of yours without tab_index. window_id and tab_index default to your "
                     "last tab. Changing a tab of the user's needs allow_user_tab, and the one they are viewing also "
                     "allow_current_tab: only if they asked. Clicks are made by script, which some pages ignore. "
                     "`upload` puts files (`paths`) in a file input (ref, or selector, default the first) or "
                     "drops them on an element, with no picker: confirm with the user first. `show` brings your tab to "
-                    "the front, only when the user asks to see it or must act in it, such as to sign in. "
+                    "the user, only when they ask or must act in it, such as to sign in: with `text`, it says there "
+                    "what they must do. "
                     "`away` moves it to your private desktop until your turn ends, for a page that stalls or "
                     "ignores your clicks: there `click` with `real` presses for real. `steps` runs several "
-                    "operations in one call, each {op, ...}, and stops at the first that fails.",
+                    "operations in one call, each {op, ...}, stopping at the first that fails.",
      "inputSchema": {"type": "object", "properties": {
          "op": {"enum": ["list", "open", "navigate", "read", "click", "type", "wait", "eval", "upload", "shot",
                          "show", "hide", "away", "close"]},
@@ -282,6 +323,10 @@ def sign_in_note(result, note):
     return note
 
 
+def valid_place(xy):
+    return isinstance(xy, list) and len(xy) == 2 and all(isinstance(at, (int, float)) for at in xy)
+
+
 def run_window_tool(name, arguments):
     """Run ucu-window for a list_windows or focus_window call; return (text, failed)."""
     command = ["list", *([str(arguments["app"])] if arguments.get("app") else [])]
@@ -297,6 +342,23 @@ def run_window_tool(name, arguments):
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"ucu-window could not run ({error}); `ucu install` builds it", True
     return (result.stdout + result.stderr).strip(), result.returncode != 0
+
+
+LISTED_WINDOW = re.compile(r'\[\d+\] ".*" (?:[a-z]+ )*(-?\d+),(-?\d+) (\d+)x(\d+)')
+
+
+def placed(line, screens):
+    """A line of `ucu-window list` for a window, with where that window is for the user: on a screen of theirs, on an
+    agent's desktop, or on none. Its title bar says which, as in ucu-window. A minimized window is in the Dock."""
+    found = LISTED_WINDOW.fullmatch(line)
+    if not found or " minimized " in line[line.rindex('"'):]:
+        return line
+    x, y, width, height = map(int, found.groups())
+    across, down = x + width / 2, y + min(height / 2, 20)
+    for left, top, wide, high, agents in screens:
+        if left <= across < left + wide and top <= down < top + high:
+            return line + (" private-desktop" if agents else " user-screen")
+    return line + " off-screen"
 
 
 def working_folder():
@@ -339,6 +401,8 @@ def window_note(report):
         return (WINDOW_FOCUS_NOTE if report.get("window") else FOCUS_NOTE).format(report.get("app"), report.get("back"))
     if report.get("event") == "taken":
         return TAKEN_NOTE.format(report.get("app"))
+    if report.get("event") == "done":
+        return DONE_NOTE.format(report.get("app"))
     kind = report.get("kind") or "window"
     title, text, buttons = report.get("title"), report.get("text"), report.get("buttons")
     parts = [f"{report.get('app')} opened a {kind}" + (f" titled {quoted(title)}" if title else "")]
@@ -554,7 +618,7 @@ class BrowserWorkspace:
         windows = self.call({"op": "list"})
         if self.window is not None and any(window["window_id"] == self.window for window in windows):
             return self.window, False
-        state = self.server.open_hidden(self.app, quiet=True)
+        state = self.server.open_hidden(self.app, quiet=True, desktop=self.tool == "chrome")
         request = {"op": "create_window", "mark": uuid.uuid4().hex}
         if self.tool == "chrome":
             # Nobody was using Chrome, so its windows can wait on the desktop, where the new one shows up too.
@@ -685,6 +749,8 @@ class BrowserWorkspace:
 
     def run_one(self, arguments):
         op = arguments.get("op")
+        if op in ("navigate", "click", "type", "upload"):  # the agent goes on in the page: nothing is asked any more
+            self.server.resume(self.app)
         with self.lock:
             note = None if op == "list" else self.follow(op, arguments)
             if op not in ("list", "close", "shot"):  # a screenshot shows it itself, and waits for it to paint
@@ -700,8 +766,10 @@ class BrowserWorkspace:
                                   "reuse_blank": created or self.tab is None})
                 self.tab = result["tab_index"]
             elif op == "close" and "tab_index" not in arguments and not self.shared:
+                self.server.resume(self.app)  # what was asked of the user there goes with it
                 result = {"closed": self.clear_window()}
             elif op == "close":  # in a window the user has too, only the chat's last tab: others may be theirs
+                self.server.resume(self.app)
                 target = self.target(arguments)
                 self.guard(target, arguments)
                 result = self.call({"op": "close_tab", **target, "keep_window": target["window_id"] == self.window})
@@ -714,12 +782,17 @@ class BrowserWorkspace:
                 target = self.target(arguments)
                 if target["window_id"] != self.window:
                     raise RuntimeError("`show` brings your own window to the user. Theirs are where they left them.")
+                self.server.quiet(self.app)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.call({"op": "show_to_user", **target})
                 self.shared, self.shown = True, False
                 result["note"] = ("Your window is on the user's screen, in front. They can use it, and you keep "
                                   "working in it. `hide` takes it back when they are done.")
+                if arguments.get("text"):
+                    self.server.ask_user(self.app, arguments["text"])
+                    result["note"] = ASK_NOTE + " `hide` takes the window back after."
             elif op == "hide":
+                self.server.resume(self.app)  # the window leaves the user: nothing is asked of them there any more
                 result = {"hidden": self.take_back()}
             elif op in self.OPERATIONS:
                 target = self.target(arguments)
@@ -924,6 +997,8 @@ class SafariWorkspace(BrowserWorkspace):
 
     def run_one(self, arguments):
         op, note = arguments.get("op"), None
+        if op in ("navigate", "click", "type", "upload"):  # the agent goes on in the page: nothing is asked any more
+            self.server.resume(self.app)
         with self.lock:
             if op == "list":
                 here = [page for page in self.pages if not page.get("away")]
@@ -948,8 +1023,10 @@ class SafariWorkspace(BrowserWorkspace):
                 self.pages.append(self.reply["own"])
                 note = self.asleep(op, result, self.WAKE_OWN)
             elif op == "close" and "tab_index" not in arguments:
+                self.server.resume(self.app)  # what was asked of the user in a tab of the chat's goes with the tab
                 result = {"closed": self.close_window()}
             elif op == "hide":
+                self.server.resume(self.app)
                 result = {"hidden": False, "note": "In Safari your tabs are in the user's own window: there is "
                                                    "nothing to take back. `away` takes one to your desktop."}
             elif op == "away":
@@ -963,11 +1040,17 @@ class SafariWorkspace(BrowserWorkspace):
                 page, _theirs = self.aim(arguments)
                 if page is None:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
+                self.server.quiet(self.app)
                 self.come_back(page)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.in_tab({"op": "show_tab"}, page, "tab_index" in arguments)
                 result["note"] = "Your tab is in front of the user now, in their own window. Keep working in it."
+                if arguments.get("text"):
+                    self.server.ask_user(self.app, arguments["text"])
+                    result["note"] = ASK_NOTE
             elif op == "close" or op in self.OPERATIONS:
+                if op == "close":
+                    self.server.resume(self.app)
                 page, theirs = self.aim(arguments)
                 request = {key: value for key, value in arguments.items()
                            if not key.startswith("allow_") and key not in ("window_id", "tab_index")}
@@ -1235,12 +1318,75 @@ class WindowWatcher:
                 pass
 
 
+class Front:
+    """An app's window in front of the user's for an agent's steps, for as long as they need it and no longer: see
+    Server.borrow. It is taken for the first step that needs it and given back before a wait and after the last."""
+
+    def __init__(self, server, app, title, always, steps):
+        self.server, self.app, self.title = server, app, title
+        self.always = always  # the agent asked for every step: the app takes input only in front
+        # A scroll goes to the window under the pointer, in front or not, so for scrolls alone the pointer is all
+        # that is taken where ucu-window can do with that. A drag presses, which brings its app to the front.
+        self.pointer_only = not always and not any(isinstance(step, dict) and step.get("do") == "drag"
+                                                   for step in steps)
+        self.state, self.turn, self.used = None, None, False
+        self.came_forward = False  # the app was in front for a step, and not just the pointer over its window
+
+    def needs(self, step):
+        kind = step.get("do")
+        return self.always or kind == "drag" or (kind == "scroll" and "xy" in step)
+
+    def take(self):
+        """Bring it to the front, if it isn't lent already. Return whether its window may have moved."""
+        if self.state:
+            return False
+        self.turn = self.server.front_turn()
+        try:
+            self.state = self.server.borrow(self.app, self.title, self.pointer_only)
+        except ToolError:
+            self.turn.close()
+            raise
+        if self.state == "borrowed" and not self.came_forward:  # said once, however often it comes
+            self.server.windows.note(BORROWED_NOTE.format(self.app))
+        self.used = True
+        self.came_forward = self.came_forward or self.state != "pointer"
+        return self.state == "borrowed"
+
+    def raise_window(self):
+        """With the pointer alone a window stays as it is among its app's windows, and on the agent's desktop they
+        are all in one place, so another may be over it. Bring the app to the front after all, which raises the
+        window. Return whether that was there to try."""
+        if self.state != "pointer":
+            return False
+        self.give()
+        self.pointer_only = False
+        self.take()
+        return True
+
+    def give(self):
+        """Give the user's app back. Return whether there was anything to give."""
+        if not self.state:
+            return False
+        try:
+            if self.state == "borrowed":  # what the last step sent is still on its way to the app
+                time.sleep(FRONT_DWELL)
+            self.server.give_back(self.app)
+        finally:
+            self.state = None
+            self.turn.close()
+        return True
+
+
 class ToolError(Exception):
     """What the agent should read when a tool can't do what it was asked. From the engine it has the engine's `code`
     and `raw` message, and `needs_place` if the element takes the click only where it is on screen. In an act it
     has `at`, the step that it stopped, and `on`, that step's element."""
     code = raw = at = on = None
     needs_place = False
+
+
+class Covered(ToolError):
+    """Another window is in front at the place of a step with the real pointer."""
 
 
 class Gone(ToolError):
@@ -1318,9 +1464,10 @@ class Engine:
         return problem
 
     @classmethod
-    def batch(cls, entries):
-        """Run commands in one engine run, in order; return how many ran, and the ToolError that stopped them."""
-        data = cls.run("batch", json.dumps(entries), "--stop-on-error")
+    def batch(cls, entries, headed=False):
+        """Run commands in one engine run, in order; return how many ran, and the ToolError that stopped them.
+        `headed` uses the real pointer, for an app that is in front for these steps."""
+        data = cls.run("batch", json.dumps(entries), "--stop-on-error", *(["--headed"] if headed else []))
         for index, result in enumerate(data.get("results") or []):
             if not result.get("ok"):
                 return index, cls.failure(result.get("error") or {})
@@ -1475,6 +1622,9 @@ class Server:
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
+        self.user_seen = None               # the app the agent was last told the user is in, and whether in full screen
+        self.silent_helper = None           # a helper that didn't say where the user is, and isn't asked again
+        self.asked = None                   # the app on whose window the user reads what the agent asks of them
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
         self.parked_apps = set()            # those of them on the agent's desktop, as app_key names
@@ -1562,6 +1712,11 @@ class Server:
         if finished:
             self.windows.send({"busy": False})
         notes = self.windows.take_notes()
+        where = self.situation()
+        if where.get("app") and (where["app"], where.get("fullscreen")) != self.user_seen:
+            self.user_seen = (where["app"], where.get("fullscreen"))
+            notes.append(USER_NOTE.format(where["app"], " in full screen" if where.get("fullscreen") else "",
+                                          where.get("doing") or "doing something"))
         if names:
             apps = [name if times == 1 else f"{name} ({times} times)"
                     for name, times in collections.Counter(names).items()]
@@ -1574,6 +1729,7 @@ class Server:
 
     def run_tool(self, name, arguments):
         if arguments.get("activate"):
+            self.quiet(str(arguments.get("app") or ""))
             self.windows.send({"allow": str(arguments.get("app") or "")})
             with self.lock:
                 self.hidden_apps.pop(app_key(arguments.get("app") or ""), None)
@@ -1588,9 +1744,44 @@ class Server:
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
         else:
             text, failed = run_window_tool(name, arguments)
+            if name == "list_windows" and not failed:
+                text = self.with_the_user(text, str(arguments.get("app") or "*"))
+            if not failed and name == "focus_window" and arguments.get("activate"):
+                said = text.splitlines()[0] if text else ""
+                if re.search(r" under=sheet\b", said):
+                    text += "\n" + UNDER_NOTE
+                if arguments.get("ask"):
+                    self.ask_user(str(arguments.get("app") or ""), arguments["ask"], str(arguments.get("title") or ""))
+                    text += "\n" + (ASK_ELSEWHERE_NOTE if re.search(r" user=elsewhere\b", said) else ASK_NOTE)
         if failed:
             raise ToolError(text)
         return [{"type": "text", "text": text}]
+
+    def situation(self, **more):
+        """Ask the helper where the user is. One built before it knew the question never answers, such as the one a
+        chat gets that starts while an update is still building the new one. It is asked once, not after every call:
+        each time would cost the wait."""
+        helper = self.windows.process
+        if helper is None or helper is self.silent_helper:
+            return {}
+        where = self.windows.ask({"situation": True, **more}, SITUATION_TIMEOUT)
+        if where is None:
+            self.silent_helper = helper
+        return where or {}
+
+    def with_the_user(self, listed, app):
+        """A list of windows, with where the user is before it and, after it, the windows on Spaces they aren't
+        looking at, which an app's own list leaves out. The window they are in is named unless its app is denied,
+        and a deny list that can't be read names none."""
+        request = {"detail": app}
+        denied = self.denied_apps()
+        if denied is not None:
+            request["deny"] = denied
+        where = self.situation(**request)
+        elsewhere, screens = where.get("elsewhere") or [], where.get("screens") or []
+        lines = [placed(line, screens) for line in listed.splitlines()] if screens else [listed]
+        return "\n".join([*([where["line"]] if where.get("line") else []), *lines,
+                          *(["On Spaces the user isn't looking at:", *elsewhere] if elsewhere else [])])
 
     # --- apps -------------------------------------------------------------
     @staticmethod
@@ -1643,13 +1834,18 @@ class Server:
             self.windows.note(SHARED_NOTE.format(" and ".join(sorted(set(others))), name))
         self.sessions.got(key, self.asker())
 
-    def open_hidden(self, name, browser_note=False, quiet=False):
-        """Open a closed app hidden, and return what became of it."""
+    def open_hidden(self, name, browser_note=False, quiet=False, desktop=None):
+        """Open a closed app hidden, and return what became of it. `desktop` says its windows go to the agent's
+        desktop next, as they do unless the caller is `quiet`: the desktop is then made before the app opens, since
+        an app that shows a window in spite of the hidden launch shows it where it last had one."""
         denied = self.denied_apps()
         if denied is None:
             return "denied"
         self.windows.start()
-        reply = self.windows.ask({"open": name, "deny": denied}, OPEN_TIMEOUT) or {}
+        request = {"open": name, "deny": denied}
+        if not quiet if desktop is None else desktop:
+            request["desktopFirst"] = True
+        reply = self.windows.ask(request, OPEN_TIMEOUT) or {}
         if reply.get("state") in ("opened", "reopened") and not quiet:
             # A hidden app shows itself, wherever its windows are, whenever it comes forward, so ucu's apps live on the
             # agent's desktop, where showing shows the user nothing. Without one they stay hidden.
@@ -1692,7 +1888,7 @@ class Server:
         workspace = self.browser_of(app_key(app))
         if workspace:  # it would take the user's windows away too
             return OWN_BROWSER.format(workspace.app, workspace.tool), True
-        if self.denied_apps() is None or self.open_hidden(app, quiet=True) == "denied":
+        if self.denied_apps() is None or self.open_hidden(app, quiet=True, desktop=True) == "denied":
             return DENIED.format(app), True
         reply = self.windows.ask({"park": [app]}, PARK_TIMEOUT) or {}
         if reply.get("state") != "parked":
@@ -1787,14 +1983,31 @@ class Server:
         window = self.window_id(app, title) if title else None
         seen = self.views.get(key)  # without it the agent hasn't read this window, so the result shows all of it
         view = before = seen or self.read(app, window)
-        index = 0
         workspace = self.browser_of(app_key(app))
+        if any(isinstance(step, dict) and step.get("do") != "wait" for step in steps):
+            self.resume(app)
+        front = Front(self, app, title, bool(arguments.get("front")), steps)
+        try:
+            return self.run_act(app, window, key, seen, before, view, steps, workspace, front)
+        finally:
+            front.give()  # however the steps end, the user's app comes back
+
+    def run_act(self, app, window, key, seen, before, view, steps, workspace, front):
+        index, fresh = 0, None
         while index < len(steps):
             if workspace and workspace.used:  # a step in a page can bring its browser forward
                 self.windows.send({"ours": app})
             ending = next((at for at in range(index, len(steps)) if self.runs_alone(steps[at])), len(steps))
             step, fresh = steps[index], None
             try:
+                # The app is in front only for the steps that need it. A wait can last minutes: the user has their
+                # screen meanwhile, and the app comes forward again for what follows.
+                if step.get("do") == "wait":
+                    front.give()
+                elif front.needs(step) and front.take():
+                    view = self.read(app, window)  # its window came to the user's screen: every place is another
+                if front.state in ("borrowed", "front"):  # with the pointer alone, the user's app stays in front
+                    self.still_front(app)
                 if ending > index:
                     view, index = self.run_steps(app, window, before, view, steps, index, ending)
                     continue
@@ -1806,19 +2019,122 @@ class Server:
                 elif step.get("do") == "wait":
                     view = fresh = self.wait_for(app, window, step)
                 else:
-                    view = self.click_at(app, window, view, step)
+                    try:
+                        view = self.click_at(app, window, view, step, front=front.state)
+                    except Covered:
+                        if not front.raise_window():
+                            raise
+                        view = self.click_at(app, window, self.read(app, window), step, front=front.state)
                 index += 1
             except ToolError as error:
+                front.give()  # before the window is read for what the failure says
                 raise self.failed(app, window, key, seen, before, steps, index, error) from None
+        if front.give():
+            fresh = None  # the last reading is of the window where it is from now on
         said = self.settled(app, window, key, before, whole=seen is None, fresh=fresh)
         if said.startswith("No change") and any("xy" in step for step in steps):
             said += " " + UNREAD_NOTE  # a picture or a screen in another computer changes without a word of it
+            if not front.came_forward:  # also after a scroll with the pointer alone, which some apps ignore
+                said += " " + TRY_FRONT_NOTE
         return [{"type": "text", "text": said}]
+
+    # --- asking the user to act in a window ---------------------------------
+    def ask_user(self, app, text, window=""):
+        """Say on the window the agent has just brought to the user what they must do there."""
+        self.windows.start()
+        self.windows.send({"ask": " ".join(str(text).split())[:ASK_LIMIT], "app": app, "window": window})
+        self.asked = app_key(app)
+
+    def resume(self, app):
+        """The agent goes on working in an app: what it asked of the user there is no longer on the window. If the
+        user is at it this moment, typing or clicking in that app, a step of the agent's would land in the middle
+        of what they do, a password perhaps. So it waits for them to pause, and is refused if they don't."""
+        if self.asked != app_key(app):
+            return
+        until = time.monotonic() + BORROW_WAIT
+        while (self.windows.ask({"atWork": app}, 5) or {}).get("atWork"):
+            if time.monotonic() > until:
+                raise ToolError(USER_AT_WORK.format(app))
+            time.sleep(0.3)
+        self.windows.send({"ask": "", "app": app})
+        self.asked = None
+
+    # --- steps that need the app in front ----------------------------------
+    @staticmethod
+    def front_turn():
+        """One agent at a time has the front of the user's screen, in whatever chat: a second would bring its app
+        over the first one's and forget whose turn it is to come back. Return what holds the turn until closed."""
+        FRONT_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        held, until = FRONT_LOCK.open("w"), time.monotonic() + BORROW_WAIT
+        while True:
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return held
+            except OSError:
+                if time.monotonic() > until:
+                    held.close()
+                    raise ToolError(FRONT_TAKEN) from None
+                time.sleep(0.1)
+
+    def borrow(self, app, title, pointer_only=False):
+        """Bring the app's window to the front for steps that need it. ucu-window does it only once the user has done
+        nothing for a moment, and gives their app back by itself if this server never does. Return "borrowed", or
+        "front" when the user was in that window already, where the agent works with them, or "pointer" when
+        only the pointer goes to a window on the agent's desktop, which `pointer_only` allows."""
+        self.windows.start()
+        asked = {"borrow": app, "window": title or "", "wait": BORROW_WAIT, "pointerOnly": pointer_only}
+        reply = self.windows.ask(asked, BORROW_WAIT + 5) or {}
+        if reply.get("state") == "busy":
+            raise ToolError(USER_BUSY.format(reply.get("front") or "another app", app))
+        if reply.get("state") == "lent":
+            raise ToolError(FRONT_TAKEN)
+        if reply.get("state") == "own":
+            raise ToolError(OWN_FRONT.format(app))
+        if not reply:
+            raise ToolError(NO_BORROW.format(app))
+        if reply.get("state") not in ("front", "borrowed", "pointer"):
+            raise ToolError(f"{app} couldn't come to the front for these steps.")
+        return reply["state"]
+
+    def quiet(self, app):
+        """Before a window is brought to the user: wait for a pause in their typing, as a step that takes the
+        keyboard does, and refuse if none comes. A window that comes forward takes the keyboard with it."""
+        self.windows.start()
+        reply = self.windows.ask({"quiet": True, "wait": BORROW_WAIT}, BORROW_WAIT + 2)
+        if reply is not None and reply.get("quiet") is False:
+            raise ToolError(USER_TYPING.format(app))
+
+    def give_back(self, app):
+        reply = self.windows.ask({"giveBack": True}, 5) or {}
+        if reply.get("taken"):  # the user came to it: it is on their screen now, and stays
+            self.user_took([app])
+            self.windows.note(TOOK_OVER_NOTE.format(app))
+
+    def still_front(self, app, at=None, number=None, in_front=True):
+        """Steps with the real pointer land wherever the user is, and on whatever window is in front at their place.
+        So they stop once the user is somewhere else, unless the app needn't be `in_front` for them, and a step at a
+        place isn't made when the window there is another than the one it is for: `number` is the window server's
+        number for that one."""
+        asked = {"front": True, **({"at": [round(at[0]), round(at[1])]} if at else {})}
+        reply = self.windows.ask(asked, 5) or {}
+        front = reply.get("front")
+        if reply.get("typed"):
+            raise ToolError(USER_TYPED.format(app))
+        if in_front and front and app_key(front) != app_key(app) and not self.same_app(front, app):
+            raise ToolError(LEFT_FRONT.format(front, app))
+        if at and number is not None and reply.get("top", number) != number:
+            raise Covered(COVERED.format(app))
+
+    @staticmethod
+    def same_app(shown, asked):
+        """Whether the name an app shows is the app the agent named, by another name or its bundle id."""
+        text, failed = run_window_tool("list_windows", {"app": asked})
+        return not failed and app_key(text.split(" (", 1)[0]) == app_key(shown)
 
     @classmethod
     def runs_alone(cls, step):
         """Whether a step is one the engine can't take in a run with others."""
-        return "xy" in step or cls.is_shortcut(step) or step.get("do") in ("menu", "wait")
+        return "xy" in step or cls.is_shortcut(step) or step.get("do") in ("menu", "wait", "drag")
 
     def failed(self, app, window, key, seen, before, steps, index, error):
         """What a failed act says: the step, its element and why. When steps before it ran, or its number is out of
@@ -2031,18 +2347,62 @@ class Server:
             return self.read(app, window)
         return view
 
-    def click_at(self, app, window, view, step):
-        """Click a place in the window's picture, which has picture_scale pixels to a point."""
-        if step.get("do") not in ("click", *GESTURES):  # anything else would arrive as a click
+    def click_at(self, app, window, view, step, front=False):
+        """Click a place in the window's picture, which has picture_scale pixels to a point. With the app in front
+        the real pointer does it, which can scroll and drag there too."""
+        kind = step.get("do")
+        if kind not in ("click", *GESTURES, "scroll", "drag"):  # anything else would arrive as a click
             raise ToolError(XY_ONLY_CLICKS)
+        if not valid_place(step.get("xy")) or (kind == "drag" and not valid_place(step.get("to"))):
+            raise ToolError("drag needs `xy` and `to`, each [x, y]." if kind == "drag" else "`xy` is [x, y].")
         view = self.on_screen(app, window, view)
-        frame = view.frame
+        frame = self.frame_now(app, view) or view.frame
         if not frame:
             raise ToolError("This window has no position to click.")
         scale = picture_scale(frame)
-        place = (frame["x"] + step["xy"][0] / scale, frame["y"] + step["xy"][1] / scale)
-        self.point_click(app, place, step, view.window)
+
+        def place(xy):
+            return frame["x"] + xy[0] / scale, frame["y"] + xy[1] / scale
+        if front:  # the real pointer acts on whatever is there, so each place is checked first
+            found = re.fullmatch(r"w-(\d+)", str(view.window))
+            for xy in (step["xy"], step["to"]) if kind == "drag" else (step["xy"],):
+                self.still_front(app, place(xy), int(found.group(1)) if found else None, front != "pointer")
+            self.front_step(kind, place(step["xy"]), step, place)
+        else:
+            self.point_click(app, place(step["xy"]), step, view.window)
         return view
+
+    @staticmethod
+    def frame_now(app, view):
+        """Where a window is now, or None when the engine doesn't say. It isn't always where it was read: the user
+        moves their windows, and one comes to their screen for them or for a step and goes back."""
+        try:
+            windows = Engine.run("list-windows", "--app", app) or []
+        except ToolError:
+            return None
+        frame = next((found.get("bounds") for found in windows
+                      if isinstance(found, dict) and found.get("id") == view.window), None)
+        return frame if isinstance(frame, dict) and {"x", "y", "width", "height"} <= set(frame) else None
+
+    def front_step(self, kind, point, step, place):
+        """A step with the real pointer, in an app that is in front for it."""
+        self.windows.send({"cursorTo": point})
+        xy = f"{point[0]:.0f},{point[1]:.0f}"
+        if kind == "scroll":
+            lines = float(step.get("amount") or 3)
+            dx, dy = {"up": (0, lines), "down": (0, -lines), "left": (-lines, 0), "right": (lines, 0)}.get(
+                str(step.get("direction") or "down"), (0, -lines))
+            entry = {"command": "mouse-wheel", "args": {"x": round(point[0]), "y": round(point[1]), "dx": dx, "dy": dy}}
+        elif kind == "drag":
+            to = place(step["to"])
+            entry = {"command": "drag", "args": {"from_xy": xy, "to_xy": f"{to[0]:.0f},{to[1]:.0f}"}}
+        else:
+            entry = {"command": "mouse-click", "args": {"xy": xy, **GESTURES.get(kind, {})}}
+        _ran, failure = Engine.batch([entry], headed=True)
+        if failure and "did not reach" in str(getattr(failure, "raw", "")):  # the engine checks where the pointer is
+            raise ToolError(POINTER_MISSED)
+        if failure:
+            raise failure
 
     def click_where(self, app, window, view, number, step):
         """Double, triple and right clicks go to where an element is when it doesn't take them as an action of its

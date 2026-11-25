@@ -88,6 +88,9 @@ def main():
                 "bounds": {"x": 0, "y": 33, "width": 1512, "height": 859}},
                {"id": "w-6", "title": "Mail - Google Chrome",
                 "bounds": {"x": -1900, "y": -1160, "width": 1280, "height": 900}}])
+    elif command == "list-windows" and arguments[arguments.index("--app") + 1] == "Moved":
+        # read at 100,200, and the user has moved it since
+        reply([{"id": "w-1", "title": "Moved", "bounds": {"x": 500.0, "y": 600.0, "width": 300.0, "height": 400.0}}])
     elif command == "list-windows" and arguments[arguments.index("--app") + 1] == "Dated Twin":
         place = {"x": 100.0, "y": 200.0, "width": 300.0, "height": 400.0}
         reply([{"id": "w-1", "title": "One", "bounds": place}, {"id": "w-2", "title": "Two", "bounds": place}])
