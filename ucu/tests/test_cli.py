@@ -33,8 +33,11 @@ if action == "add-json":
 config.write_text(json.dumps(data))
 sys.exit(0 if found else 1)
 """
-# `codex mcp add|remove|get --json` on $CODEX_HOME/config.toml, writing each server's table afresh as Codex does.
+# `codex mcp add|remove|get --json` on $CODEX_HOME/config.toml, writing each server's table afresh as Codex does,
+# and failing as Codex does when CODEX_HOME names no folder.
 FAKE_CODEX = """
+if not Path(os.environ["CODEX_HOME"]).is_dir():
+    sys.exit("Error: failed to resolve CODEX_HOME")
 config = Path(os.environ["CODEX_HOME"]) / "config.toml"
 text = config.read_text() if config.exists() else ""
 action, name = sys.argv[2], sys.argv[3]

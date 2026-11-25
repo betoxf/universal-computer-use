@@ -275,6 +275,7 @@ def set_codex(python, folder=None):
             codex("remove", SERVER)
             say("✓", f"removed {SERVER} from Codex")
         return
+    CODEX_HOME.mkdir(parents=True, exist_ok=True)  # codex refuses to run when CODEX_HOME names no folder
     result = codex("add", SERVER, "--", python, "-I", str(PROXY))
     if result.returncode == 0:
         set_codex_timeout()
