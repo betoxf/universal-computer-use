@@ -824,6 +824,9 @@ final class AskLabel: NSObject {
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
 // it gave one of its windows out of sight the keyboard, while the user was in that app, and their window got it back.
 // {"event": "taken", ...} says the user came to an app ucu kept out of their sight, which is on their screen now.
+// {"event": "dock", ...} says the user clicked the Dock icon of an app where the agent works in a window of its own,
+// with "front" when the app was in front already and "inSight" when a window of it is in their sight. The server
+// then brings them what the chat has of it out of their sight.
 // {"event": "done", ...} says the user clicked Done on what the agent asked of them in an app.
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
@@ -1880,6 +1883,44 @@ final class Watcher {
         let url: URL? = item.flatMap { attribute($0, kAXURLAttribute) }
         let ago = ProcessInfo.processInfo.systemUptime - event.timestamp
         dockClick = url.map { (Date() - ago, $0.standardizedFileURL) }
+        // What they could see of the app is read as they press. A press that is held is the Dock's menu, one that
+        // moves is a drag, and one with a modifier key does something else: only a plain click asks for the app.
+        guard let url, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+              let app = NSWorkspace.shared.runningApplications.first(where: {
+                  $0.bundleURL?.standardizedFileURL == url.standardizedFileURL && !$0.isTerminated
+              }), isOwn(app) || parked[app.processIdentifier] != nil || launchedHidden.contains(app.processIdentifier)
+        else { return }
+        let front = app.isActive, inSight = isOwn(app) && hasWindowInSight(app)
+        whenReleased(at: click.location) { [self] in clickedDock(app, front: front, inSight: inSight) }
+    }
+
+    static let dockRelease = 0.15, dockReleaseTries = 4
+
+    func whenReleased(at place: CGPoint, tries: Int = dockReleaseTries, then act: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dockRelease) { [self] in
+            if !CGEventSource.buttonState(.hidSystemState, button: .left) { return act() }
+            guard tries > 1, let now = CGEvent(source: nil)?.location, hypot(now.x - place.x, now.y - place.y) < 6
+            else { return }  // still held: the Dock's menu, or a drag
+            whenReleased(at: place, tries: tries - 1, then: act)
+        }
+    }
+
+    // A click on an app's Dock icon is the user asking for the app, and must not get them nothing. It does when the
+    // app is in front already with its windows on the agent's desktop, since nothing comes forward then, and when
+    // the agent works there in a window of its own, since a browser opens no window while it has one. Windows that
+    // ucu keeps on the agent's desktop come back to the user here. What a chat has in a window of its own only its
+    // server can bring, so that hears of the click, with what the user could see of the app as they clicked.
+    func clickedDock(_ app: NSRunningApplication, front: Bool, inSight: Bool) {
+        let pid = app.processIdentifier, name = app.localizedName ?? "?"
+        if isOwn(app) { return emit(["event": "dock", "app": name, "front": front, "inSight": inSight]) }
+        guard front, !app.isTerminated, parked[pid] != nil || launchedHidden.contains(pid) else { return }
+        let names = known.filter { $0.value.processIdentifier == pid }.map(\.key)
+        keptHidden.remove(pid)
+        bringBack(app)
+        rescueStranded(of: app)
+        emit(["event": "taken", "app": name, "names": names])
+        log("the user clicked the Dock icon of \(name), which was in front with its windows out of their sight: "
+            + "they are on the user's screen now")
     }
 
     // Whether the user's last click, seconds ago at most, was on this app's icon in the Dock. It says which app they
