@@ -172,10 +172,12 @@ The server sends the usage rules in its MCP `instructions`, so clients get them 
 
 ### Staying out of your way
 
-When an agent uses a closed app, UCU opens it on the agent's private desktop, a screen you never see. Its Dock icon
-shows it is running, and nothing appears on your screens. A hidden app shows itself wherever its windows are as soon as
-it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an app opens joins it there
-at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
+When an agent uses a closed app, UCU makes the agent's private desktop, a screen you never see, and opens the app
+hidden. Its windows go to that desktop, and its Dock icon shows it is running. Most apps show nothing on your screens
+meanwhile. Some show a window in spite of being opened hidden, where they last had one: on the private desktop if an
+agent used the app there last, and otherwise on your screen for a moment. A hidden app shows itself wherever its
+windows are as soon as it comes forward, so UCU's apps live where showing shows you nothing, and a new window such an
+app opens joins it there at once. Agents read it, take screenshots and act on it as usual, clicks by position too. If your Mac can't make the
 private desktop, the app stays hidden instead, and goes back into hiding whenever it comes forward. A denied app stays
 closed.
 
@@ -184,13 +186,14 @@ app's menu, which works even on a hidden app. The usage rules tell agents to bri
 see it or be taken there, never to make an action work, and to leave your clipboard alone.
 
 Apps still come forward by themselves, such as Chrome when it opens a window or an extension's popup. UCU puts your app
-back at once, usually within a few hundredths of a second, and tells the agent: for an app it opened, whenever that
-happens while the chat runs; for an app you use too, while the chat works on it and for 10 seconds after. When the
-agent's own step is what brings it forward, such as making its Chrome window, that always happens, unless you clicked a
-window of that app just then. Otherwise UCU leaves the app in front if you clicked, pressed a modifier key, or hold
-Return just before, or if your app is no longer in sight, because you may have switched apps or Spaces yourself. Typing
-in your app doesn't count, since that is when a stolen focus hurts most. A new app that starts during a call is held
-back too, unless you did anything since just before it started.
+back, a tenth or two of a second later when the app came forward as it opened, and tells the agent: for an app it
+opened, whenever that happens while the chat runs; for an app you use too, while the chat works on it and for 10
+seconds after. When the agent's own step is what brings it forward, such as making its Chrome window, that always
+happens, unless you clicked a window of that app just then. Otherwise UCU leaves the app in front if you clicked,
+pressed a modifier key, or hold Return just before, or if your app is no longer in sight, because you may have switched
+apps or Spaces yourself. Typing in your app doesn't count, since that is when a stolen focus hurts most. An app UCU
+itself is opening is held back whatever you are doing, unless you click its Dock icon. Any other new app that starts
+during a call is held back too, unless you did anything since just before it started.
 
 Safari and Chrome are yours while an agent works in them, because it works in tabs or a window of its own. When no step of the
 agent's is bringing the browser forward, you are the one coming to it, so UCU leaves you there however you came: by a

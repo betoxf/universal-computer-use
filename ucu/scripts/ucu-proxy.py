@@ -552,7 +552,7 @@ class BrowserWorkspace:
         windows = self.call({"op": "list"})
         if self.window is not None and any(window["window_id"] == self.window for window in windows):
             return self.window, False
-        state = self.server.open_hidden(self.app, quiet=True)
+        state = self.server.open_hidden(self.app, quiet=True, desktop=self.tool == "chrome")
         request = {"op": "create_window", "mark": uuid.uuid4().hex}
         if self.tool == "chrome":
             # Nobody was using Chrome, so its windows can wait on the desktop, where the new one shows up too.
@@ -1641,13 +1641,18 @@ class Server:
             self.windows.note(SHARED_NOTE.format(" and ".join(sorted(set(others))), name))
         self.sessions.got(key, self.asker())
 
-    def open_hidden(self, name, browser_note=False, quiet=False):
-        """Open a closed app hidden, and return what became of it."""
+    def open_hidden(self, name, browser_note=False, quiet=False, desktop=None):
+        """Open a closed app hidden, and return what became of it. `desktop` says its windows go to the agent's
+        desktop next, as they do unless the caller is `quiet`: the desktop is then made before the app opens, since
+        an app that shows a window in spite of the hidden launch shows it where it last had one."""
         denied = self.denied_apps()
         if denied is None:
             return "denied"
         self.windows.start()
-        reply = self.windows.ask({"open": name, "deny": denied}, OPEN_TIMEOUT) or {}
+        request = {"open": name, "deny": denied}
+        if not quiet if desktop is None else desktop:
+            request["desktopFirst"] = True
+        reply = self.windows.ask(request, OPEN_TIMEOUT) or {}
         if reply.get("state") in ("opened", "reopened") and not quiet:
             # A hidden app shows itself, wherever its windows are, whenever it comes forward, so ucu's apps live on the
             # agent's desktop, where showing shows the user nothing. Without one they stay hidden.
@@ -1690,7 +1695,7 @@ class Server:
         workspace = self.browser_of(app_key(app))
         if workspace:  # it would take the user's windows away too
             return OWN_BROWSER.format(workspace.app, workspace.tool), True
-        if self.denied_apps() is None or self.open_hidden(app, quiet=True) == "denied":
+        if self.denied_apps() is None or self.open_hidden(app, quiet=True, desktop=True) == "denied":
             return DENIED.format(app), True
         reply = self.windows.ask({"park": [app]}, PARK_TIMEOUT) or {}
         if reply.get("state") != "parked":
