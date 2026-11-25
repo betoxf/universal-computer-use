@@ -1683,7 +1683,13 @@ case "focus", "unfullscreen":
             if Watcher.isOutOfSight(window) { bringIntoSight(window) }  // the user asked to see it
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             app.unhide()
+            // macOS doesn't activate every app it is asked to, and says nothing of it: a program run from a terminal
+            // stayed behind while its window was reported as main. The app itself, asked to be in front, comes.
+            AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
             app.activate()
+            for _ in 0..<50 where NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+                usleep(10_000)
+            }
         }
         for _ in 0..<20 where !isMain(window, of: element) { usleep(10_000) }
     }
