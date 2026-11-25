@@ -81,7 +81,7 @@ STOP_HOOK = 'pkill -INFO -P "$PPID" -f ucu-proxy.py; exit 0'
 # fails after 5 minutes instead of the 30-minute idle limit. `alwaysLoad` keeps ucu's tools in every
 # prompt instead of behind tool search.
 CLAUDE_EXTRAS = {"timeout": 300000, "alwaysLoad": True}
-# Codex ends a tool call after 60 seconds unless its server says otherwise; Claude Code's limit above is 5 minutes.
+# Codex's limit on one tool call, set to Claude Code's 5 minutes above.
 CODEX_TOOL_TIMEOUT = "tool_timeout_sec = 300"
 CLIENTS = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode"}
 GLOBAL_RULES = {"claude": HOME / ".claude/CLAUDE.md", "codex": CODEX_HOME / "AGENTS.md",
@@ -219,6 +219,10 @@ def set_opencode(python, folder=None):
     if not OPENCODE_CONFIG.exists():
         if not python:
             return
+        if OPENCODE_CONFIG.with_suffix(".jsonc").exists():  # JSON with comments, which this can't edit safely
+            say("!", f"opencode keeps its config in {OPENCODE_CONFIG.with_suffix('.jsonc')}, so ucu was not added "
+                     f"to it; add this under \"mcp\": {json.dumps({SERVER: opencode_entry(python)})}")
+            return
         OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         OPENCODE_CONFIG.write_text(json.dumps({"$schema": "https://opencode.ai/config.json"}) + "\n")
     try:
@@ -230,13 +234,17 @@ def set_opencode(python, folder=None):
         shutil.copy2(OPENCODE_CONFIG, folder / OPENCODE_CONFIG.name)
     servers = config.setdefault("mcp", {})
     if python:
-        servers[SERVER] = {"type": "local", "command": [python, "-I", str(PROXY)], "enabled": True}
+        servers[SERVER] = opencode_entry(python)
     else:
         servers.pop(SERVER, None)
     if not servers:
         config.pop("mcp")
     write_json(OPENCODE_CONFIG, config)
     say("✓", f"{'registered' if python else 'removed'} {SERVER} in {OPENCODE_CONFIG}")
+
+
+def opencode_entry(python):
+    return {"type": "local", "command": [python, "-I", str(PROXY)], "enabled": True}
 
 
 # --- Codex --------------------------------------------------------------------
@@ -874,7 +882,12 @@ def main():
     commands.add_parser("deny", help="stop agents using an app").add_argument("app", help='for example "Mail"')
     commands.add_parser("allow", help="let agents use an app again").add_argument("app")
     commands.add_parser("denied", help="list the denied apps")
-    args = parser.parse_args()
+    # Before Python 3.12, argparse leaves folders that follow `--global` over, as in `rule add --global ~/app`.
+    args, extra = parser.parse_known_args()
+    if extra and args.command == "rule" and not any(word.startswith("-") for word in extra):
+        args.folders += extra
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     if args.command == "install":
         return install(args.python, args.clients, args.rule)
     if args.command == "rule":

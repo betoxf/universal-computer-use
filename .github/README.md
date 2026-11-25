@@ -56,8 +56,9 @@ Install Universal Computer Use (UCU) on this Mac: https://github.com/betoxf/univ
    is global for everywhere, else none (project folders get the rule in step 4):
    bash /tmp/ucu-install.sh --clients <all or list> --rule <global or none>
    If it stops because Rust is missing, ask me before you run it again with --yes added, which installs Rust.
-4. For each project folder I named, run: ~/.ucu/ucu/ucu rule add <folder>
-5. Run ~/.ucu/ucu/ucu doctor and tell me what it reports. Then tell me what only I can do: in System Settings >
+4. The installer prints where the ucu command is, ~/.ucu/ucu/ucu unless UCU was already installed elsewhere. For each
+   project folder I named, run: <that ucu> rule add <folder>
+5. Run <that ucu> doctor and tell me what it reports. Then tell me what only I can do: in System Settings >
    Privacy & Security, give the app that runs you Accessibility permission if doctor says it is missing, and Screen
    Recording for screenshots, which doctor doesn't check. Then start a new session.
 ```

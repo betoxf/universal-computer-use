@@ -266,6 +266,16 @@ class CliTest(unittest.TestCase):
 
     @unittest.skipIf(any(os.access(f"{folder}/claude", os.X_OK) for folder in ("/opt/homebrew/bin", "/usr/local/bin")),
                      "a claude command in /opt/homebrew/bin or /usr/local/bin can't be hidden from ucu")
+    def test_opencode_with_a_jsonc_config_is_left_as_it_is(self):
+        jsonc = self.home / ".config/opencode/opencode.jsonc"
+        jsonc.parent.mkdir(parents=True)
+        jsonc.write_text("{\n  // mine\n}\n")
+        code, output = self.ucu("install", "--python", sys.executable, "--clients", "claude,opencode")
+        self.assertEqual(code, 0, output)
+        self.assertIn("so ucu was not added to it", output)
+        self.assertEqual(jsonc.read_text(), "{\n  // mine\n}\n")
+        self.assertFalse((self.home / ".config/opencode/opencode.json").exists())
+
     def test_an_agent_chosen_that_is_not_here_changes_nothing(self):
         (self.home / ".local/bin/claude").unlink()
         code, output = self.ucu("install", "--python", sys.executable, "--clients", "codex,claude")

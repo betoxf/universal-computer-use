@@ -136,6 +136,13 @@ class InstallScriptTest(unittest.TestCase):
         code, output = self.install("--rule")
         self.assertEqual(code, 2, output)
         self.assertIn("--rule needs a value", output)
+        code, output = self.install("--rule", "everywhere")
+        self.assertEqual(code, 1, output)
+        self.assertIn('--rule takes global or none, not "everywhere"', output)
+        code, output = self.install("--clients", "claude,cursor")
+        self.assertEqual(code, 1, output)
+        self.assertIn('not "cursor"', output)
+        self.assertEqual(self.calls(), "")  # stopped before even checking the Mac
         self.assertEqual(self.calls(), "")
 
     def test_only_on_macos(self):
@@ -284,9 +291,10 @@ class InstallScriptTest(unittest.TestCase):
         (self.home / ".codex").mkdir()
         subprocess.run([str(self.local / "codex"), "mcp", "add", "ucu", "--", "python3", "-I", proxy],
                        env=self.env, check=True)
-        code, output = self.install()
+        code, output = self.install("--clients", "codex", "--rule", "global")
         self.assertEqual(code, 0, output)
         self.assertIn(f"UCU is already installed from {other}, so nothing was changed", output)
+        self.assertIn("./ucu install --clients codex --rule global", output)
         self.assertFalse(self.clone.exists())
 
     def test_the_agents_and_the_rule_chosen(self):

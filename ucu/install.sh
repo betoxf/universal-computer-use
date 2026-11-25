@@ -26,6 +26,7 @@ UCU_BRANCH="${UCU_BRANCH:-main}"
 UCU_YES="${UCU_YES:-}"
 CLIENTS=""
 RULE=""
+CHOICES=""
 ONE_LINER="curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash"
 PYTHON=""
 
@@ -264,7 +265,7 @@ install_ucu() {
   existing="$(registered_clone)"
   if [ -n "$existing" ] && [ "$existing" != "$(real_dir "$UCU_DIR")" ]; then
     say "✓" "UCU is already installed from $existing, so nothing was changed"
-    echo "To update it:  cd \"$existing/ucu\" && ./ucu update && ./ucu install"
+    echo "To update it:  cd \"$existing/ucu\" && ./ucu update && ./ucu install${CHOICES}"
     echo "To move it to $UCU_DIR, run \"$existing/ucu/ucu\" uninstall first, then this again."
     return 0
   fi
@@ -303,6 +304,27 @@ uninstall_ucu() {
   echo "The clone at $clone stays. Delete it if you no longer need it: rm -rf \"$clone\""
 }
 
+# Stop on a --clients or --rule value that `ucu install` would refuse, before anything is cloned or installed.
+check_choices() {
+  local name names
+  case "$RULE" in
+    "" | global | none) ;;
+    *) fail "--rule takes global or none, not \"$RULE\"" ;;
+  esac
+  IFS=, read -r -a names <<<"$CLIENTS"
+  shopt -s nocasematch
+  for name in ${names[@]+"${names[@]}"}; do
+    case "$name" in
+      all | claude | claude-code | claudecode | codex | opencode | "") ;;
+      *) fail "--clients takes all, or a list of claude, codex and opencode such as claude,codex; not \"$name\"" ;;
+    esac
+  done
+  shopt -u nocasematch
+  CHOICES=""
+  if [ -n "$CLIENTS" ]; then CHOICES="$CHOICES --clients $CLIENTS"; fi
+  if [ -n "$RULE" ]; then CHOICES="$CHOICES --rule $RULE"; fi
+}
+
 main() {
   local action=install
   while [ $# -gt 0 ]; do
@@ -332,6 +354,7 @@ main() {
     esac
     shift
   done
+  check_choices
   if [ "$action" = uninstall ]; then
     uninstall_ucu
   else
