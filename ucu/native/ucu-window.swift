@@ -1726,6 +1726,25 @@ final class Watcher {
         }
     }
 
+    // The app whose window the user sees on top: the owner of the first ordinary window, front to back, that lies on
+    // a screen of theirs. An agent's desktop is a screen for macOS too, and the windows of the app in front come first
+    // wherever they are, so those are passed over. Only an app with a Dock icon is one to hand the keyboard to, and
+    // not one whose place is the agent's desktop.
+    func appInSight(besides skipped: [pid_t]) -> NSRunningApplication? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for window in list where (window[kCGWindowLayer as String] as? Int) == 0 {
+            let frame = bounds(of: window), bar = CGPoint(x: frame.midX, y: frame.minY + min(frame.height / 2, 20))
+            guard frame.height > 60, (window[kCGWindowAlpha as String] as? Double ?? 0) > 0,
+                  !AgentDesktop.isOutOfSight(bar),
+                  let pid = (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init), !skipped.contains(pid),
+                  !isKept(pid), let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
+                  !app.isHidden, !app.isTerminated else { continue }
+            return app
+        }
+        return nil
+    }
+
     // MARK: new windows
 
     func scan() {
@@ -1860,8 +1879,14 @@ final class Watcher {
                 emit(["event": "taken", "app": name, "names": names])
             }
         }
-        guard let previous, previous.processIdentifier != pid, !previous.isTerminated,
-              !(pid == allowed && Date() < allowedUntil) else { return }
+        guard let previous, previous.processIdentifier != pid, !(pid == allowed && Date() < allowedUntil)
+        else { return }
+        // An app that has quit can't have the front back, so the one macOS brings forward then is left alone. Unless
+        // that one has no window in the user's sight: the front goes on to the app whose window they see on top.
+        if previous.isTerminated {
+            if isUnseen(app) { passOn(from: app, past: previous) }
+            return
+        }
         let over = "\(name) came forward over \(previous.localizedName ?? "?")"
         // A new app is held back while a call runs, unless the user did anything since just before it started.
         if isNew {
@@ -1875,7 +1900,10 @@ final class Watcher {
         // opened, whose place is out of sight, while the chat runs. When the agent is bringing it forward, the user's
         // clicks elsewhere have nothing to do with it. The user's app must still be in sight: if it isn't, they went to
         // another Space themselves.
-        guard (Date() < guardUntil && driven.contains(app)) || owned || ours else { return }
+        // Nor can one whose windows the agent keeps on its desktop, while none of them is in the user's sight: in front,
+        // it has their keyboard in a window they can't see.
+        let unseen = parked[pid] != nil && !hasWindowInSight(app)
+        guard (Date() < guardUntil && driven.contains(app)) || owned || ours || unseen else { return }
         // A click on the app's own window is the user's, even as the agent's step brings the app forward.
         if ours, Self.clicked(app) {
             giveKeyboardBack(in: app)
@@ -1892,8 +1920,12 @@ final class Watcher {
             giveKeyboardBack(in: app)
             return log("\(over): left in front, as the user clicked \(onDock ? "its Dock icon" : "or switched apps")")
         }
-        if previous.isHidden || !Self.isOnScreen(previous) {
-            return log("\(over): left in front, as the user's app was out of sight")
+        if isGone(previous) {
+            // That holds for an app with a window on a Space of theirs. One with no window in their sight is on no
+            // Space they could have gone to: macOS brought it because it was next in line, as when ucu hides the app in
+            // front to move it to the agent's desktop. So the front goes to the app whose window they see on top.
+            guard unseen else { return log("\(over): left in front, as the user's app was out of sight") }
+            return passOn(from: app, past: previous)
         }
         putBack(previous, over: app, ours: ours, why: ours ? "the agent's step brought it" : "it came by itself")
         if owned, parked[pid] == nil { app.hide() }  // without a desktop, ucu's app goes back into hiding
@@ -1908,6 +1940,22 @@ final class Watcher {
         return windows.contains { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
     }
 
+    // Whether an app's windows are all where the agent keeps them, on its desktop, with none in the user's sight.
+    func isUnseen(_ app: NSRunningApplication) -> Bool {
+        parked[app.processIdentifier] != nil && !hasWindowInSight(app)
+    }
+
+    // Whether ucu keeps an app's windows on the agent's desktop while no request of the agent's has it in front.
+    func isKept(_ pid: pid_t) -> Bool {
+        parked[pid] != nil && !(pid == allowed && Date() < allowedUntil)
+    }
+
+    // Whether an app can't have the front back: it has quit, is hidden or shows no window, or its place is the
+    // agent's desktop. One that ucu is moving there is hidden for the move, and says so itself a moment late.
+    func isGone(_ app: NSRunningApplication) -> Bool {
+        app.isTerminated || app.isHidden || !Self.isOnScreen(app) || isKept(app.processIdentifier)
+    }
+
     // Whether the user's last click, a moment ago, was on a window of this app.
     static func clicked(_ app: NSRunningApplication) -> Bool {
         guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(where: { secondsSince($0) < switchWindow }),
@@ -1918,22 +1966,45 @@ final class Watcher {
         return (top?[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier)
     }
 
-    // The user's app comes back to the front. Asking it can fail while it is busy, so it is asked again.
-    func putBack(_ previous: NSRunningApplication, over app: NSRunningApplication, ours: Bool = false, why: String,
-                 tries: Int = putBackTries) {
+    // The front goes from an app with no window in the user's sight to the app whose window they see on top, when the
+    // one it came forward over can't have it back. The windows on screen change while an app quits or hides, so with
+    // no such app it looks again.
+    func passOn(from app: NSRunningApplication, past lost: NSRunningApplication, tries: Int = putBackTries) {
+        if let seen = appInSight(besides: [app.processIdentifier, lost.processIdentifier]) {
+            let why = "neither has a window in the user's sight, so \(seen.localizedName ?? "?") has the front"
+            return putBack(seen, over: app, past: lost, why: why)
+        }
+        guard tries > 1 else {
+            return log("\(app.localizedName ?? "?") came forward over \(lost.localizedName ?? "?"): left in front, "
+                       + "as the user's app was out of sight")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.putBackCheck) { [self] in
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier, isUnseen(app)
+            else { return }
+            passOn(from: app, past: lost, tries: tries - 1)
+        }
+    }
+
+    // The user's app comes back to the front. Asking it can fail while it is busy, so it is asked again. `lost` is the
+    // app that was in front, when that one can't have the front back and another app of the user's gets it.
+    func putBack(_ previous: NSRunningApplication, over app: NSRunningApplication, past lost: NSRunningApplication? = nil,
+                 ours: Bool = false, why: String, tries: Int = putBackTries) {
         front = previous
         AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
                                      kCFBooleanTrue)
         if tries == Self.putBackTries {
+            let over = (lost ?? previous).localizedName ?? "?"
             emit(["event": "focus", "app": app.localizedName ?? "?", "back": previous.localizedName ?? "?"])
-            log("\(app.localizedName ?? "?") came forward over \(previous.localizedName ?? "?"), as \(why): put back")
+            log("\(app.localizedName ?? "?") came forward over \(over), as \(why): put back")
         }
         guard tries > 1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.putBackCheck) { [self] in
             let stays = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
             guard stays, ours ? !Self.clicked(app) : !Self.userSwitched() else { return }
+            // The app that was asked may have gone since: it was on its way out as this one came forward.
+            if isUnseen(app), isGone(previous) { return passOn(from: app, past: lost ?? previous) }
             if tries == 2 { log("\(app.localizedName ?? "?") stayed in front after ucu asked twice: asking once more") }
-            putBack(previous, over: app, ours: ours, why: why, tries: tries - 1)
+            putBack(previous, over: app, past: lost, ours: ours, why: why, tries: tries - 1)
         }
     }
 
