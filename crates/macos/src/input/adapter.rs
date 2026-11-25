@@ -19,10 +19,16 @@ impl InputOps for MacOSAdapter {
     fn background_click(
         &self,
         pid: i32,
+        window_id: Option<&str>,
         event: MouseEvent,
         lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {
-        crate::input::mouse::mouse_background::background_click(pid, event, lease.deadline())
+        crate::input::mouse::mouse_background::background_click(
+            pid,
+            window_id,
+            event,
+            lease.deadline(),
+        )
     }
 
     fn key_event(

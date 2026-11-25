@@ -16,7 +16,7 @@
 | Works in the background | Agents click, type and read other apps without moving your pointer or taking focus. |
 | Stays out of your way | A closed app opens on a private desktop you never see, and apps agents drive can't take your focus. |
 | Has its own desktop | Apps that need clicks by position run on a private desktop you never see. |
-| Clicks anything | A click by position presses the element at that point, or sends raw input to the window, even a canvas with no accessibility tree. |
+| Clicks anything | A click by position presses the element at that point, or sends raw input to the window, even a canvas with no accessibility tree. It goes to the window the agent read, also under another window of the same app. |
 | Shares your browsers | The `safari` and `chrome` tools work in the agent's own window, so you keep your tabs and your keyboard. |
 | Runs side by side | Each chat has its own engine, and is told when another is using the same app. |
 | Has its own cursors | Each chat gets a cursor color of its own, so you can tell at a glance who is doing what. |

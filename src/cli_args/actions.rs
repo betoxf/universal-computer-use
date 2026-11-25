@@ -262,6 +262,14 @@ pub(crate) struct MouseClickArgs {
     )]
     #[serde(default)]
     pub app: Option<String>,
+    #[arg(
+        long = "window-id",
+        value_name = "WINDOW_ID",
+        requires = "app",
+        help = "With --app: the window the click is for (from list-windows), also when another window of the app is over it"
+    )]
+    #[serde(default)]
+    pub window_id: Option<String>,
 }
 
 #[derive(Parser, Debug, Deserialize)]
