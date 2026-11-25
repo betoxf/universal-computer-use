@@ -63,10 +63,38 @@ that changes nothing on that page takes 1.1 s, and a screenshot of its 1280 x 90
 
 - macOS, with the Xcode Command Line Tools (`xcode-select --install`)
 - Python 3.9 or newer, and git, which comes with the Command Line Tools
-- [Claude Code](https://claude.com/claude-code), with the `claude` command on your `PATH`, or opencode
+- At least one agent: [Claude Code](https://claude.com/claude-code) (the `claude` command),
+  [Codex](https://github.com/openai/codex) (the `codex` command) or [opencode](https://opencode.ai)
 - Rust, through [rustup](https://rustup.rs), which the installer can set up for you
 
 ## Install
+
+### Let your agent install it
+
+Paste this into Claude Code, Codex, opencode or another coding agent on your Mac. It asks which agents get UCU and
+where they should prefer it, then installs it and tells you what is left for you to do:
+
+```text
+Install Universal Computer Use (UCU) on this Mac: https://github.com/betoxf/universal-computer-use
+
+1. Before you change anything, ask me these, unless this message already answers them:
+   - Which coding agents should get UCU: every one installed here (Claude Code, Codex, opencode), or only some?
+   - Should agents use UCU instead of their built-in computer use everywhere, only in project folders I name, or
+     nowhere?
+2. Download the installer and read it before you run it:
+   curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh -o /tmp/ucu-install.sh
+3. Run it with my answers. --clients is all, or a list from claude, codex and opencode, such as claude,codex. --rule
+   is global for everywhere, else none (project folders get the rule in step 4):
+   bash /tmp/ucu-install.sh --clients <all or list> --rule <global or none>
+   If it stops because Rust is missing, ask me before you run it again with --yes added, which installs Rust.
+4. The installer prints where the ucu command is, ~/.ucu/ucu/ucu unless UCU was already installed elsewhere. For each
+   project folder I named, run: <that ucu> rule add <folder>
+5. Run <that ucu> doctor and tell me what it reports. Then tell me what only I can do: in System Settings >
+   Privacy & Security, give the app that runs you Accessibility permission if doctor says it is missing, and Screen
+   Recording for screenshots, which doctor doesn't check. Then start a new session.
+```
+
+### Install it yourself
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash
@@ -92,7 +120,9 @@ Set them for `bash`, not for `curl`:
 curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | UCU_DIR=~/src/ucu bash
 ```
 
-With `-s -- --uninstall` after `bash`, it runs `./ucu uninstall` from the installed clone and keeps the clone.
+Options go after `-s --`, such as `bash -s -- --clients claude,codex --rule global`. They are the options of
+`./ucu install` (see [Choosing agents](#choosing-agents)). With `--uninstall`, it runs `./ucu uninstall` from the
+installed clone and keeps the clone.
 
 To install by hand instead:
 
@@ -103,29 +133,56 @@ cd universal-computer-use/ucu
 ./ucu doctor
 ```
 
-Without the `claude` command, `./ucu install` sets UCU up for opencode alone, when `~/.config/opencode/opencode.json`
-exists.
-
 UCU runs from its clone, so keep it, and it updates itself from there (see [Update](#update)). The `./ucu` commands in
-this README run in the clone's `ucu` folder, which is `~/.ucu/ucu` after the one-line install. Start a new Claude Code
-session to pick it up; open sessions need a restart. If `doctor` reports a problem, it says what to do next. The app that
-runs Claude Code, such as Terminal, needs Accessibility permission in **System Settings > Privacy & Security >
+this README run in the clone's `ucu` folder, which is `~/.ucu/ucu` after the one-line install. Start a new session of
+your agent to pick it up; open sessions need a restart. If `doctor` reports a problem, it says what to do next. The app
+that runs your agent, such as Terminal, needs Accessibility permission in **System Settings > Privacy & Security >
 Accessibility**, and Screen Recording for screenshots.
 
 `./ucu install` backs up what it changes to `~/Library/Application Support/ucu/backups/<time>/`, then:
 
 - builds the engine to `~/.local/bin/ucu-engine` and the helper to `~/.local/bin/ucu-window`
 - writes the approval policy, unless you already have one
-- registers the `ucu` server in `~/.claude.json`
-- adds a `Stop` hook to `~/.claude/settings.json`, so UCU knows when Claude's turn ends
-- registers `ucu` in `~/.config/opencode/opencode.json`, if opencode is set up
+- for Claude Code, registers the `ucu` server in `~/.claude.json` and adds a `Stop` hook to `~/.claude/settings.json`,
+  so UCU knows when Claude's turn ends
+- for Codex, registers `ucu` with `codex mcp add`, in `~/.codex/config.toml`, and gives its tool calls 5 minutes, as
+  in Claude Code
+- for opencode, registers `ucu` in `~/.config/opencode/opencode.json`
+- adds the rule to use UCU to those agents' global instructions, with `--rule global`
 - lets UCU's Chrome extension start its host, if Chrome is set up (see [Safari and Chrome](#safari-and-chrome))
 
-To make Claude Code prefer UCU over its built-in computer use, add this to your `~/.claude/CLAUDE.md`:
+### Choosing agents
+
+`./ucu install` sets UCU up for every agent it finds: Claude Code, Codex and opencode. `--clients` names the ones you
+want instead, and install remembers that choice, so running it again keeps it. An agent left out has
+UCU taken out of its config.
+
+```bash
+./ucu install --clients claude,codex   # only Claude Code and Codex
+./ucu install --clients all            # every agent found
+```
+
+Agents get UCU's tools either way, and the server tells them how to use them. To have them use UCU instead of their
+built-in computer use, add a rule to their instructions, everywhere or in chosen projects:
+
+```bash
+./ucu install --rule global             # in each chosen agent's global instructions
+./ucu rule add ~/code/my-app            # in one project only: its CLAUDE.md and AGENTS.md
+./ucu rule remove --global ~/code/my-app
+./ucu install --rule none               # take the global rule out again
+```
+
+The global files are `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md`. A file that is a
+link to another, as these often are, gets the rule once. The rule is these lines at the end of the file, which UCU
+adds, replaces and removes as a block, leaving the rest of the file as it was:
 
 ```markdown
-To operate native Mac apps, use the `ucu` MCP server instead of the built-in computer-use tools.
+<!-- ucu:start -->
+Use the `ucu` MCP server to operate apps on this Mac: `look` to read a window, then `act`, and its `safari` and `chrome` tools for those browsers. Use it instead of built-in computer use, also when asked for "computer use".
+<!-- ucu:end -->
 ```
+
+Agents read their instructions when a session starts, so open sessions need a restart.
 
 ## Choosing which apps agents can use
 
@@ -375,7 +432,8 @@ Any client that speaks MCP over stdio can run the server directly, once `./ucu i
 }
 ```
 
-Without the `Stop` hook, a turn ends after 2 minutes without a call.
+Without the `Stop` hook, which only Claude Code has, a turn ends after 2 minutes without a call. That includes Codex
+and opencode.
 
 ## Update
 
@@ -396,14 +454,15 @@ touch ~/Library/Application\ Support/ucu/no-auto-update
 ./ucu uninstall
 ```
 
-This removes the server, hook, engine, `ucu-window` and the Chrome extension's host. Your policy, logs and backups
+This removes the server from every agent, the hook, the rule from every file UCU put it in, the engine, `ucu-window`
+and the Chrome extension's host. Your policy, logs and backups
 stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
 
 ## How it works
 
 | Path | What it does |
 | --- | --- |
-| `ucu` | The `install`, `uninstall`, `update`, `doctor`, `deny`, `allow` and `denied` commands. |
+| `ucu` | The `install`, `rule`, `uninstall`, `update`, `doctor`, `deny`, `allow` and `denied` commands. |
 | `install.sh` | The one-line installer: checks the requirements, clones UCU to `~/.ucu` and runs `ucu install`. |
 | `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text and adds notes. |
 | `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows, holds the private desktop and draws each chat's cursor. |

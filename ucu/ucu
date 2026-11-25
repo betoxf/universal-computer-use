@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Install, remove and check Universal Computer Use (the `ucu` MCP server) for Claude Code and opencode.
+"""Install, remove and check Universal Computer Use (the `ucu` MCP server) for Claude Code, Codex and opencode.
 
-  ucu install [--python PATH]   register ucu, its Stop hook and approval policy
+  ucu install [--python PATH] [--clients LIST] [--rule global|none]
+                                register ucu, its Stop hook and approval policy
+  ucu rule add|remove [--global] [FOLDER ...]
+                                tell agents to use ucu instead of built-in computer use, or stop telling them
   ucu uninstall                 remove them
   ucu update [--auto]           bring this clone up to date and rebuild what changed
   ucu doctor                    check that everything is in place and that the server starts
@@ -14,6 +17,11 @@ which install writes once (denying password managers, Keychain Access and System
 keeps. Install builds the engine, agent-desktop from this repository, to ~/.local/bin/ucu-engine, and
 ucu-window to ~/.local/bin/ucu-window. Where Chrome is set up, it also lets ucu's Chrome extension
 (chrome-extension/, loaded by hand once) start its host, scripts/ucu-chrome-host.py.
+
+install sets ucu up for every agent it finds (Claude Code, Codex, opencode), or for those --clients names, and
+remembers that choice. With --rule global it adds a short rule to each of those agents' global instructions telling
+them to use ucu instead of built-in computer use; `ucu rule add FOLDER` adds the same rule to one project instead.
+The rule sits between <!-- ucu:start --> and <!-- ucu:end -->, and uninstall takes it out again.
 
 install backs up what it changes outside this repo to
 ~/Library/Application Support/ucu/backups/<time>/ first.
@@ -46,6 +54,9 @@ CLAUDE_CONFIG = HOME / ".claude.json"
 SETTINGS = HOME / ".claude/settings.json"
 BACKUPS = HOME / "Library/Application Support/ucu/backups"
 OPENCODE_CONFIG = HOME / ".config/opencode/opencode.json"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")
+CODEX_CONFIG = CODEX_HOME / "config.toml"
+STATE = HOME / "Library/Application Support/ucu/install.json"  # the agents install chose, and where the rule is
 UPDATES_OFF = HOME / "Library/Application Support/ucu/no-auto-update"
 UPDATE_LOCK = HOME / "Library/Application Support/ucu/update.lock"
 UPDATE_CHECKED = HOME / "Library/Application Support/ucu/update-checked"
@@ -70,6 +81,16 @@ STOP_HOOK = 'pkill -INFO -P "$PPID" -f ucu-proxy.py; exit 0'
 # fails after 5 minutes instead of the 30-minute idle limit. `alwaysLoad` keeps ucu's tools in every
 # prompt instead of behind tool search.
 CLAUDE_EXTRAS = {"timeout": 300000, "alwaysLoad": True}
+# Codex's limit on one tool call, set to Claude Code's 5 minutes above.
+CODEX_TOOL_TIMEOUT = "tool_timeout_sec = 300"
+CLIENTS = {"claude": "Claude Code", "codex": "Codex", "opencode": "opencode"}
+GLOBAL_RULES = {"claude": HOME / ".claude/CLAUDE.md", "codex": CODEX_HOME / "AGENTS.md",
+                "opencode": HOME / ".config/opencode/AGENTS.md"}
+PROJECT_RULES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "opencode": "AGENTS.md"}
+RULE_START, RULE_END = "<!-- ucu:start -->", "<!-- ucu:end -->"
+RULE = ("Use the `ucu` MCP server to operate apps on this Mac: `look` to read a window, then `act`, and its `safari` "
+        "and `chrome` tools for those browsers. Use it instead of built-in computer use, also when asked for "
+        "\"computer use\".")
 POLICY_ABOUT = ("ucu approves every app except those in deny (names match regardless of case). Change the list "
                 "with `ucu deny` and `ucu allow`, or here; edits apply at the next prompt.")
 # Apps the first policy denies: they hold passwords or system security settings.
@@ -194,9 +215,16 @@ def set_stop_hook(install):
 
 # --- opencode -----------------------------------------------------------------
 def set_opencode(python, folder=None):
-    """Register ucu in opencode, if it is set up; with python=None, remove it."""
+    """Register ucu in opencode, making its config if it has none; with python=None, remove it if it is there."""
     if not OPENCODE_CONFIG.exists():
-        return
+        if not python:
+            return
+        if OPENCODE_CONFIG.with_suffix(".jsonc").exists():  # JSON with comments, which this can't edit safely
+            say("!", f"opencode keeps its config in {OPENCODE_CONFIG.with_suffix('.jsonc')}, so ucu was not added "
+                     f"to it; add this under \"mcp\": {json.dumps({SERVER: opencode_entry(python)})}")
+            return
+        OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        OPENCODE_CONFIG.write_text(json.dumps({"$schema": "https://opencode.ai/config.json"}) + "\n")
     try:
         config = json.loads(OPENCODE_CONFIG.read_text())
     except (OSError, ValueError) as error:
@@ -206,13 +234,222 @@ def set_opencode(python, folder=None):
         shutil.copy2(OPENCODE_CONFIG, folder / OPENCODE_CONFIG.name)
     servers = config.setdefault("mcp", {})
     if python:
-        servers[SERVER] = {"type": "local", "command": [python, "-I", str(PROXY)], "enabled": True}
+        servers[SERVER] = opencode_entry(python)
     else:
         servers.pop(SERVER, None)
     if not servers:
         config.pop("mcp")
     write_json(OPENCODE_CONFIG, config)
     say("✓", f"{'registered' if python else 'removed'} {SERVER} in {OPENCODE_CONFIG}")
+
+
+def opencode_entry(python):
+    return {"type": "local", "command": [python, "-I", str(PROXY)], "enabled": True}
+
+
+# --- Codex --------------------------------------------------------------------
+def codex(*args):
+    # codex is a Node script: node is wherever codex was found, which may not be on this process's PATH.
+    return subprocess.run([tool("codex"), "mcp", *args], capture_output=True, text=True, timeout=60, cwd=str(HOME),
+                          env={**os.environ, "PATH": SEARCH_PATH})
+
+
+def codex_entry():
+    """ucu's server as Codex has it (`codex mcp get --json`), or None."""
+    if not tool("codex"):
+        return None
+    try:
+        result = codex("get", SERVER, "--json")
+        entry = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def codex_command(entry):
+    """The command line a Codex entry runs, or []."""
+    transport = (entry or {}).get("transport") or {}
+    return [transport.get("command") or "", *(transport.get("args") or [])] if transport.get("command") else []
+
+
+def set_codex(python, folder=None):
+    """Register ucu in Codex through its CLI, which owns config.toml; with python=None, remove it if it is there."""
+    if not tool("codex"):
+        return
+    if folder and CODEX_CONFIG.exists():
+        shutil.copy2(CODEX_CONFIG, folder / "codex-config.toml")
+    if not python:
+        if codex_entry():
+            codex("remove", SERVER)
+            say("✓", f"removed {SERVER} from Codex")
+        return
+    CODEX_HOME.mkdir(parents=True, exist_ok=True)  # codex refuses to run when CODEX_HOME names no folder
+    result = codex("add", SERVER, "--", python, "-I", str(PROXY))
+    if result.returncode == 0:
+        set_codex_timeout()
+    if codex_command(codex_entry())[1:] != ["-I", str(PROXY)]:
+        fail(f"could not register {SERVER} in Codex: {(result.stderr or result.stdout).strip()[:300]}")
+    say("✓", f"registered {SERVER} in Codex ({CODEX_CONFIG})")
+
+
+def set_codex_timeout():
+    """Give ucu's tool calls in Codex the same 5 minutes as in Claude Code. `codex mcp add` has no option for it, and
+    writes ucu's table afresh each time, so the line goes in just under the table's header."""
+    header = f"[mcp_servers.{SERVER}]"
+    try:
+        target = CODEX_CONFIG.resolve()
+        lines = target.read_text().splitlines(keepends=True)
+    except OSError:
+        return
+    if not any(line.strip() == header for line in lines):
+        return
+    index = next(number for number, line in enumerate(lines) if line.strip() == header)
+    table = lines[index + 1:]
+    end = next((number for number, line in enumerate(table) if line.lstrip().startswith("[")), len(table))
+    if any(line.split("=")[0].strip() == "tool_timeout_sec" for line in table[:end]):
+        return
+    lines.insert(index + 1, CODEX_TOOL_TIMEOUT + "\n")
+    temporary = target.with_name(target.name + ".ucu-tmp")
+    temporary.write_text("".join(lines))
+    os.replace(temporary, target)
+
+
+# --- which agents -------------------------------------------------------------
+def read_state():
+    try:
+        state = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def write_state(state):
+    write_json(STATE, {key: value for key, value in state.items() if value})
+
+
+def found_clients():
+    """The agents on this Mac that ucu can be set up for."""
+    found = {"claude": tool("claude"), "codex": tool("codex"), "opencode": OPENCODE_CONFIG.exists() or tool("opencode")}
+    return [client for client in CLIENTS if found[client]]
+
+
+def parse_clients(text):
+    names = [name.strip().lower() for name in text.split(",") if name.strip()]
+    names = ["claude" if name in ("claude-code", "claudecode") else name for name in names]
+    unknown = [name for name in names if name not in CLIENTS and name != "all"]
+    if unknown or not names:
+        fail(f"--clients takes `all` or a list of {', '.join(CLIENTS)}, such as claude,codex; not {text!r}")
+    return list(CLIENTS) if "all" in names else [client for client in CLIENTS if client in names]
+
+
+def choose_clients(requested):
+    """The agents to set ucu up for: those --clients names, else those chosen last time, else every one found."""
+    found = found_clients()
+    chosen = parse_clients(requested) if requested else []
+    if chosen and "all" not in requested.lower():
+        missing = [CLIENTS[client] for client in chosen if client not in found]
+        if missing:
+            fail(f"{' and '.join(missing)} {'was' if len(missing) == 1 else 'were'} not found on this Mac; install "
+                 "it first or leave it out of --clients. Nothing was changed")
+        return chosen
+    saved = [] if requested else [client for client in read_state().get("clients", []) if client in CLIENTS]
+    for client in saved:
+        if client not in found:
+            say("!", f"{CLIENTS[client]} was chosen before but is no longer found, so it is left out")
+    chosen = [client for client in saved if client in found] or found
+    if not chosen:
+        fail("no agent was found: install Claude Code (the claude command), Codex (the codex command) or opencode "
+             f"({OPENCODE_CONFIG}) first")
+    return chosen
+
+
+# --- the rule that tells agents to use ucu --------------------------------------
+def rule_files(clients, folder=None):
+    """The instruction files the rule goes in for these agents, globally or in a project folder, each file once even
+    when one is a link to another, as Codex's and opencode's AGENTS.md often are to Claude's CLAUDE.md."""
+    files = {}
+    for client in clients:
+        path = GLOBAL_RULES[client] if folder is None else Path(folder) / PROJECT_RULES[client]
+        files.setdefault(path.resolve(), None)
+    return list(files)
+
+
+def without_rule(text):
+    start = text.find(RULE_START)
+    end = text.find(RULE_END, start)
+    if start < 0 or end < 0:
+        return text
+    before, after = text[:start].rstrip("\n"), text[end + len(RULE_END):].lstrip("\n")
+    rest = "\n\n".join(part for part in (before, after) if part.strip())
+    if not rest.strip():
+        return ""
+    return rest if rest.endswith("\n") else rest + "\n"
+
+
+def set_rule(path, present):
+    """Add ucu's rule to the end of an instruction file, or take it out. Return whether the file changed."""
+    block = f"{RULE_START}\n{RULE}\n{RULE_END}\n"
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        if not present:
+            return False
+        text = ""
+    if present and block in text:
+        return False
+    rest = without_rule(text)
+    new = (rest.rstrip("\n") + "\n\n" + block if rest.strip() else block) if present else rest
+    if new == text:
+        return False
+    if not new:  # the file held nothing but the rule
+        path.unlink()
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".ucu-tmp")
+    temporary.write_text(new)
+    os.replace(temporary, path)
+    return True
+
+
+def set_global_rule(clients, present):
+    """Put the rule in the global instructions of these agents, and take it out of every other agent's."""
+    wanted = rule_files(clients) if present else []
+    for path in rule_files(CLIENTS):
+        if path not in wanted and set_rule(path, False):
+            say("✓", f"took the rule to use ucu out of {path}")
+    for path in wanted:
+        if set_rule(path, True):
+            say("✓", f"added the rule to use ucu to {path}")
+        else:
+            say("✓", f"the rule to use ucu is already in {path}")
+
+
+def rule(action, everywhere, folders):
+    """`ucu rule add|remove [--global] [FOLDER ...]`."""
+    if not everywhere and not folders:
+        fail("name --global, a project folder, or both")
+    state = read_state()
+    clients = [client for client in state.get("clients", []) if client in CLIENTS] or found_clients() or list(CLIENTS)
+    folders = [Path(folder).expanduser().resolve() for folder in folders]
+    for folder in folders:
+        if not folder.is_dir():
+            fail(f"{folder} is not a folder. Nothing was changed")
+    paths = [path for folder in folders for path in rule_files(clients if action == "add" else CLIENTS, folder)]
+    backup([*paths, *(rule_files(CLIENTS) if everywhere else [])])
+    if everywhere:
+        set_global_rule(clients, action == "add")
+        state["rule"] = "global" if action == "add" else None
+    projects = [project for project in state.get("project_rules", []) if Path(project) not in paths]
+    for path in paths:
+        changed = set_rule(path, action == "add")
+        if action == "add":
+            projects.append(str(path))
+        say("✓", f"{'added the rule to use ucu to' if action == 'add' else 'took the rule to use ucu out of'} {path}"
+            if changed else f"{path} {'already has' if action == 'add' else 'has no'} rule to use ucu")
+    state["project_rules"] = sorted(set(projects))
+    write_state(state)
+    print("Agents read the rule when a session starts, so open sessions need a restart.")
+    return 0
 
 
 # --- Chrome extension ---------------------------------------------------------
@@ -263,13 +500,19 @@ def list_denied():
 
 
 # --- install ------------------------------------------------------------------
-def backup():
+def backup(files=()):
+    """Copy what install and `ucu rule` change to a new backup folder; `files` keep their full path under files/."""
     folder = BACKUPS / datetime.now().strftime("%Y%m%d-%H%M%S")
     folder.mkdir(parents=True, exist_ok=True)
     servers = {name: entry for name, entry in mcp_servers().items() if name == SERVER}
     (folder / "mcp-servers.json").write_text(json.dumps(servers, indent=2) + "\n")
     if SETTINGS.exists():
         shutil.copy2(SETTINGS, folder / "settings.json")
+    for path in files:
+        if path.is_file():
+            copy = folder / "files" / path.relative_to(path.anchor)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, copy)
     return folder
 
 
@@ -322,7 +565,7 @@ def build_window_helper():
         say("!", f"could not build ucu-window: {(result.stderr or result.stdout).strip()[-300:]}")
 
 
-def install(python):
+def install(python, requested_clients=None, requested_rule=None):
     python = str(Path(python).expanduser())  # not resolved: a stable symlink such as uv's survives upgrades
     try:
         version_ok = subprocess.run([python, "-I", "-c", "import sys; sys.exit(sys.version_info < (3, 9))"]).returncode == 0
@@ -330,22 +573,23 @@ def install(python):
         version_ok = False
     if not version_ok:
         fail(f"{python} is not a Python 3.9 or newer")
-    uses_claude = tool("claude") is not None
-    if not uses_claude and not OPENCODE_CONFIG.exists():
-        fail(f"neither the claude CLI nor {OPENCODE_CONFIG} was found; install Claude Code or set up opencode first")
+    clients = choose_clients(requested_clients)
+    state = read_state()
+    rule_global = (requested_rule or state.get("rule") or "none") == "global"
     failure = handshake(definition(python))
     if failure:
         fail(f"ucu did not start ({failure}); nothing was changed")
+    say("→", "building the engine with cargo, which takes a few minutes the first time")
     failure = build_engine()
     if failure:
         fail(f"{failure}; nothing was changed")
     say("✓", f"built the engine at {proxy.ENGINE}")
 
-    folder = backup()
+    folder = backup(rule_files(CLIENTS))
     say("✓", f"backed up the current setup to {folder}")
     build_window_helper()
     seed_policy()
-    if uses_claude:
+    if "claude" in clients:
         claude("mcp", "remove", SERVER, "-s", "user")  # absent is fine
         result = claude("mcp", "add-json", SERVER, json.dumps(definition(python)), "-s", "user")
         if result.returncode != 0 or SERVER not in mcp_servers():
@@ -354,19 +598,37 @@ def install(python):
         set_stop_hook(True)
         say("✓", f"set ucu's Stop hook in {SETTINGS}")
     else:
-        say("!", "the claude CLI was not found, so ucu was set up for opencode only")
-    set_opencode(python, folder)
+        remove_from_claude()
+    set_codex(python if "codex" in clients else None, folder)
+    set_opencode(python if "opencode" in clients else None, folder)
+    set_global_rule(clients, rule_global)
+    write_state({**state, "clients": clients, "rule": "global" if rule_global else None})
     set_chrome_host(python)
-    print(f'Done. New sessions get `{SERVER}`; open ones need a restart. Run `./ucu deny "App Name"` to block an app.')
+    names = " and ".join(CLIENTS[client] for client in clients)
+    print(f"Done. ucu is set up for {names}. New sessions get `{SERVER}`; open ones need a restart. "
+          f'Run `"{REPO / "ucu"}" deny "App Name"` to block an app.')
     return 0
+
+
+def remove_from_claude():
+    """Take ucu's server and Stop hook out of Claude Code, if they are there."""
+    if any(is_ucu_hook(group) for group in read_settings().get("hooks", {}).get("Stop", [])):
+        set_stop_hook(False)
+    if SERVER in mcp_servers() and tool("claude"):
+        claude("mcp", "remove", SERVER, "-s", "user")
+        say("✓", f"removed {SERVER} from Claude Code")
 
 
 # --- uninstall ----------------------------------------------------------------
 def uninstall():
-    set_stop_hook(False)
-    if SERVER in mcp_servers():
-        claude("mcp", "remove", SERVER, "-s", "user")
+    remove_from_claude()
+    set_codex(None)
     set_opencode(None)
+    set_global_rule([], False)
+    for path in read_state().get("project_rules", []):
+        if set_rule(Path(path), False):
+            say("✓", f"took the rule to use ucu out of {path}")
+    STATE.unlink(missing_ok=True)
     set_chrome_host(None)
     proxy.WINDOW_HELPER.unlink(missing_ok=True)
     proxy.ENGINE.unlink(missing_ok=True)
@@ -502,17 +764,33 @@ def doctor():
         failures += not ok
         say("✓" if ok else "✗", message + (f": {hint}" if hint and not ok else ""))
 
-    entry = mcp_servers().get(SERVER)
-    opencode_only = entry is None and not tool("claude") and OPENCODE_CONFIG.exists()
-    if opencode_only:
-        say("!", "the claude CLI was not found, so only opencode's setup is checked")
-    else:
+    state = read_state()
+    clients = [client for client in state.get("clients", []) if client in CLIENTS] or installed_clients()
+    say("✓", "ucu is set up for " + " and ".join(CLIENTS[client] for client in clients))
+    commands = []
+    if "claude" in clients:
+        entry = mcp_servers().get(SERVER)
         check(entry is not None, f"{SERVER} is registered in {CLAUDE_CONFIG}", "run `ucu install`")
-    if entry:
-        check(entry.get("args") == ["-I", str(PROXY)], "it runs this repo's server",
-              f"args are {entry.get('args')}; run `ucu install`")
-        check(os.access(entry.get("command") or "", os.X_OK), f"its Python {entry.get('command')} exists",
-              "run `ucu install --python PATH`")
+        if entry:
+            check(entry.get("args") == ["-I", str(PROXY)], "it runs this repo's server",
+                  f"args are {entry.get('args')}; run `ucu install`")
+            check(os.access(entry.get("command") or "", os.X_OK), f"its Python {entry.get('command')} exists",
+                  "run `ucu install --python PATH`")
+            commands.append([entry.get("command") or "", *(entry.get("args") or [])])
+    if "codex" in clients:
+        entry = codex_entry()
+        check(codex_command(entry)[1:] == ["-I", str(PROXY)], f"Codex runs {SERVER}", "run `ucu install`")
+        if entry:
+            check(entry.get("tool_timeout_sec") == 300, "Codex gives ucu's tool calls 5 minutes", "run `ucu install`")
+            commands.append(codex_command(entry))
+    if "opencode" in clients:
+        try:
+            servers = json.loads(OPENCODE_CONFIG.read_text()).get("mcp", {})
+        except (OSError, ValueError, AttributeError):
+            servers = {}
+        command = (servers.get(SERVER) or {}).get("command", []) if isinstance(servers, dict) else []
+        check(command[1:] == ["-I", str(PROXY)], f"opencode runs {SERVER}", "run `ucu install`")
+        commands.append(command)
     if proxy.ENGINE.exists():
         result = subprocess.run([str(proxy.ENGINE), "version"], capture_output=True, text=True)
         check(result.returncode == 0, f"the engine {proxy.ENGINE} runs", (result.stderr or result.stdout).strip()[:200])
@@ -525,11 +803,12 @@ def doctor():
         say("!", f"ucu doesn't update itself: {blocker}")
     else:
         say("✓", "ucu updates itself from " + git("rev-parse", "--abbrev-ref", "@{u}").stdout.strip())
-    if entry:
-        failure = handshake({"type": "stdio", **entry})
+    command = next((command for command in commands if command[1:] == ["-I", str(PROXY)]), None)
+    if command:
+        failure = handshake({"command": command[0], "args": command[1:]})
         check(failure is None, "the server answers an MCP initialize", failure)
 
-    if not opencode_only:
+    if "claude" in clients:
         hooks = read_settings().get("hooks", {})
         check(any(is_ucu_hook(group) for group in hooks.get("Stop", [])), f"the Stop hook is in {SETTINGS}",
               "run `ucu install`")
@@ -552,17 +831,29 @@ def doctor():
     focus = focus_report()
     if focus:
         say(*focus)
-    if OPENCODE_CONFIG.exists():
-        try:
-            servers = json.loads(OPENCODE_CONFIG.read_text()).get("mcp", {})
-        except (OSError, ValueError):
-            servers = {}
-        command = (servers.get(SERVER) or {}).get("command", [])
-        check(command[1:] == ["-I", str(PROXY)], f"opencode runs {SERVER}", "run `ucu install`")
-        if opencode_only and command[1:] == ["-I", str(PROXY)]:
-            failure = handshake({"command": command[0], "args": command[1:]})
-            check(failure is None, "the server answers an MCP initialize", failure)
+    if state.get("rule") == "global":
+        for path in rule_files(clients):
+            try:
+                present = RULE_START in path.read_text()
+            except OSError:
+                present = False
+            check(present, f"the rule to use ucu is in {path}", "run `ucu rule add --global`")
+    for path in map(Path, state.get("project_rules", [])):
+        present = path.is_file() and RULE_START in path.read_text()
+        say("✓" if present else "!", f"the rule to use ucu is in {path}" if present
+            else f"{path} no longer has the rule to use ucu; `ucu rule add {path.parent}` puts it back")
     return 1 if failures else 0
+
+
+def installed_clients():
+    """The agents an install from before ucu remembered its choice set up: Claude Code unless it is opencode alone."""
+    entry = mcp_servers().get(SERVER)
+    clients = [] if entry is None and not tool("claude") and OPENCODE_CONFIG.exists() else ["claude"]
+    if codex_entry():
+        clients.append("codex")
+    if OPENCODE_CONFIG.exists():
+        clients.append("opencode")
+    return clients
 
 
 def main():
@@ -571,6 +862,17 @@ def main():
     install_parser = commands.add_parser("install", help="register ucu, its hook and policy")
     install_parser.add_argument("--python", default=sys.executable,
                                 help="interpreter for the server (default: the one running ucu)")
+    install_parser.add_argument("--clients", help="the agents to set ucu up for: `all` (every one found) or a list "
+                                "such as claude,codex,opencode (default: the ones chosen last time, else all)")
+    install_parser.add_argument("--rule", choices=("global", "none"),
+                                help="global: tell those agents in their global instructions to use ucu instead of "
+                                "built-in computer use; none: take that out (default: as chosen last time, else none)")
+    rule_parser = commands.add_parser("rule", help="tell agents to use ucu instead of built-in computer use, or stop")
+    rule_parser.add_argument("action", choices=("add", "remove"))
+    rule_parser.add_argument("--global", dest="everywhere", action="store_true",
+                             help="in the agents' global instructions, such as ~/.claude/CLAUDE.md")
+    rule_parser.add_argument("folders", nargs="*", metavar="FOLDER",
+                             help="a project: its CLAUDE.md for Claude Code, its AGENTS.md for Codex and opencode")
     commands.add_parser("uninstall", help="remove ucu")
     update_parser = commands.add_parser("update", help="bring this clone up to date and rebuild what changed")
     update_parser.add_argument("--auto", action="store_true",
@@ -580,9 +882,16 @@ def main():
     commands.add_parser("deny", help="stop agents using an app").add_argument("app", help='for example "Mail"')
     commands.add_parser("allow", help="let agents use an app again").add_argument("app")
     commands.add_parser("denied", help="list the denied apps")
-    args = parser.parse_args()
+    # Before Python 3.12, argparse leaves folders that follow `--global` over, as in `rule add --global ~/app`.
+    args, extra = parser.parse_known_args()
+    if extra and args.command == "rule" and not any(word.startswith("-") for word in extra):
+        args.folders += extra
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     if args.command == "install":
-        return install(args.python)
+        return install(args.python, args.clients, args.rule)
+    if args.command == "rule":
+        return rule(args.action, args.everywhere, args.folders)
     if args.command == "uninstall":
         return uninstall()
     if args.command == "update":

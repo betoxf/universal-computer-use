@@ -3,14 +3,17 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash
 #
-# It checks for macOS, the Xcode Command Line Tools, Python 3.9 or newer, git, and Claude Code or opencode. It installs
+# It checks for macOS, the Xcode Command Line Tools, Python 3.9 or newer, git, and Claude Code, Codex or opencode. It installs
 # Rust through rustup if it is missing, after asking. It clones UCU to ~/.ucu, or brings an existing clone there up to
 # date, then runs `ucu install` and `ucu doctor` from it. Running it again is safe. It leaves a clone with local
 # changes as it is, and if UCU is already installed from another folder, it says so and changes nothing.
 #
-#   --yes        install Rust without asking (also UCU_YES=1); needed when there is no terminal to ask in
-#   --uninstall  run `ucu uninstall` from the installed clone, which stays where it is
-#   --help       show this help
+#   --clients LIST       the agents to set UCU up for: all (every one found, the default) or a list such as claude,codex
+#   --rule global|none   global: add a rule to those agents' global instructions to use UCU instead of built-in computer
+#                        use; none: take it out. Unset, it stays as chosen before (none at first)
+#   --yes                install Rust without asking (also UCU_YES=1); needed when there is no terminal to ask in
+#   --uninstall          run `ucu uninstall` from the installed clone, which stays where it is
+#   --help               show this help
 #
 #   UCU_DIR      where to clone UCU (default: ~/.ucu)
 #   UCU_REPO     the repository to clone (default: https://github.com/betoxf/universal-computer-use.git)
@@ -21,6 +24,9 @@ UCU_DIR="${UCU_DIR:-$HOME/.ucu}"
 UCU_REPO="${UCU_REPO:-https://github.com/betoxf/universal-computer-use.git}"
 UCU_BRANCH="${UCU_BRANCH:-main}"
 UCU_YES="${UCU_YES:-}"
+CLIENTS=""
+RULE=""
+CHOICES=""
 ONE_LINER="curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash"
 PYTHON=""
 
@@ -41,11 +47,15 @@ usage() {
 Install Universal Computer Use (UCU), the MCP server that lets AI agents use your Mac's apps in the background.
 
 Usage: $ONE_LINER
-       $ONE_LINER -s -- [--yes | --uninstall | --help]
+       $ONE_LINER -s -- [--clients LIST] [--rule global|none] [--yes]
+       $ONE_LINER -s -- --uninstall | --help
 
-  --yes        install Rust without asking (also UCU_YES=1); needed when there is no terminal to ask in
-  --uninstall  run \`ucu uninstall\` from the installed clone, which stays where it is
-  --help       show this help
+  --clients LIST       the agents to set UCU up for: all (every one found, the default) or a list such as claude,codex
+  --rule global|none   global: add a rule to those agents' global instructions to use UCU instead of built-in computer
+                       use; none: take it out. Unset, it stays as chosen before (none at first)
+  --yes                install Rust without asking (also UCU_YES=1); needed when there is no terminal to ask in
+  --uninstall          run \`ucu uninstall\` from the installed clone, which stays where it is
+  --help               show this help
 
   UCU_DIR      where to clone UCU (default: ~/.ucu)
   UCU_REPO     the repository to clone (default: https://github.com/betoxf/universal-computer-use.git)
@@ -110,14 +120,17 @@ check_python() {
   say "✓" "$("$PYTHON" -I -c 'import platform; print("Python", platform.python_version())' </dev/null) at $PYTHON"
 }
 
-# Print the clone that the installed ucu server runs from, as Claude Code's or opencode's config names it, if any.
+# Print the clone that the installed ucu server runs from, as Claude Code's, Codex's or opencode's config names it, if
+# any.
 registered_clone() {
-  "$PYTHON" -I - "$HOME" <<'PY'
+  "$PYTHON" -I - "$HOME" "$(find_tool codex || true)" <<'PY'
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
-home = Path(sys.argv[1])
+home, codex = Path(sys.argv[1]), sys.argv[2]
 
 
 def proxies():
@@ -129,6 +142,14 @@ def proxies():
                 value = value[key]
             yield Path(str(value[-1]))
         except (OSError, ValueError, LookupError, TypeError):
+            pass
+    if codex:  # Codex keeps its servers in TOML, which this Python may not read, so its CLI is asked
+        try:
+            path = os.pathsep.join([os.path.dirname(codex), os.environ.get("PATH", "")])
+            found = subprocess.run([codex, "mcp", "get", "ucu", "--json"], capture_output=True, text=True, timeout=60,
+                                   stdin=subprocess.DEVNULL, env={**os.environ, "PATH": path})
+            yield Path(str(json.loads(found.stdout)["transport"]["args"][-1]))
+        except (OSError, ValueError, LookupError, TypeError, subprocess.TimeoutExpired):
             pass
 
 
@@ -149,13 +170,22 @@ real_dir() {
 }
 
 check_agent() {
+  local found=""
   if find_tool claude >/dev/null; then
     say "✓" "Claude Code at $(find_tool claude)"
-  elif [ -f "$HOME/.config/opencode/opencode.json" ]; then
-    say "!" "the claude command was not found, so UCU will be set up for opencode only"
-  else
-    fail "neither Claude Code (the claude command) nor opencode (~/.config/opencode/opencode.json) was found." \
-      "Install Claude Code (https://claude.com/claude-code) or set up opencode, then run this again."
+    found=1
+  fi
+  if find_tool codex >/dev/null; then
+    say "✓" "Codex at $(find_tool codex)"
+    found=1
+  fi
+  if find_tool opencode >/dev/null || [ -f "$HOME/.config/opencode/opencode.json" ]; then
+    say "✓" "opencode"
+    found=1
+  fi
+  if [ -z "$found" ]; then
+    fail "no agent was found: neither Claude Code (the claude command), Codex (the codex command) nor opencode." \
+      "Install one of them, then run this again."
   fi
 }
 
@@ -214,10 +244,11 @@ next_steps() {
   cat <<EOF
 
 Next steps:
-  1. Start a new Claude Code (or opencode) session. Sessions that are open now need a restart to get ucu.
-  2. In System Settings > Privacy & Security, give the app that runs Claude Code, such as Terminal, Accessibility
-     permission, and Screen Recording for screenshots. Then check again with: "$ucu" doctor
+  1. Start a new session of your agent. Sessions that are open now need a restart to get ucu.
+  2. In System Settings > Privacy & Security, give the app that runs your agent, such as Terminal or the Claude or
+     Codex app, Accessibility permission, and Screen Recording for screenshots. Then check again with: "$ucu" doctor
   3. Agents can use every app you don't deny. Block one with: "$ucu" deny "Mail"
+  4. To tell agents to use ucu in one project only: "$ucu" rule add /path/to/project
 
 UCU runs from $UCU_DIR and updates itself there, so keep that folder.
 To remove UCU: "$ucu" uninstall
@@ -234,14 +265,21 @@ install_ucu() {
   existing="$(registered_clone)"
   if [ -n "$existing" ] && [ "$existing" != "$(real_dir "$UCU_DIR")" ]; then
     say "✓" "UCU is already installed from $existing, so nothing was changed"
-    echo "To update it:  cd \"$existing/ucu\" && ./ucu update && ./ucu install"
+    echo "To update it:  cd \"$existing/ucu\" && ./ucu update && ./ucu install${CHOICES}"
     echo "To move it to $UCU_DIR, run \"$existing/ucu/ucu\" uninstall first, then this again."
     return 0
   fi
   check_agent
   check_rust
   get_clone
-  "$PYTHON" -I "$UCU_DIR/ucu/ucu" install --python "$PYTHON" </dev/null
+  local options=(--python "$PYTHON")
+  if [ -n "$CLIENTS" ]; then
+    options+=(--clients "$CLIENTS")
+  fi
+  if [ -n "$RULE" ]; then
+    options+=(--rule "$RULE")
+  fi
+  "$PYTHON" -I "$UCU_DIR/ucu/ucu" install "${options[@]}" </dev/null
   echo
   "$PYTHON" -I "$UCU_DIR/ucu/ucu" doctor </dev/null || status=$?
   if [ "$status" != 0 ]; then
@@ -260,10 +298,31 @@ uninstall_ucu() {
     clone="$UCU_DIR"
   fi
   if [ -z "$clone" ]; then
-    fail "UCU is not installed: Claude Code and opencode don't run it, and $UCU_DIR isn't a clone of it"
+    fail "UCU is not installed: no agent's config runs it, and $UCU_DIR isn't a clone of it"
   fi
   "$PYTHON" -I "$clone/ucu/ucu" uninstall </dev/null
   echo "The clone at $clone stays. Delete it if you no longer need it: rm -rf \"$clone\""
+}
+
+# Stop on a --clients or --rule value that `ucu install` would refuse, before anything is cloned or installed.
+check_choices() {
+  local name names
+  case "$RULE" in
+    "" | global | none) ;;
+    *) fail "--rule takes global or none, not \"$RULE\"" ;;
+  esac
+  IFS=, read -r -a names <<<"$CLIENTS"
+  shopt -s nocasematch
+  for name in ${names[@]+"${names[@]}"}; do
+    case "$name" in
+      all | claude | claude-code | claudecode | codex | opencode | "") ;;
+      *) fail "--clients takes all, or a list of claude, codex and opencode such as claude,codex; not \"$name\"" ;;
+    esac
+  done
+  shopt -u nocasematch
+  CHOICES=""
+  if [ -n "$CLIENTS" ]; then CHOICES="$CHOICES --clients $CLIENTS"; fi
+  if [ -n "$RULE" ]; then CHOICES="$CHOICES --rule $RULE"; fi
 }
 
 main() {
@@ -271,6 +330,17 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -y | --yes) UCU_YES=1 ;;
+      --clients | --rule)
+        if [ $# -lt 2 ]; then
+          usage >&2
+          printf '✗ %s needs a value\n' "$1" >&2
+          return 2
+        fi
+        if [ "$1" = --clients ]; then CLIENTS="$2"; else RULE="$2"; fi
+        shift
+        ;;
+      --clients=*) CLIENTS="${1#--clients=}" ;;
+      --rule=*) RULE="${1#--rule=}" ;;
       --uninstall) action=uninstall ;;
       -h | --help)
         usage
@@ -284,6 +354,7 @@ main() {
     esac
     shift
   done
+  check_choices
   if [ "$action" = uninstall ]; then
     uninstall_ucu
   else
