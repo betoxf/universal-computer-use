@@ -571,6 +571,7 @@ def install(python, requested_clients=None, requested_rule=None):
     failure = handshake(definition(python))
     if failure:
         fail(f"ucu did not start ({failure}); nothing was changed")
+    say("→", "building the engine with cargo, which takes a few minutes the first time")
     failure = build_engine()
     if failure:
         fail(f"{failure}; nothing was changed")
@@ -597,7 +598,7 @@ def install(python, requested_clients=None, requested_rule=None):
     set_chrome_host(python)
     names = " and ".join(CLIENTS[client] for client in clients)
     print(f"Done. ucu is set up for {names}. New sessions get `{SERVER}`; open ones need a restart. "
-          'Run `./ucu deny "App Name"` to block an app.')
+          f'Run `"{REPO / "ucu"}" deny "App Name"` to block an app.')
     return 0
 
 
