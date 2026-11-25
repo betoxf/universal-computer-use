@@ -1,6 +1,6 @@
 use super::*;
-use crate::AdapterError;
 use crate::adapter::{ActionOps, InputOps, ObservationOps, SystemOps};
+use crate::{AdapterError, ErrorCode};
 use std::sync::Mutex;
 
 struct ModifierCaptureAdapter {
@@ -58,6 +58,7 @@ fn requested_modifiers_reach_the_dispatched_mouse_event() {
             count: 1,
             modifiers: vec![Modifier::Meta, Modifier::Shift],
             app: None,
+            window_id: None,
         },
         &adapter,
         &CommandContext::default().with_headed(true),
@@ -83,6 +84,7 @@ fn no_modifiers_requested_dispatches_empty_modifiers() {
             count: 1,
             modifiers: Vec::new(),
             app: None,
+            window_id: None,
         },
         &adapter,
         &CommandContext::default().with_headed(true),
@@ -116,6 +118,7 @@ fn headed_mouse_click_presents_agent_cursor_after_delivery() {
             count: 1,
             modifiers: Vec::new(),
             app: None,
+            window_id: None,
         },
         &adapter,
         &context,
@@ -144,6 +147,7 @@ fn zero_clicks_fail_before_dispatch() {
             count: 0,
             modifiers: Vec::new(),
             app: None,
+            window_id: None,
         },
         &adapter,
         &CommandContext::default().with_headed(true),
@@ -166,6 +170,7 @@ fn excessive_click_count_fails_before_dispatch() {
             count: crate::MAX_MOUSE_CLICK_COUNT + 1,
             modifiers: Vec::new(),
             app: None,
+            window_id: None,
         },
         &adapter,
         &CommandContext::default().with_headed(true),
@@ -181,6 +186,7 @@ mod cursor;
 
 struct BackgroundAdapter {
     clicked: Mutex<Option<(i32, MouseEvent)>>,
+    window: Mutex<Option<String>>,
 }
 
 impl ActionOps for BackgroundAdapter {}
@@ -204,10 +210,12 @@ impl InputOps for BackgroundAdapter {
     fn background_click(
         &self,
         pid: i32,
+        window_id: Option<&str>,
         event: MouseEvent,
         _lease: &crate::InteractionLease,
     ) -> Result<crate::OperationReport, AdapterError> {
         *self.clicked.lock().unwrap() = Some((pid, event));
+        *self.window.lock().unwrap() = window_id.map(str::to_owned);
         Ok(crate::adapter::test_report())
     }
 }
@@ -216,6 +224,7 @@ impl InputOps for BackgroundAdapter {
 fn a_background_click_needs_no_headed_policy_and_goes_to_the_named_app() {
     let adapter = BackgroundAdapter {
         clicked: Mutex::new(None),
+        window: Mutex::new(None),
     };
     let context = CommandContext::new(None, None, false).expect("context loads");
 
@@ -227,6 +236,7 @@ fn a_background_click_needs_no_headed_policy_and_goes_to_the_named_app() {
             count: 1,
             modifiers: Vec::new(),
             app: Some("Calculator".into()),
+            window_id: None,
         },
         &adapter,
         &context,
@@ -237,4 +247,48 @@ fn a_background_click_needs_no_headed_policy_and_goes_to_the_named_app() {
     let (pid, event) = clicked.as_ref().expect("the adapter got the click");
     assert_eq!(*pid, 7);
     assert_eq!(event.point.x, 10.0);
+}
+
+fn window_click(app: Option<&str>) -> MouseClickArgs {
+    MouseClickArgs {
+        x: 10.0,
+        y: 20.0,
+        button: MouseButton::Left,
+        count: 1,
+        modifiers: Vec::new(),
+        app: app.map(str::to_owned),
+        window_id: Some("w-42".into()),
+    }
+}
+
+#[test]
+fn a_background_click_names_the_window_it_is_for() {
+    let adapter = BackgroundAdapter {
+        clicked: Mutex::new(None),
+        window: Mutex::new(None),
+    };
+    let context = CommandContext::new(None, None, false).expect("context loads");
+
+    let response = execute(window_click(Some("Calculator")), &adapter, &context)
+        .expect("background click succeeds");
+
+    assert_eq!(adapter.window.lock().unwrap().as_deref(), Some("w-42"));
+    assert_eq!(response["window_id"], "w-42");
+}
+
+#[test]
+fn a_window_id_without_an_app_is_refused_before_any_click() {
+    let adapter = BackgroundAdapter {
+        clicked: Mutex::new(None),
+        window: Mutex::new(None),
+    };
+    let context = CommandContext::new(None, None, false).expect("context loads");
+
+    let error = execute(window_click(None), &adapter, &context).expect_err("no app was named");
+
+    let AppError::Adapter(error) = error else {
+        panic!("expected an adapter error");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidArgs);
+    assert!(adapter.clicked.lock().unwrap().is_none());
 }

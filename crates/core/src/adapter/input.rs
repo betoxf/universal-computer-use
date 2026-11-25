@@ -32,10 +32,12 @@ pub trait InputOps: Send + Sync {
         Err(AdapterError::not_supported("mouse_event"))
     }
 
-    /// Clicks a window of `pid` without moving the pointer or activating the app.
+    /// Clicks a window of `pid` without moving the pointer or activating the app: the one `window_id` names,
+    /// also under another window of the app, or else the frontmost at the point.
     fn background_click(
         &self,
         _pid: i32,
+        _window_id: Option<&str>,
         _event: MouseEvent,
         _lease: &InteractionLease,
     ) -> Result<OperationReport, AdapterError> {

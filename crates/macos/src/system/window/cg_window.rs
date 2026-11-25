@@ -73,7 +73,8 @@ fn capture_once(
     scope: WindowRecordScope<'_>,
 ) -> Result<Vec<WindowRecord>, AdapterError> {
     ensure_before_deadline(deadline)?;
-    let mut records = records_from_dictionaries(window_dictionaries()?, scope)?;
+    let mut records =
+        records_from_dictionaries(window_dictionaries(window_list_options())?, scope)?;
     capture_process_instances(&mut records, deadline)?;
     ensure_before_deadline(deadline)?;
     Ok(records)
@@ -164,10 +165,18 @@ pub(in crate::system) fn records_from_dictionaries(
     Ok(records)
 }
 
-fn window_dictionaries() -> Result<Vec<WindowDictionary>, AdapterError> {
+/// An app's windows that show, from the front to the back. The inventory comes in no such order.
+pub(crate) fn showing_window_records(pid: i32) -> Result<Vec<WindowRecord>, AdapterError> {
+    let showing = core_graphics::window::kCGWindowListOptionOnScreenOnly
+        | core_graphics::window::kCGWindowListExcludeDesktopElements;
+    records_from_dictionaries(window_dictionaries(showing)?, WindowRecordScope::Pid(pid))
+}
+
+fn window_dictionaries(
+    options: core_graphics::window::CGWindowListOption,
+) -> Result<Vec<WindowDictionary>, AdapterError> {
     use crate::tree::properties::cf_type::borrowed_cf_dictionary;
     use core_graphics::display::CGDisplay;
-    let options = window_list_options();
     let array = CGDisplay::window_list_info(options, None).ok_or_else(|| {
         inventory_error("CGWindowListCopyWindowInfo returned null instead of a window inventory")
     })?;
