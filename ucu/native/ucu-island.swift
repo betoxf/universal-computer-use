@@ -1672,10 +1672,154 @@ final class InteractiveRequest {
     }
 }
 
+// What the Touch ID banner says of the sheet it stands for.
+enum TouchPhase: String {
+    case waiting  // the user's hands are busy: the finger isn't read
+    case ready    // the finger is read now
+    case reading  // the sheet took a touch, and is signing in
+    case done     // it signed in
+}
+
 struct PasskeyBanner {
     let identity: AgentIdentity
-    let prompt: String
+    var prompt: String
     let detail: String
+    var phase: TouchPhase = .ready
+}
+
+// The Touch ID mark at the left of the banner, and what it does in each phase: it breathes while it waits, sends
+// out a ring while the finger is read, turns an arc while the sheet signs in, and becomes a check mark. Its ring
+// and arc are layers of their own, placed by their middles on the middle of the icon. A view's own layer scales
+// about its bottom-left corner, which is where the ring used to grow from, off the icon.
+final class TouchIDBadgeView: NSView {
+    static let rose = NSColor(srgbRed: 1.0, green: 0.27, blue: 0.42, alpha: 1.0)
+    static let green = NSColor(srgbRed: 0.20, green: 0.84, blue: 0.42, alpha: 1.0)
+    private let icon = CALayer(), ring = CAShapeLayer(), arc = CAShapeLayer()
+    private let animated: Bool
+    private(set) var phase: TouchPhase
+
+    init(size: CGFloat, phase: TouchPhase, animated: Bool) {
+        self.phase = phase
+        self.animated = animated
+        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        wantsLayer = true
+        layer?.masksToBounds = false
+        let middle = CGPoint(x: size / 2, y: size / 2), radius = size / 2 + 2
+        for shape in [ring, arc] {
+            shape.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
+            shape.position = middle
+            shape.path = CGPath(ellipseIn: shape.bounds.insetBy(dx: 0.8, dy: 0.8), transform: nil)
+            shape.fillColor = NSColor.clear.cgColor
+            shape.lineWidth = 1.2
+            shape.opacity = 0
+            layer?.addSublayer(shape)
+        }
+        arc.lineWidth = 1.7
+        arc.lineCap = .round
+        arc.strokeEnd = 0.3
+        icon.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+        icon.position = middle
+        icon.contentsGravity = .center
+        layer?.addSublayer(icon)
+        show(phase, after: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    func set(_ next: TouchPhase) {
+        guard next != phase else { return }
+        let was = phase
+        phase = next
+        show(next, after: was)
+    }
+
+    // A symbol in its colours, drawn in the middle of a square: the symbol's own image isn't square.
+    private func mark(_ name: String, colors: [NSColor]) -> Any? {
+        let style = NSImage.SymbolConfiguration(pointSize: bounds.width * 0.82, weight: .medium)
+            .applying(NSImage.SymbolConfiguration(paletteColors: colors))
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(style) else { return nil }
+        let side = bounds.width, scale = max(2, window?.backingScaleFactor ?? 2)
+        let square = NSImage(size: NSSize(width: side, height: side), flipped: false) { box in
+            let fit = min(1, min(box.width / symbol.size.width, box.height / symbol.size.height))
+            let size = NSSize(width: symbol.size.width * fit, height: symbol.size.height * fit)
+            symbol.draw(in: NSRect(x: (box.width - size.width) / 2, y: (box.height - size.height) / 2,
+                                   width: size.width, height: size.height))
+            return true
+        }
+        icon.contentsScale = scale
+        return square.layerContents(forContentsScale: scale)
+    }
+
+    private func show(_ phase: TouchPhase, after was: TouchPhase?) {
+        let tint = phase == .done ? Self.green : Self.rose
+        [icon, ring, arc].forEach { $0.removeAllAnimations() }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // The check is the island's own black on a green disc: in one colour the disc swallowed it.
+        icon.contents = phase == .done ? mark("checkmark.circle.fill", colors: [.black, tint])
+            : mark("touchid", colors: [tint])
+        icon.opacity = phase == .waiting ? 0.55 : 1
+        ring.strokeColor = tint.withAlphaComponent(0.8).cgColor
+        arc.strokeColor = tint.cgColor
+        ring.opacity = !animated && phase == .ready ? 0.4 : 0
+        arc.opacity = phase == .reading ? 1 : 0
+        CATransaction.commit()
+        guard animated else { return }
+        if was != nil, was != phase {  // one mark gives way to the next
+            let change = CATransition()
+            change.type = .fade
+            change.duration = 0.16
+            icon.add(change, forKey: "change")
+        }
+        switch phase {
+        case .waiting:
+            icon.add(Self.swing("opacity", from: 0.38, to: 0.68, every: 1.7), forKey: "breathe")
+        case .ready:
+            icon.add(Self.swing("opacity", from: 1.0, to: 0.62, every: 1.05), forKey: "pulse")
+            let grow = CABasicAnimation(keyPath: "transform.scale")
+            (grow.fromValue, grow.toValue) = (0.86, 1.5)
+            let fade = CABasicAnimation(keyPath: "opacity")
+            (fade.fromValue, fade.toValue) = (0.8, 0.0)
+            let radar = CAAnimationGroup()
+            radar.animations = [grow, fade]
+            radar.duration = 1.5
+            radar.repeatCount = .infinity
+            radar.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ring.add(radar, forKey: "radar")
+        case .reading:
+            let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+            (turn.fromValue, turn.toValue) = (0.0, -2 * Double.pi)
+            turn.duration = 0.75
+            turn.repeatCount = .infinity
+            arc.add(turn, forKey: "turn")
+        case .done:
+            let pop = CASpringAnimation(keyPath: "transform.scale")
+            (pop.fromValue, pop.toValue) = (0.55, 1.0)
+            (pop.mass, pop.stiffness, pop.damping) = (0.6, 380, 16)
+            pop.duration = pop.settlingDuration
+            icon.add(pop, forKey: "pop")
+            let grow = CABasicAnimation(keyPath: "transform.scale")
+            (grow.fromValue, grow.toValue) = (0.9, 1.7)
+            let fade = CABasicAnimation(keyPath: "opacity")
+            (fade.fromValue, fade.toValue) = (0.85, 0.0)
+            let flash = CAAnimationGroup()
+            flash.animations = [grow, fade]
+            flash.duration = 0.55
+            flash.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ring.add(flash, forKey: "flash")
+        }
+    }
+
+    private static func swing(_ key: String, from: Double, to: Double, every seconds: Double) -> CABasicAnimation {
+        let swing = CABasicAnimation(keyPath: key)
+        (swing.fromValue, swing.toValue) = (from, to)
+        swing.duration = seconds
+        swing.autoreverses = true
+        swing.repeatCount = .infinity
+        swing.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        return swing
+    }
 }
 
 struct ActiveAgent {
@@ -1833,6 +1977,11 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
     private var active: InteractiveRequest?
     private var passkey: PasskeyBanner?
     private var passkeyTimer: Timer?
+    private var passkeyFinishing = false  // it is saying that the sign-in is done, and goes by itself after
+    private weak var passkeyBadge: TouchIDBadgeView?
+    private weak var passkeyPrompt: NSTextField?
+    private var shownScene: String?  // what the island shows, where drawing it again would only replay its entrance
+    private var lastWiggle = [String: Date]()
     private var toastTimer: Timer?
     private var hotkeyMonitor: Any?
     private var previousApp: NSRunningApplication?
@@ -1954,27 +2103,65 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
     }
 
     func setPasskey(active isActive: Bool, identity: AgentIdentity, prompt: String?, detail: String?,
-                    timeout: TimeInterval) {
-        passkeyTimer?.invalidate()
-        passkeyTimer = nil
-        if isActive {
-            passkey = PasskeyBanner(
-                identity: identity,
-                prompt: (prompt?.isEmpty == false ? prompt! : "Please touch the key"),
-                detail: detail ?? ""
-            )
-            passkeyTimer = Timer.scheduledTimer(withTimeInterval: max(5, min(timeout, 120)), repeats: false) { [weak self] _ in
-                self?.setPasskey(active: false, identity: identity, prompt: nil, detail: nil, timeout: 0)
-            }
-            if active == nil {
-                toastTimer?.invalidate()
-                toastTimer = nil
-                renderPasskey(passkey!)
-            }
-        } else {
+                    timeout: TimeInterval, phase: TouchPhase = .ready) {
+        guard isActive else {
+            if passkeyFinishing { return }  // it goes by itself once it has said that it is done
+            passkeyTimer?.invalidate()
+            passkeyTimer = nil
             passkey = nil
-            if active == nil {
-                showIdleState()
+            if active == nil { showIdleState() }
+            return
+        }
+        passkeyTimer?.invalidate()
+        passkeyFinishing = false
+        if phase == .done { return finishPasskey(identity: identity) }
+        let banner = PasskeyBanner(identity: identity,
+                                   prompt: prompt?.isEmpty == false ? prompt! : "Please touch the key",
+                                   detail: detail ?? "", phase: phase)
+        let shown = passkey != nil
+        passkey = banner
+        passkeyTimer = Timer.scheduledTimer(withTimeInterval: max(5, min(timeout, 120)), repeats: false) { [weak self] _ in
+            self?.setPasskey(active: false, identity: identity, prompt: nil, detail: nil, timeout: 0)
+        }
+        guard active == nil else { return }
+        toastTimer?.invalidate()
+        toastTimer = nil
+        showPasskey(banner, again: shown)
+    }
+
+    // A banner that is on the island already changes where it is: drawn anew for each thing it has to say, it came
+    // in again each time.
+    private func showPasskey(_ banner: PasskeyBanner, again: Bool) {
+        guard again, let badge = passkeyBadge, badge.superview != nil, let label = passkeyPrompt else {
+            return renderPasskey(banner)
+        }
+        badge.set(banner.phase)
+        guard label.stringValue != banner.prompt else { return }
+        let change = CATransition()
+        change.type = .fade
+        change.duration = 0.18
+        label.layer?.add(change, forKey: "text")
+        label.stringValue = banner.prompt
+    }
+
+    // The sheet took the touch. As the sheet itself does, the banner thinks for a moment, says that it is done, and
+    // goes, in about the time the sheet takes to close.
+    private func finishPasskey(identity: AgentIdentity) {
+        passkeyFinishing = true
+        var banner = passkey ?? PasskeyBanner(identity: identity, prompt: "", detail: "")
+        (banner.phase, banner.prompt) = (.reading, "Signing in…")
+        let shown = passkey != nil
+        passkey = banner
+        if active == nil { showPasskey(banner, again: shown) }
+        passkeyTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
+            guard let self, self.passkeyFinishing, var banner = self.passkey else { return }
+            (banner.phase, banner.prompt) = (.done, "Done")
+            self.passkey = banner
+            if self.active == nil { self.showPasskey(banner, again: true) }
+            self.passkeyTimer = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: false) { [weak self] _ in
+                guard let self, self.passkeyFinishing else { return }
+                self.passkeyFinishing = false
+                self.setPasskey(active: false, identity: identity, prompt: nil, detail: nil, timeout: 0)
             }
         }
     }
@@ -1998,8 +2185,10 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
     func updateAgent(sessionId: String, pid: pid_t?, identity: AgentIdentity, active isActive: Bool,
                      app: String?, windowTitle: String?, cgWindowId: CGWindowID?, action: String?,
                      cursorNorm: CGPoint?) {
+        var moved = false  // the agent went on to something new
         if !isActive {
             activeAgents.removeAll { $0.sessionId == sessionId }
+            lastWiggle[sessionId] = nil
             previewImages.removeValue(forKey: sessionId)
             lastCaptureAt.removeValue(forKey: sessionId)
             if hoveredAgentId == sessionId {
@@ -2012,7 +2201,10 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
             if let app, !app.isEmpty { activeAgents[idx].app = app }
             if let windowTitle, !windowTitle.isEmpty { activeAgents[idx].windowTitle = windowTitle }
             if let cgWindowId, cgWindowId != 0 { activeAgents[idx].cgWindowId = cgWindowId }
-            if let action, !action.isEmpty { activeAgents[idx].action = action }
+            if let action, !action.isEmpty, action != activeAgents[idx].action {
+                activeAgents[idx].action = action
+                moved = true
+            }
             if let cursorNorm { activeAgents[idx].cursorNorm = cursorNorm }
             activeAgents[idx].updatedAt = Date()
             prewarmCapture(for: sessionId)
@@ -2034,10 +2226,11 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         syncAmbientWiggle()
         if active == nil && passkey == nil && !toastActive {
             showIdleState()
-            if isActive && hoveredAgentId == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
-                    self?.wiggleCursor(sessionId: sessionId, subtle: true)
-                }
+            // Its cursor stirs at something new only once in a while, and not each time: an agent takes several
+            // steps a second, and a cursor that answered each of them never stood still.
+            if isActive, moved, hoveredAgentId == nil, Int.random(in: 0..<3) == 0,
+               -(lastWiggle[sessionId] ?? .distantPast).timeIntervalSinceNow > 8 {
+                wiggleCursor(sessionId: sessionId, subtle: true)
             }
         }
     }
@@ -2055,7 +2248,7 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
     private func scheduleNextWiggle() {
         ambientWiggleTimer?.invalidate()
         guard !activeAgents.isEmpty else { ambientWiggleTimer = nil; return }
-        let delay = Double.random(in: 3.4...6.8)
+        let delay = Double.random(in: 7...17)
         ambientWiggleTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self else { return }
             if self.active == nil && self.passkey == nil && !self.toastActive && self.hoveredAgentId == nil,
@@ -2070,6 +2263,7 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         guard let host = contentHost,
               let dart = host.subviews.compactMap({ $0 as? CursorDartView }).first(where: { $0.sessionId == sessionId }),
               let layer = dart.layer else { return }
+        lastWiggle[sessionId] = Date()
         // Pivot around the dart's center
         let frame = layer.frame
         if layer.anchorPoint != CGPoint(x: 0.5, y: 0.5) {
@@ -2077,24 +2271,29 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
             layer.position = CGPoint(x: frame.midX, y: frame.midY)
         }
         layer.removeAnimation(forKey: "aliveWiggle")
-        let angle: CGFloat = subtle ? 0.10 : 0.17
-        let shift: CGFloat = subtle ? 1.4 : 2.3
-
-        let rot = CAKeyframeAnimation(keyPath: "transform.rotation.z")
-        rot.values = [0, -angle, angle * 0.85, -angle * 0.45, 0]
-        rot.keyTimes = [0, 0.25, 0.55, 0.80, 1.0]
-
-        let dx = CAKeyframeAnimation(keyPath: "transform.translation.x")
-        dx.values = [0, shift, -shift * 0.7, shift * 0.35, 0]
-        dx.keyTimes = [0, 0.28, 0.58, 0.82, 1.0]
-
-        let dy = CAKeyframeAnimation(keyPath: "transform.translation.y")
-        dy.values = [0, shift * 0.65, -shift * 0.3, 0]
-        dy.keyTimes = [0, 0.35, 0.72, 1.0]
-
+        // One slow movement there and back, a different one each time: a tilt, a small step, or a lean. Three quick
+        // turns in a third of a second, as it was, read as shaking.
+        let size: CGFloat = subtle ? 0.7 : 1.0
+        func path(_ key: String, _ values: [CGFloat]) -> CAKeyframeAnimation {
+            let move = CAKeyframeAnimation(keyPath: key)
+            move.values = values
+            move.calculationMode = .cubic
+            return move
+        }
         let group = CAAnimationGroup()
-        group.animations = [rot, dx, dy]
-        group.duration = subtle ? 0.32 : 0.44
+        switch Int.random(in: 0..<3) {
+        case 0:
+            group.animations = [path("transform.rotation.z", [0, -0.075 * size, 0.022 * size, 0])]
+            group.duration = 0.8
+        case 1:
+            group.animations = [path("transform.translation.x", [0, -1.3 * size, 0]),
+                                path("transform.translation.y", [0, 1.3 * size, 0])]
+            group.duration = 0.6
+        default:
+            group.animations = [path("transform.rotation.z", [0, 0.05 * size, 0]),
+                                path("transform.translation.x", [0, 0.9 * size, 0])]
+            group.duration = 1.0
+        }
         group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         layer.add(group, forKey: "aliveWiggle")
     }
@@ -2493,6 +2692,7 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
     private func present(width: CGFloat, height: CGFloat, geometry: NotchGeometry,
                          allowKey: Bool = false, glowColor: NSColor? = nil) {
         let (panel, backdrop, host) = ensurePanel()
+        shownScene = nil
         panel.allowKeyFocus = allowKey
         backdrop.hasNotch = geometry.hasNotch
         backdrop.leftEar = true
@@ -2513,6 +2713,7 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
     private func presentAsymmetric(leftExtra: CGFloat, rightExtra: CGFloat, height: CGFloat,
                                    geometry: NotchGeometry, glowColor: NSColor? = nil) {
         let (panel, backdrop, host) = ensurePanel()
+        shownScene = nil
         panel.allowKeyFocus = false
         backdrop.hasNotch = geometry.hasNotch
         backdrop.leftEar = geometry.hasNotch && leftExtra > 0
@@ -2571,33 +2772,37 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         }
     }
 
+    // A scale about the middle of a view's layer, with a shift up or down. AppKit anchors such a layer at its
+    // bottom-left corner, so a plain scale grew the island's contents out of that corner, and shrank them into it.
+    private static func scaled(_ factor: CGFloat, in layer: CALayer, lifted: CGFloat = 0) -> CATransform3D {
+        let off = CGPoint(x: (0.5 - layer.anchorPoint.x) * layer.bounds.width,
+                          y: (0.5 - layer.anchorPoint.y) * layer.bounds.height)
+        var transform = CATransform3DMakeTranslation(off.x, off.y + lifted, 0)
+        transform = CATransform3DScale(transform, factor, factor, 1)
+        return CATransform3DTranslate(transform, -off.x, -off.y, 0)
+    }
+
     private func animateContentEntrance(host: NSView, strong: Bool) {
         guard let layer = host.layer else { return }
         layer.removeAnimation(forKey: "contentIn")
+        // What a close left behind kept the new contents unseen until the close had ended.
+        layer.removeAnimation(forKey: "contentOut")
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = strong ? 0.0 : 0.62
         fade.toValue = 1.0
         fade.duration = strong ? 0.24 : 0.16
         fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
 
-        let slide = CASpringAnimation(keyPath: "transform.translation.y")
-        slide.fromValue = strong ? 7.0 : 3.0
-        slide.toValue = 0.0
-        slide.mass = 0.7
-        slide.stiffness = 340
-        slide.damping = 24
-        slide.duration = slide.settlingDuration
-
-        let scale = CASpringAnimation(keyPath: "transform.scale")
-        scale.fromValue = strong ? 0.94 : 0.985
-        scale.toValue = 1.0
-        scale.mass = 0.7
-        scale.stiffness = 340
-        scale.damping = 25
-        scale.duration = scale.settlingDuration
+        let settle = CASpringAnimation(keyPath: "transform")
+        settle.fromValue = NSValue(caTransform3D: Self.scaled(strong ? 0.94 : 0.985, in: layer, lifted: strong ? 7 : 3))
+        settle.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        settle.mass = 0.7
+        settle.stiffness = 340
+        settle.damping = 24
+        settle.duration = settle.settlingDuration
 
         let group = CAAnimationGroup()
-        group.animations = [fade, slide, scale]
+        group.animations = [fade, settle]
         group.duration = 0.32
         layer.add(group, forKey: "contentIn")
     }
@@ -2607,6 +2812,7 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         removeHotkeyMonitor()
         restorePreviousAppIfNeeded()
         cursorHitZones = []
+        shownScene = nil
         guard let panel, panel.isVisible else { return }
         let geo = NotchGeometry.detect()
         let startW = geo.hasNotch ? geo.notchWidth : 92
@@ -2622,9 +2828,9 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
             fadeOut.fromValue = 1.0
             fadeOut.toValue = 0.0
             fadeOut.duration = 0.12
-            let shrink = CABasicAnimation(keyPath: "transform.scale")
-            shrink.fromValue = 1.0
-            shrink.toValue = 0.92
+            let shrink = CABasicAnimation(keyPath: "transform")
+            shrink.fromValue = NSValue(caTransform3D: CATransform3DIdentity)
+            shrink.toValue = NSValue(caTransform3D: Self.scaled(0.92, in: layer))
             shrink.duration = 0.12
             let g = CAAnimationGroup()
             g.animations = [fadeOut, shrink]
@@ -2659,11 +2865,17 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
 
     // 0a. Active Agents Cursor Pile — super tight overlapping stack on ONLY the LEFT side of the notch!
     private func renderCursorPile() {
+        // Every step an agent takes is told here, several times a second. Drawn anew for each, the pile faded,
+        // slid and glowed without end: it is drawn again only when who is in it changes.
+        let scene = "pile:" + activeAgents.prefix(4).map { "\($0.sessionId) \($0.identity.color)" }
+            .joined(separator: ",") + " +\(max(0, activeAgents.count - 4))"
+        if shownScene == scene, panel?.isVisible == true { return }
         let geo = NotchGeometry.detect()
         let (_, _, host) = ensurePanel()
         let layout = populateCursorPile(in: host, agents: activeAgents, geo: geo)
         presentAsymmetric(leftExtra: layout.leftExtra, rightExtra: 0, height: layout.height,
                           geometry: geo, glowColor: activeAgents.last?.identity.color)
+        shownScene = scene
     }
 
     @discardableResult
@@ -2881,60 +3093,26 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         let innerW: CGFloat = max(geo.notchWidth + 320, 508)
         let totalW = innerW + ear * 2
 
-        // Left wing: concentric biometric radar ring + pulsing Touch ID SF Symbol + "Touch ID"
+        // Left wing: the Touch ID mark, which shows what the sheet is doing, and "Touch ID"
         let leftX = ear + 16
-        let rose = NSColor(srgbRed: 1.0, green: 0.27, blue: 0.42, alpha: 1.0)
-        if animate {
-            let ring = NSView(frame: NSRect(x: leftX - 2, y: (topH - 26) / 2, width: 26, height: 26))
-            ring.wantsLayer = true
-            ring.layer?.cornerRadius = 13
-            ring.layer?.borderWidth = 1.2
-            ring.layer?.borderColor = rose.withAlphaComponent(0.75).cgColor
-            let grow = CABasicAnimation(keyPath: "transform.scale")
-            grow.fromValue = 0.85
-            grow.toValue = 1.45
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 0.75
-            fade.toValue = 0.0
-            let radar = CAAnimationGroup()
-            radar.animations = [grow, fade]
-            radar.duration = 1.4
-            radar.repeatCount = .infinity
-            radar.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            ring.layer?.add(radar, forKey: "radar")
-            host.addSubview(ring)
-        }
-
-        let touchIcon = NSImageView(frame: NSRect(x: leftX, y: (topH - 22) / 2, width: 22, height: 22))
-        if let sym = NSImage(systemSymbolName: "touchid", accessibilityDescription: "Touch ID") {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-            touchIcon.image = sym.withSymbolConfiguration(cfg)
-            touchIcon.contentTintColor = rose
-        }
-        if animate {
-            touchIcon.wantsLayer = true
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 1.0
-            pulse.toValue = 0.45
-            pulse.duration = 0.95
-            pulse.autoreverses = true
-            pulse.repeatCount = .infinity
-            touchIcon.layer?.add(pulse, forKey: "pulse")
-        }
-        host.addSubview(touchIcon)
+        let badge = TouchIDBadgeView(size: 22, phase: banner.phase, animated: animate)
+        badge.setFrameOrigin(NSPoint(x: leftX, y: round((topH - 22) / 2)))
+        host.addSubview(badge)
 
         let tidLabel = makeLabel("Touch ID", size: 12.5, weight: .semibold, color: NSColor(white: 1.0, alpha: 0.92))
         tidLabel.frame = NSRect(x: leftX + 28, y: (topH - 16) / 2, width: 92, height: 16)
         host.addSubview(tidLabel)
 
-        // Right wing: "Please touch the key"
+        // Right wing: what is asked of the user, or what the sheet is doing
         let rightStart = geo.hasNotch ? (totalW / 2.0 + geo.notchWidth / 2.0 + 10) : (leftX + 126)
         let rightW = max(130, totalW - ear - rightStart - 16)
         let promptLabel = makeLabel(banner.prompt, size: 12.5, weight: .semibold, color: .white)
         promptLabel.alignment = .right
         promptLabel.lineBreakMode = .byTruncatingTail
+        promptLabel.wantsLayer = true
         promptLabel.frame = NSRect(x: rightStart, y: (topH - 17) / 2, width: rightW, height: 17)
         host.addSubview(promptLabel)
+        if animate { (passkeyBadge, passkeyPrompt) = (badge, promptLabel) }
 
         return CGSize(width: innerW, height: topH)
     }
@@ -3873,9 +4051,10 @@ final class IslandDaemon {
                 let active = (req["active"] as? Bool) ?? true
                 let prompt = req["prompt"] as? String
                 let detail = req["detail"] as? String
+                let phase = TouchPhase(rawValue: req["state"] as? String ?? "") ?? .ready
                 DispatchQueue.main.async {
                     self.island.setPasskey(active: active, identity: identity, prompt: prompt,
-                                           detail: detail, timeout: timeout)
+                                           detail: detail, timeout: timeout, phase: phase)
                 }
                 return ["ok": true, "active": active]
 
@@ -4456,12 +4635,16 @@ func runDemo(_ kind: String) -> Never {
         case "passkey":
             let id = AgentIdentity(harness: "Claude Code", harnessId: "claude", agent: "auth-agent",
                                    color: colorFromHex("#E8590C"))
-            controller.setPasskey(active: true, identity: id, prompt: "Please touch the key",
-                                  detail: "Passkey · github.com", timeout: 8)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.5) {
-                controller.setPasskey(active: false, identity: id, prompt: nil, detail: nil, timeout: 0)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { exit(0) }
+            controller.setPasskey(active: true, identity: id, prompt: "Pause, then touch",
+                                  detail: "Passkey · github.com", timeout: 12, phase: .waiting)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                controller.setPasskey(active: true, identity: id, prompt: "Sign in to github.com",
+                                      detail: "Passkey · github.com", timeout: 12, phase: .ready)
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+                controller.setPasskey(active: true, identity: id, prompt: nil, detail: nil, timeout: 5, phase: .done)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.4) { exit(0) }
         case "pile":
             let a1 = AgentIdentity(harness: "Claude Code", harnessId: "claude", agent: "deploy-agent",
                                    color: colorFromHex("#E8590C"))
@@ -4478,7 +4661,15 @@ func runDemo(_ kind: String) -> Never {
             controller.updateAgent(sessionId: "demo-3", pid: nil, identity: a3, active: true,
                                    app: "Terminal", windowTitle: "env", cgWindowId: nil,
                                    action: "Reading Stripe webhooks", cursorNorm: CGPoint(x: 0.38, y: 0.45))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 25.0) { exit(0) }
+            // An agent at work says so several times a second: the pile has to stay still through that.
+            var step = 0
+            Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { _ in
+                step += 1
+                controller.updateAgent(sessionId: "demo-1", pid: nil, identity: a1, active: true,
+                                       app: "Google Chrome", windowTitle: "Vercel", cgWindowId: nil,
+                                       action: "Step \(step) on vercel.com", cursorNorm: nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 40.0) { exit(0) }
         case "toast":
             let id = AgentIdentity(harness: "Codex", harnessId: "codex", agent: "api-bot",
                                    color: colorFromHex("#2B9A66"))
@@ -4829,6 +5020,18 @@ func renderPreview(to outputPath: String) -> Never {
             animate: false
         )
     }
+    func touchCard(_ phase: TouchPhase, _ prompt: String) -> (CGFloat, CGFloat, IslandBackdropView) {
+        makeCentered { host in
+            controller.populatePasskey(
+                in: host,
+                banner: PasskeyBanner(identity: demoAgents[0].identity, prompt: prompt, detail: "", phase: phase),
+                geo: fakeGeo, animate: false)
+        }
+    }
+    let t0 = touchCard(.waiting, "Pause, then touch")
+    let t1 = touchCard(.ready, "Sign in to github.com")
+    let t2 = touchCard(.reading, "Signing in…")
+    let t3 = touchCard(.done, "Done")
     let s2 = makeCentered { host in
         let req = InteractiveRequest(
             identity: demoAgents[0].identity,
@@ -4912,6 +5115,14 @@ func renderPreview(to outputPath: String) -> Never {
         ("3. Passkey / Touch ID Split — minimal with biometric radar pulse & rose rim sweep",
          "Only Touch ID on the left and \"Please touch the key\" on the right; auto-collapses on tap",
          .centered(s1.0, s1.1, s1.2), 126),
+        ("3a. Touch ID, waiting: the user's hands are busy, so the finger isn't read", "The mark is dim and breathes slowly",
+         .centered(t0.0, t0.1, t0.2), 126),
+        ("3b. Touch ID, ready: the finger is read now", "The mark pulses and sends out a ring, centred on it",
+         .centered(t1.0, t1.1, t1.2), 126),
+        ("3c. Touch ID, signing in: the sheet took the touch", "An arc turns around the mark",
+         .centered(t2.0, t2.1, t2.2), 126),
+        ("3d. Touch ID, done", "A check mark pops in, then the island closes",
+         .centered(t3.0, t3.1, t3.2), 126),
         ("4a. Quick Approval (Resting) — ONLY Google G logo on left, [✓ Allow] [✕] [⌄] on right",
          "Ultra-minimal single-liner; Always allow everywhere is ON by default; click ⌄ to toggle options",
          .asymmetric(54, s2.0, s2.1, s2.2), 126),

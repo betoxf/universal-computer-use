@@ -118,6 +118,7 @@ TOUCH_LIMIT = 90      # seconds the user has to touch before the sheet is cancel
 TOUCH_TRIES = 2       # presses, when the user did something just as the first was made
 TOUCH_READY = "Sign in to {}"      # what the notch says while the finger is read,
 TOUCH_PAUSE = "Pause, then touch"  # and while the user types or moves the pointer, when it isn't
+TOUCH_TAKEN = "Done"               # and once the sheet took the touch, for a notch app from before it said so itself
 TOUCH_BUSY = ("The user went on working in {} for {} seconds while the notch asked them to pause, and the passkey sheet "
               "opens only in a pause of theirs: their keyboard goes to it for a moment. Nothing was pressed. Say in "
               "the chat what you need, or try again in a while.")
@@ -660,12 +661,16 @@ class IslandClient:
             return reply["text"]
         return text
 
-    def passkey(self, active, prompt=None, detail="", timeout=60):
+    def passkey(self, active, prompt=None, detail="", timeout=60, state=None):
         """Show or clear the Touch ID banner, without waiting for the notch. What is asked goes out in the order it
-        was asked: a banner cleared just after it was lit would otherwise stay lit when the two overtake each other."""
+        was asked: a banner cleared just after it was lit would otherwise stay lit when the two overtake each other.
+        `state` is what its mark shows: "waiting" while the finger isn't read, "ready" while it is, and "done" once
+        the sheet took the touch, after which the banner says so and goes by itself."""
         payload = {"op": "passkey", "active": bool(active), "detail": detail, "timeout_seconds": timeout}
         if prompt:
             payload["prompt"] = prompt
+        if state:
+            payload["state"] = state
         self.banners.append(payload)
         threading.Thread(target=self.send_banners, daemon=True).start()
 
@@ -2292,7 +2297,11 @@ class Server:
         touching = self.touching
         if touching is None:
             return
-        if message.get("sheet") is False or message.get("done"):  # the finger was read: nothing more is asked
+        if message.get("done"):  # the sheet took the touch: the banner thinks, says it is done, and goes by itself
+            touching["lit"], touching["shown"] = False, None
+            self.island.passkey(active=True, prompt=TOUCH_TAKEN, timeout=5, state="done")
+            return
+        if message.get("sheet") is False:
             touching["lit"], touching["shown"] = False, None
             self.island.passkey(active=False)
             return
@@ -2309,7 +2318,7 @@ class Server:
             if prompt != touching.get("shown"):
                 touching["shown"] = prompt
                 self.island.passkey(active=True, prompt=prompt, detail=touching.get("text", "")[:90],
-                                    timeout=touching["limit"])
+                                    timeout=touching["limit"], state="ready" if reads else "waiting")
 
     def show_context(self, arguments):
         """Bring the referenced browser tab or app window forward when the user clicks Show in the notch."""

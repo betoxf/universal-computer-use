@@ -407,7 +407,8 @@ from the Reload button on `chrome://extensions`.
 Sensitive actions don't need to interrupt your window or put passwords and API keys into chat:
 
 - **Active-agent cursor pile & hover preview:** whenever agents are driving the Mac, their exact colored UCU cursors
-  pile tightly onto the left side of the notch (right side untouched). Hover any cursor in the pile to peek at a compact
+  pile tightly onto the left side of the notch (right side untouched). The pile stays still while agents work, and a
+  cursor stirs once in a while: a slow tilt or a small step, a few times a minute at most. Hover any cursor in the pile to peek at a compact
   live mini-preview of what that agent is currently seeing, where its cursor is, and what it's doing; click the preview
   to jump to that app, or move away to collapse back into the notch.
 - **Passkey sign-in without the page:** when a page offers a passkey, `vault` `fill` moves the agent's Safari tab to
@@ -417,7 +418,9 @@ Sensitive actions don't need to interrupt your window or put passwords and API k
   sensor. So ucu makes Safari the app in front, with nothing on your screen moving, whenever your hands have been
   still for a moment (0.8 s after a key, 0.5 s after the mouse), and gives your app back when you type, click or move
   the pointer, and when the sheet has your touch. Reaching for the sensor is pause enough. While your hands are busy
-  the notch says `"Pause, then touch"`, and before the sheet is open it waits for your first pause to open it. A key
+  the notch says `"Pause, then touch"`, and before the sheet is open it waits for your first pause to open it. The
+  Touch ID mark shows what the sheet is doing: it is dim while it waits for you, sends out a ring while your finger
+  is read, turns an arc while the sheet signs in, and becomes a check before the island closes. A key
   you press while Safari has the front goes to the sheet, which ignores it, and is lost to your app: ucu can't pass it
   on without a permission to read the keyboard. Each such key doubles the pause ucu waits for, up to 4 seconds. If
   nobody touches for 90 seconds the agent is told, and the sheet goes with its tab. In Chrome, where this isn't

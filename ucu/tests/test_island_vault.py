@@ -354,7 +354,13 @@ class PasskeyTouchTest(unittest.TestCase):
 
     @staticmethod
     def lit(proxy):
-        return [event.get("prompt") for event in proxy.passkey_events if event.get("active")]
+        """What the notch asked, in order. Its last word, that the sheet took the touch, isn't a thing it asks."""
+        return [event.get("prompt") for event in proxy.passkey_events
+                if event.get("active") and event.get("state") != "done"]
+
+    @staticmethod
+    def states(proxy):
+        return [event.get("state") for event in proxy.passkey_events if event.get("active")]
 
     @staticmethod
     def presses(proxy):
@@ -381,6 +387,7 @@ class PasskeyTouchTest(unittest.TestCase):
         self.assertEqual(len(proxy.commands("touchWatch")), 1)
         self.cleared(proxy)
         self.assertEqual(self.lit(proxy), ["Sign in to a.test"])  # the notch names the site, once the sheet is there
+        self.assertEqual(self.states(proxy), ["ready", "done"])  # and its mark shows the touch being taken
 
     def test_lights_the_notch_only_for_a_sheet_that_opened(self):
         proxy = self.at_sign_in("none")
@@ -397,6 +404,7 @@ class PasskeyTouchTest(unittest.TestCase):
         self.assertEqual(said["sheet"], "closed")
         self.cleared(proxy)
         self.assertEqual(self.lit(proxy), ["Pause, then touch", "Sign in to a.test"])
+        self.assertEqual(self.states(proxy), ["waiting", "ready", "done"])
 
     def test_asks_a_busy_user_to_pause_before_anything_is_pressed(self):
         proxy = self.at_sign_in("waiting")
@@ -416,6 +424,7 @@ class PasskeyTouchTest(unittest.TestCase):
         proxy = self.at_sign_in("refused")
         said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
         self.assertEqual((said["sheet"], said["touched"]), ("closed", False))
+        self.assertNotIn("done", self.states(proxy))  # nothing was taken, so the notch doesn't say so
         self.assertIn("closed without taking a touch", said["note"])
         self.cleared(proxy)
 
