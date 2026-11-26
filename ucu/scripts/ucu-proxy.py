@@ -1264,6 +1264,27 @@ class BrowserWorkspace:
             raise RuntimeError(f"{change} Yours can't be told from them now: pass tab_index for the one you mean.")
         return f"[ucu: {change}]"
 
+    CAME_NOTE = ("[ucu: The user clicked {}'s Dock icon while your window was out of their sight, so it is on their "
+                 "screen now, in front, as after `show`. They can use it, and you keep working in it. `hide` takes "
+                 "it back when they are done.]")
+
+    def user_came(self, report):
+        """The user clicked the browser's Dock icon. It opens no window for that while it has one, and the chat's
+        is out of their sight, so the click would get them nothing: the chat's window comes to them, as `show`
+        brings it. One with no page in it comes only when they have no window of the browser in sight. This runs
+        on a thread of its own, between the agent's steps."""
+        with self.lock:
+            if self.window is None or self.shared or (self.tab is None and report.get("inSight")):
+                return
+            try:
+                self.server.windows.send({"allow": self.app})
+                self.call({"op": "show_to_user", "window_id": self.window, "tab_index": self.tab or 1})
+                self.shared, self.shown = True, False
+                self.remember()
+            except RuntimeError:
+                return
+        self.server.windows.note(self.CAME_NOTE.format(self.app))
+
     def take_back(self):
         """Take the window off the user's screen, out of sight again, where the chat works in it as before."""
         if not self.shared:
@@ -1357,6 +1378,11 @@ class SafariWorkspace(BrowserWorkspace):
     AWAY_NOTE = ("Your tab is now in a window of its own on your private desktop, where its page runs at full speed. "
                  "`click` with `real: true` presses an element there as a user would, which a page that ignores "
                  "clicks made by script accepts. It goes back to the user's window when your turn ends.")
+    LEFT_NOTE = ("The user may be looking at that tab, so it stays open in their window: leave it to them. What "
+                 "follows is a copy of its page. ")
+    CAME_NOTE = ("[ucu: The user clicked Safari's Dock icon while your tab was on your private desktop, so its page "
+                 "was opened for them too, in a tab of their own window, in front. Yours is where it was. They may "
+                 "act in theirs: read your page again before you go on.]")
 
     def __init__(self, server, tool):
         super().__init__(server, tool)
@@ -1471,9 +1497,10 @@ class SafariWorkspace(BrowserWorkspace):
                 if page is None:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
                 self.server.quiet(self.app)
-                self.come_back(page)
+                self.come_back(page, to_user=True)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.in_tab({"op": "show_tab"}, page, "tab_index" in arguments)
+                page["shown"] = True
                 result["note"] = "Your tab is in front of the user now, in their own window. Keep working in it."
                 if arguments.get("text"):
                     self.server.ask_user(self.app, arguments["text"])
@@ -1555,9 +1582,23 @@ class SafariWorkspace(BrowserWorkspace):
             except RuntimeError:
                 pass
 
+    @staticmethod
+    def in_front(at):
+        """Whether a tab is the one its window shows the user now."""
+        return bool(at.get("current") and at.get("visible") and not at.get("minimized"))
+
+    def user_sees(self, page, at):
+        """Whether a tab of the chat's is one the user may be looking at: the one its window shows, in a window
+        that has tabs of theirs too, or after the agent showed it to them. A window Safari got for the chat's
+        first page, with nothing of theirs in it, is behind what they use."""
+        mine = [other for other in self.pages if not other.get("away") and other.get("window_id") == page["window_id"]]
+        return self.in_front(at) and bool(page.get("shown") or len(page.get("known") or []) > len(mine))
+
     def send_away(self, page, named):
         """Load a tab's page in a window on the agent's desktop, and close the tab in the user's window. Safari
-        loads a tab again when it moves to another window, so nothing is lost by opening the address there."""
+        loads a tab again when it moves to another window, so nothing is lost by opening the address there. A tab
+        the user may be looking at is not closed under them: it stays open, with its mark, and the chat goes on
+        in the copy under a new one."""
         if page.get("away"):
             return {"away": True}
         at = self.in_tab({"op": "locate"}, page, named)
@@ -1572,27 +1613,92 @@ class SafariWorkspace(BrowserWorkspace):
         except RuntimeError:
             self.close_away({"window_id": window})
             raise
-        try:
-            self.call({"op": "close_tab", "own": page}, timeout=15)
-        except RuntimeError:
-            pass
-        mark = page["mark"]
+        left = {**page, "url": at["url"]} if self.user_sees(page, at) else None
+        if not left:
+            try:
+                self.call({"op": "close_tab", "own": page}, timeout=15)
+            except RuntimeError:
+                pass
+        mark = f"{self.token}-{next(self.numbers)}" if left else page["mark"]
         page.clear()
         page.update(away=True, mark=mark, window_id=window, tab_index=1, place=place)
-        return {**result, "note": self.AWAY_NOTE}
+        if left:
+            page["left"] = left
+        return {**result, "note": (self.LEFT_NOTE if left else "") + self.AWAY_NOTE}
 
-    def come_back(self, page):
-        """Put a page that is away back in the user's window, as a tab of the chat's behind theirs."""
+    def come_back(self, page, to_user=False):
+        """Put a page that is away back in the user's window, as a tab of the chat's behind theirs: the tab that
+        stayed open there for them, if it can take the page, and a new one otherwise."""
         if not page.get("away"):
             return
-        window = page["window_id"]
+        window, left = page["window_id"], page.get("left")
         try:
             url = self.call({"op": "locate", "window_id": window, "tab_index": 1})["url"]
-            self.call({"op": "open_tab", "url": url, "mark": page["mark"]})
-            page.clear()
-            page.update(self.reply["own"])
+            if not (left and self.rejoin(page, left, url, to_user)):
+                self.call({"op": "open_tab", "url": url, "mark": page["mark"]})
+                page.clear()
+                page.update(self.reply["own"])
         finally:
             self.close_away({"window_id": window})
+
+    def rejoin(self, page, left, url, to_user):
+        """Make the tab that stayed open for the user the chat's again, at the page's address, and say whether
+        that worked. It doesn't for a tab they went on in, which is theirs for good, nor for one they are looking
+        at that would have to go to another address without the agent showing it: the page then comes back in a
+        tab of its own, as it did before."""
+        own = {key: value for key, value in left.items() if key != "url"}
+        try:
+            at = self.call({"op": "locate", "own": own, "vigil": True})
+            own = self.reply.get("own") or own
+            if at.get("url") != left["url"] or (url != at["url"] and self.in_front(at) and not to_user):
+                return False
+            if url != at["url"]:
+                self.call({"op": "navigate", "own": own, "url": url, "vigil": True})
+                own = self.reply.get("own") or own
+        except RuntimeError:
+            return False
+        page.clear()
+        page.update(own)
+        return True
+
+    def user_came(self, report):
+        """The user clicked Safari's Dock icon. Safari opens no window for that while it has one, and the chat's is
+        on the agent's desktop, so the click would get them nothing: each page the chat has away is opened for them
+        too. This runs on a thread of its own, between the agent's steps."""
+        with self.lock:
+            given = False
+            for page in [page for page in self.pages if page.get("away")]:
+                try:
+                    given = self.give(page, report) or given
+                except RuntimeError:
+                    pass
+        if given:
+            self.server.windows.note(self.CAME_NOTE)
+
+    def give(self, page, report):
+        """Open the page of a tab that is away in a tab of the user's own window too, in front, and say whether one
+        was opened. The tab they have of it already is only shown again, when they clicked with Safari in front or
+        have no window of it in sight."""
+        left = page.get("left")
+        if left:
+            own = {key: value for key, value in left.items() if key != "url"}
+            try:
+                self.call({"op": "locate", "own": own, "vigil": True})
+            except RuntimeError:
+                pass  # they closed it, or went to another site in it
+            else:
+                if report.get("front") or not report.get("inSight"):
+                    self.server.windows.send({"allow": self.app})
+                    self.call({"op": "show_tab", "own": self.reply.get("own") or own, "vigil": True})
+                return False
+        url = self.call({"op": "locate", "window_id": page["window_id"], "tab_index": 1})["url"]
+        self.server.windows.expect(self.app, "window")  # with no window of the user's, Safari gets one
+        self.call({"op": "open_tab", "url": url, "mark": f"{self.token}-{next(self.numbers)}"})
+        own = self.reply["own"]
+        self.server.windows.send({"allow": self.app})
+        self.call({"op": "show_tab", "own": own, "vigil": True})
+        page["left"] = {**(self.reply.get("own") or own), "url": url}
+        return True
 
     def close_away(self, page):
         try:
@@ -1643,6 +1749,7 @@ class WindowWatcher:
         self.expected = {}  # (app_key, "window" or "focus") -> until when the agent knows about such reports
         self.desktop = None  # where the agent's desktop was last seen; it goes with the helper
         self.rested = None   # the helper told the turn is over: it goes, unless it keeps ucu's apps out of sight
+        self.clicked = None  # hears of the user's click on the Dock icon of a browser the chat works in
 
     def start(self):
         if self.process is None and not self.unusable:
@@ -1679,6 +1786,9 @@ class WindowWatcher:
                     detail = " — ".join(part for part in (message.get("app"), message.get("title"),
                                                           message.get("text")) if part)
                     self.note(AUTH_PROMPT_NOTE.format(detail or "Touch ID"))
+            elif message.get("event") == "dock":  # no news for the agent by itself: what comes of it is
+                if self.clicked:
+                    self.clicked(message)
             elif "event" in message and not self.is_expected(message):
                 if message["event"] == "taken":
                     self.taken(message.get("names") or [])
@@ -2067,6 +2177,7 @@ class Server:
         self.island = IslandClient(self.asker, lambda: self.sessions.cursor_color(self.folder), self.harness_info)
         self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker, self.user_took,
                                      self.on_auth_prompt, self.on_touch)
+        self.windows.clicked = self.user_clicked
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
@@ -3106,6 +3217,13 @@ class Server:
         elif browser_note and reply.get("active") and self.browser_of(app_key(name)):
             self.windows.note(BROWSER_NOTE.format(name, self.browser_of(app_key(name)).tool))
         return reply.get("state")
+
+    def user_clicked(self, report):
+        """The user clicked the Dock icon of a browser the chat works in. This is the helper's reading thread, which
+        must not wait, so what comes of the click happens on another."""
+        workspace = self.browser_of(app_key(report.get("app") or ""))
+        if workspace and workspace.used:
+            threading.Thread(target=workspace.user_came, args=(report,), daemon=True).start()
 
     def user_took(self, names):
         """The user came to an app ucu kept out of their sight. It is on their screen now and stays there, so it is
