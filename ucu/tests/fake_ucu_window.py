@@ -16,8 +16,8 @@ exists, the user is typing and doesn't pause.
 A passkey sheet on a window out of sight goes as $HOME/touch says: "busy" (the user never pauses), "old" (a helper
 from before it could hold one, which says nothing), "left" (an earlier call's sheet is still open), "none" (the press
 opens nothing), "interrupted" (the user got in before the first press, and the second opens it), "typing" (the sheet
-opens while the user types, and the finger is read once they pause) or "timeout" (nobody touches). Otherwise the sheet
-opens, the finger is read, and it closes.
+opens while the user types, and the finger is read once they pause), "timeout" (nobody touches) or "refused" (the sheet
+closes without taking a touch). Otherwise the sheet opens, the finger is read, and it closes.
 Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the
 other commands.
 """
@@ -140,7 +140,10 @@ def answer(command):
             send({"event": "touch", "armed": True})
         time.sleep(0.3)
         state = "timeout" if plan == "timeout" else "closed"
-        send({"id": command["id"], "state": state, "sheet": True, "cancelled": plan == "timeout", "interrupted": 0})
+        if state == "closed" and plan != "refused":
+            send({"event": "touch", "done": True})  # the sheet has the touch, and stays a moment more
+            time.sleep(0.1)
+        send({"id": command["id"], "state": state, "done": state == "closed" and plan != "refused", "sheet": True, "cancelled": plan == "timeout", "interrupted": 0})
         send({"event": "touch", "sheet": False, "state": state})
     elif "quiet" in command:
         send({"id": command["id"], "quiet": not os.path.exists(os.path.join(os.environ["HOME"], "user-typing"))})

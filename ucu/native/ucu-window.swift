@@ -1498,12 +1498,15 @@ final class Watcher {
         let app: NSRunningApplication, window: AXUIElement, number: Int
         var known = Set<Int>()  // the app's windows from before the press, which the sheet isn't one of
         var previous: NSRunningApplication?, userWindow: AXUIElement?
-        var armedAt: Date?, cameForward = false, since = Date()
+        var armedAt: Date?, cameForward = false, nudged = false, since = Date(), how = ""
         var mistaken = 0, failed = 0, held = 0.0
         var asked: (id: Any, until: Date)?  // the server waits for the app to have the front, to press in it
         var pressBy: Date?  // and has it only this long to say that it pressed
         var watch: (id: Any, opensBy: Date, until: Date)?  // then it waits for the sheet to open, and to close
         var sheet = false, sheetNumber: Int?, timer: Timer?, ticks = 0
+        // The sheet's buttons that could be pressed when it opened. Once one of them can't, the sheet has what it
+        // asked for and is only finishing: Safari's stays for 1.4 s more, saying it is done, and needs no front for it.
+        var buttons = [AXUIElement](), done = false
         init(app: NSRunningApplication, window: AXUIElement, number: Int) {
             (self.app, self.window, self.number) = (app, window, number)
         }
@@ -1517,7 +1520,7 @@ final class Watcher {
     // What the user does is looked for a hundred times a second, so that a shortcut's key finds their app in front
     // again, and the sheet a third as often: it is the app that answers that.
     static let touchTick = 0.01, touchSheetTicks = 3
-    static let touchTries = 3, touchPress = 5.0
+    static let touchTries = 3, touchPress = 5.0, touchNudge = 0.3
     static let touchInput: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
                                             .mouseMoved, .leftMouseDragged, .scrollWheel]
     static let windowNumber = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow").map {
@@ -1589,6 +1592,21 @@ final class Watcher {
         touchTick()
     }
 
+    // The buttons of a sheet that can be pressed, among the first of its parts.
+    static func liveButtons(in sheet: AXUIElement) -> [AXUIElement] {
+        var found = [AXUIElement](), queue = [sheet], visited = 0
+        while visited < queue.count, visited < 80 {
+            let element = queue[visited]
+            visited += 1
+            if (attribute(element, kAXRoleAttribute) as String?) == kAXButtonRole {
+                if flag(element, kAXEnabledAttribute) { found.append(element) }
+            } else {
+                queue += (attribute(element, kAXChildrenAttribute) as [AXUIElement]?) ?? []
+            }
+        }
+        return found
+    }
+
     func watchTouch(open: Double, limit: Double, id: Any) {
         guard let touch else { return emit(["id": id, "state": "none"]) }
         if let asked = touch.asked { emit(["id": asked.id, "state": "replaced"]) }
@@ -1620,14 +1638,51 @@ final class Watcher {
         } else {
             (touch.previous, touch.userWindow) = (current, nil)
         }
-        (touch.armedAt, touch.cameForward) = (Date(), false)
+        (touch.armedAt, touch.cameForward, touch.nudged) = (Date(), false, false)
         allowed = pid
         allowedUntil = .distantFuture  // until it is given back
         oursUntil[pid] = Date() + Self.oursGrace  // it comes forward by this, not by the click the user just made
         raise(touch)
-        // Activating brings the app's main window forward and leaves its others behind the user's app. Asking the app
-        // itself to be frontmost would bring them all over it, so that isn't done here: it fails instead.
-        touch.app.activate()
+        // The app comes forward by that one window, as it does when the window is clicked: its others stay where they
+        // are. macOS doesn't activate an app for a helper in the background, and an app that is asked itself brings
+        // its main window along, which on a second arming, with the sheet open, was a window of the user's: it lay
+        // over their app for half a second. So the app is asked itself only where this can't be done.
+        if !Self.bringForward(touch.app, window: touch.number) { touch.app.activate() }
+    }
+
+    static let processOf = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessForPID").map {
+        unsafeBitCast($0, to: (@convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32).self)
+    }
+    static let frontByWindow = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_SLPSSetFrontProcessWithOptions").map {
+        unsafeBitCast($0, to: (@convention(c) (UnsafeMutableRawPointer, UInt32, UInt32) -> Int32).self)
+    }
+
+    static let postRecord = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "SLPSPostEventRecordTo").map {
+        unsafeBitCast($0, to: (@convention(c) (UnsafeMutableRawPointer, UnsafeMutablePointer<UInt8>) -> Int32).self)
+    }
+
+    // Make an app the active one with one of its windows only, by the window server's number for it, and give that
+    // window the keyboard, which the app coming forward doesn't do by itself: a page in it still said it had no
+    // focus. These calls aren't public, so each is looked up, and false says that one is missing or refused.
+    static func bringForward(_ app: NSRunningApplication, window number: Int) -> Bool {
+        guard let processOf, let frontByWindow, let postRecord else { return false }
+        var process = [UInt32](repeating: 0, count: 2)
+        let byUser: UInt32 = 0x200  // as if the user had chosen the window
+        return process.withUnsafeMutableBytes { bytes -> Bool in
+            guard let base = bytes.baseAddress, processOf(app.processIdentifier, base) == 0,
+                  frontByWindow(base, UInt32(number), byUser) == 0 else { return false }
+            // The window server's own record of a window becoming the key one, begun and ended.
+            var record = [UInt8](repeating: 0, count: 0xf8)
+            record[0x04] = 0xf8
+            record[0x3a] = 0x10
+            withUnsafeBytes(of: UInt32(number)) { record.replaceSubrange(0x3c..<0x40, with: $0) }
+            record.replaceSubrange(0x20..<0x30, with: [UInt8](repeating: 0xff, count: 0x10))
+            for phase: UInt8 in [0x01, 0x02] {
+                record[0x08] = phase
+                _ = postRecord(base, &record)
+            }
+            return true
+        }
     }
 
     // Their app has the front again, or the window of that app they were in. If they went elsewhere themselves
@@ -1655,7 +1710,7 @@ final class Watcher {
             }
         }
         log("\(name) had the front for \(String(format: "%.2f", held)) s with its window out of sight, "
-            + "for the user's touch: \(why)")
+            + "for the user's touch\(touch.how.isEmpty ? "" : ", brought " + touch.how): \(why)")
         if touch.cameForward, telling { emit(["event": "touch", "armed": false]) }
     }
 
@@ -1672,6 +1727,15 @@ final class Watcher {
             } else if !found.open, touch.sheet {
                 return endTouch("closed")
             }
+            if found.open, !touch.done, let element = found.element {
+                if touch.buttons.isEmpty {
+                    touch.buttons = Self.liveButtons(in: element)
+                } else if touch.buttons.contains(where: { (attribute($0, kAXEnabledAttribute) as Bool?) == false }) {
+                    touch.done = true
+                    disarm(touch, why: "the sheet has the touch, and their app is back while it closes", telling: false)
+                    emit(["event": "touch", "done": true])
+                }
+            }
         }
         if let armed = touch.armedAt {
             let held = -armed.timeIntervalSinceNow
@@ -1679,12 +1743,17 @@ final class Watcher {
             if !touch.cameForward {
                 if isFront {
                     touch.cameForward = true
+                    touch.how = touch.nudged ? "asked itself" : "by its window"
                     raise(touch)  // the app came forward with the window that was its main one, which may be another
                     if let asked = touch.asked {
                         (touch.asked, touch.pressBy) = (nil, Date() + Self.touchPress)
                         emit(["id": asked.id, "state": "armed"])
                     }
                     emit(["event": "touch", "armed": true])
+                } else if held > Self.touchNudge, !touch.nudged {
+                    touch.nudged = true
+                    raise(touch)
+                    AXUIElementSetAttributeValue(appElement(pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
                 } else if held > Self.touchSettle {
                     touch.failed += 1
                     disarm(touch, why: "macOS didn't bring it forward")
@@ -1696,7 +1765,8 @@ final class Watcher {
             } else if !isFront {
                 disarm(touch, why: "another app came forward")
             }
-        } else if touch.asked != nil || (touch.watch != nil && touch.sheet), lent == nil, isPause(for: touch) {
+        } else if !touch.done, touch.asked != nil || (touch.watch != nil && touch.sheet), lent == nil,
+                  isPause(for: touch) {
             arm(touch)
         }
         if let asked = touch.asked, Date() >= asked.until, !(touch.armedAt != nil && !touch.cameForward) {
@@ -1723,6 +1793,7 @@ final class Watcher {
         disarm(touch, why: "it ended: \(state)", telling: false)  // the notch goes dark, with nothing more to say
         let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
         var said: [String: Any] = ["state": state, "sheet": touch.sheet, "cancelled": cancelled, "front": front,
+                                   "done": touch.done,
                                    "interrupted": touch.mistaken, "held": (touch.held * 100).rounded() / 100,
                                    "waited": (-touch.since.timeIntervalSinceNow * 100).rounded() / 100]
         if let asked = touch.asked {

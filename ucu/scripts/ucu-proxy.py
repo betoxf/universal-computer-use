@@ -124,8 +124,9 @@ NO_TOUCH = ("This Mac's ucu-window can't hold a passkey sheet for the user's tou
             "`ucu update` builds one that can. Until then `show` them the tab and ask them to sign in there.")
 TOUCH_FAILED = "{} couldn't take the user's touch out of their sight ({}). `show` them the tab and ask them there."
 TOUCH_CLOSED = ("The passkey sheet opened where the user doesn't see it, the notch asked them for their touch, and "
-                "the sheet closed. It closes the same way when a sign-in is refused, so read the page to see "
-                "whether you are signed in.")
+                "the sheet took it and closed. Read the page to see where the sign-in went.")
+TOUCH_REFUSED = ("The passkey sheet opened where the user doesn't see it and closed without taking a touch: it was "
+                 "cancelled, or the sign-in was refused. Read the page to see what it says.")
 TOUCH_NONE = ("The page's passkey button was pressed as a user would press it, and no sheet opened. The page may "
               "need another step first, or offer the passkey elsewhere: read it.")
 TOUCH_TIMEOUT = ("The notch asked the user for their touch for {} seconds and they didn't give it, so nothing was "
@@ -2290,7 +2291,7 @@ class Server:
         touching = self.touching
         if touching is None:
             return
-        if message.get("sheet") is False:
+        if message.get("sheet") is False or message.get("done"):  # the finger was read: nothing more is asked
             touching["lit"] = False
             self.island.passkey(active=False)
             return
@@ -2663,7 +2664,8 @@ class Server:
         state = ended.get("state")
         out["sheet"] = {"timeout": "timed out"}.get(state, state)
         if state == "closed":
-            out["note"] = TOUCH_CLOSED
+            out["touched"] = bool(ended.get("done"))
+            out["note"] = TOUCH_CLOSED if out["touched"] else TOUCH_REFUSED
         elif state == "none":
             out["note"] = TOUCH_NONE
         elif state == "timeout":

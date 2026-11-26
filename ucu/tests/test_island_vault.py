@@ -370,7 +370,8 @@ class PasskeyTouchTest(unittest.TestCase):
         allowed = len(proxy.commands("allow"))
         said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
         self.assertEqual((said["method"], said["sheet"], said["clicked"]), ("passkey", "closed", "Sign in with Passkey"))
-        self.assertIn("read the page", said["note"])
+        self.assertIs(said["touched"], True)
+        self.assertIn("took it and closed", said["note"])
         self.assertEqual(proxy.safari_calls("show_tab"), [])  # nothing came to the user,
         self.assertEqual(len(proxy.commands("allow")), allowed)  # and nothing was allowed to
         found = proxy.safari_calls("click_auth_option")[-1]  # the page only finds its button, in the chat's window
@@ -402,6 +403,13 @@ class PasskeyTouchTest(unittest.TestCase):
         said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
         self.assertEqual(said["sheet"], "closed")
         self.assertEqual((len(proxy.commands("touch")), len(self.presses(proxy))), (2, 2))
+        self.cleared(proxy)
+
+    def test_tells_a_sheet_that_closed_untouched_from_one_that_took_the_touch(self):
+        proxy = self.at_sign_in("refused")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual((said["sheet"], said["touched"]), ("closed", False))
+        self.assertIn("closed without taking a touch", said["note"])
         self.cleared(proxy)
 
     def test_gives_up_when_nobody_touches(self):
