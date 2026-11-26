@@ -25,6 +25,7 @@ file ~/Library/Application Support/ucu/no-auto-update turns it off.
 """
 import argparse
 import fcntl
+import getpass
 import importlib.util
 import json
 import os
@@ -39,6 +40,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 PROXY = REPO / "scripts/ucu-proxy.py"
 WINDOW_SOURCE = REPO / "native/ucu-window.swift"
+ISLAND_SOURCE = REPO / "native/ucu-island.swift"
 WORKSPACE = REPO.parent
 
 HOME = Path.home()
@@ -321,6 +323,23 @@ def build_window_helper():
         say("!", f"could not build ucu-window: {(result.stderr or result.stdout).strip()[-300:]}")
 
 
+def build_island_helper():
+    swiftc = tool("swiftc")
+    if not swiftc:
+        say("!", "swiftc not found, so ucu-island was not built (install the Xcode command line tools)")
+        return
+    proxy.ISLAND_HELPER.parent.mkdir(parents=True, exist_ok=True)
+    temporary = proxy.ISLAND_HELPER.with_name(proxy.ISLAND_HELPER.name + ".ucu-tmp")
+    result = subprocess.run([swiftc, "-O", str(ISLAND_SOURCE), "-o", str(temporary)],
+                            capture_output=True, text=True)
+    if result.returncode == 0 and temporary.exists():
+        os.replace(temporary, proxy.ISLAND_HELPER)
+        say("✓", f"built {proxy.ISLAND_HELPER} for the Notch Island and secret vault")
+    else:
+        temporary.unlink(missing_ok=True)
+        say("!", f"could not build ucu-island: {(result.stderr or result.stdout).strip()[-300:]}")
+
+
 def install(python):
     python = str(Path(python).expanduser())  # not resolved: a stable symlink such as uv's survives upgrades
     try:
@@ -342,6 +361,7 @@ def install(python):
     folder = backup()
     say("✓", f"backed up the current setup to {folder}")
     build_window_helper()
+    build_island_helper()
     seed_policy()
     claude("mcp", "remove", SERVER, "-s", "user")  # absent is fine
     result = claude("mcp", "add-json", SERVER, json.dumps(definition(python)), "-s", "user")
@@ -364,8 +384,10 @@ def uninstall():
     set_opencode(None)
     set_chrome_host(None)
     proxy.WINDOW_HELPER.unlink(missing_ok=True)
+    proxy.ISLAND_HELPER.unlink(missing_ok=True)
     proxy.ENGINE.unlink(missing_ok=True)
-    say("✓", f"removed {SERVER}, its hook, ucu-window and the engine (your policy stays in {proxy.POLICY})")
+    say("✓", f"removed {SERVER}, its hook, ucu-window, ucu-island and the engine (your policy and vault stay in "
+             f"{proxy.POLICY.parent})")
     return 0
 
 
@@ -462,6 +484,8 @@ def finish_update(since):
         say("✓", f"rebuilt the engine at {proxy.ENGINE}")
     if "ucu/native/ucu-window.swift" in changed:
         build_window_helper()
+    if "ucu/native/ucu-island.swift" in changed:
+        build_island_helper()
     say("✓", "new chats use the new version; open ones keep theirs until they restart")
     return 0
 
@@ -539,6 +563,12 @@ def doctor():
               result.stderr.strip() + " (a usage message means it is out of date: run `ucu install`)")
     else:
         check(False, f"{proxy.WINDOW_HELPER} is built", "run `ucu install` (needs swiftc)")
+    if proxy.ISLAND_HELPER.exists():
+        result = subprocess.run([str(proxy.ISLAND_HELPER), "version"], capture_output=True, text=True)
+        check(result.returncode == 0, "ucu-island runs (Notch Island & secret vault)",
+              (result.stderr or result.stdout).strip()[:200])
+    else:
+        check(False, f"{proxy.ISLAND_HELPER} is built", "run `ucu install` (needs swiftc)")
     focus = focus_report()
     if focus:
         say(*focus)
@@ -550,6 +580,64 @@ def doctor():
         check((servers.get(SERVER) or {}).get("command", [])[1:] == ["-I", str(PROXY)], f"opencode runs {SERVER}",
               "run `ucu install`")
     return 1 if failures else 0
+
+
+# --- vault & island CLI -------------------------------------------------------
+def require_island():
+    if not proxy.ISLAND_HELPER.exists():
+        fail(f"{proxy.ISLAND_HELPER} is not built; run `ucu install`")
+
+
+def vault_cli(args):
+    require_island()
+    if args.vault_command == "list":
+        done = subprocess.run([str(proxy.ISLAND_HELPER), "vault", "list"], capture_output=True, text=True)
+        if done.returncode != 0:
+            fail(done.stderr.strip() or "could not list vault")
+        items = json.loads(done.stdout or "[]")
+        if not items:
+            print("UCU Vault is empty.")
+            return 0
+        for item in items:
+            where = ", ".join(item.get("domains") or []) or item.get("app") or "-"
+            user = f"  user={item['username']}" if item.get("username") else ""
+            print(f"{item['id']}  [{item['kind']}]  {where}{user}  {item.get('preview', '')}")
+        return 0
+    if args.vault_command == "add":
+        cmd = [str(proxy.ISLAND_HELPER), "vault", "add", args.id, "--kind", args.kind]
+        if args.label:
+            cmd += ["--label", args.label]
+        for domain in args.domain or []:
+            cmd += ["--domain", domain]
+        if args.app:
+            cmd += ["--app", args.app]
+        if args.username:
+            cmd += ["--username", args.username]
+        if args.ask:
+            cmd.append("--ask")
+        secret = getpass.getpass(f"Secret for {args.id}: ") if sys.stdin.isatty() else sys.stdin.read()
+        if not secret.strip():
+            fail("empty secret")
+        done = subprocess.run(cmd, input=secret, capture_output=True, text=True)
+        if done.returncode != 0:
+            fail(done.stderr.strip() or "could not store secret")
+        meta = json.loads(done.stdout)
+        say("✓", f"saved {meta['id']} ({meta['kind']}, {meta.get('preview', '')}) in encrypted UCU Vault")
+        return 0
+    if args.vault_command == "remove":
+        done = subprocess.run([str(proxy.ISLAND_HELPER), "vault", "remove", args.id], capture_output=True, text=True)
+        if done.returncode != 0:
+            fail((done.stderr or done.stdout).strip() or f"could not remove {args.id}")
+        say("✓", done.stdout.strip())
+        return 0
+    return 1
+
+
+def island_cli(args):
+    require_island()
+    if args.island_command == "demo":
+        return subprocess.run([str(proxy.ISLAND_HELPER), "demo", args.mode]).returncode
+    return 1
 
 
 def main():
@@ -567,6 +655,26 @@ def main():
     commands.add_parser("deny", help="stop agents using an app").add_argument("app", help='for example "Mail"')
     commands.add_parser("allow", help="let agents use an app again").add_argument("app")
     commands.add_parser("denied", help="list the denied apps")
+
+    vault_parser = commands.add_parser("vault", help="manage encrypted logins and secrets in UCU Vault")
+    vault_sub = vault_parser.add_subparsers(dest="vault_command", required=True)
+    vault_sub.add_parser("list", help="list stored vault entries (metadata only)")
+    vault_add = vault_sub.add_parser("add", help="store a login, API key or secret")
+    vault_add.add_argument("id", help='entry id, e.g. "github" or "openai-key"')
+    vault_add.add_argument("--kind", choices=["login", "api_key", "secret"], default="login")
+    vault_add.add_argument("--label", help="display name shown in the notch")
+    vault_add.add_argument("--domain", action="append", help="allowed hostname (repeatable)")
+    vault_add.add_argument("--app", help="allowed native app name")
+    vault_add.add_argument("--username", help="email or username for a login")
+    vault_add.add_argument("--ask", action="store_true", help="always ask in the notch instead of autofilling autonomously")
+    vault_sub.add_parser("remove", help="remove a vault entry").add_argument("id")
+
+    island_parser = commands.add_parser("island", help="preview the MacBook Notch Island")
+    island_sub = island_parser.add_subparsers(dest="island_command", required=True)
+    island_demo = island_sub.add_parser("demo", help="preview a notch state live")
+    island_demo.add_argument("mode", nargs="?", choices=["showcase", "pile", "passkey", "approve", "login", "toast"],
+                             default="showcase")
+
     args = parser.parse_args()
     if args.command == "install":
         return install(args.python)
@@ -578,6 +686,10 @@ def main():
         return set_denied(args.app, args.command == "deny")
     if args.command == "denied":
         return list_denied()
+    if args.command == "vault":
+        return vault_cli(args)
+    if args.command == "island":
+        return island_cli(args)
     return doctor()
 
 

@@ -553,6 +553,7 @@ final class AgentCursor {
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
                                             "AuthenticationServicesAgent", "coreautha"]
+    static let authDialogOwners: Set<String> = ["coreautha", "AuthenticationServicesAgent", "SecurityAgent"]
     static let quietTail = 1.5, windowSettle = 0.3, hideGuard = 3.0, noWindowLimit = 6.0, openLimit = 45.0
     static let inputWindow = 1.5, longestCall = 300.0, moveSettle = 0.3
     // Apps come forward by themselves seconds after an action too, such as a browser once a page has loaded.
@@ -564,6 +565,9 @@ final class Watcher {
     var driven = [NSRunningApplication]()  // the watched apps that were running when the last call began
     var seenWindows = [pid_t: [AXUIElement]]()
     var seenDialogs = Set<Int>()
+    var activeAuthDialogs = Set<Int>()  // on-screen biometric/passkey system dialogs driving the notch indicator
+    var returnAfterAuthApp: NSRunningApplication?  // restored automatically when a passkey Touch ID sheet dismisses
+    var returnAfterAuthUntil = Date.distantPast
     var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
     var keptHidden = Set<pid_t>()
     let desktop = AgentDesktop()
@@ -616,6 +620,9 @@ final class Watcher {
         scanDialogs(reporting: false)
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
             if Date() < busyUntil { scan() }
+            else if Date() < guardUntil || !activeAuthDialogs.isEmpty || Date() < returnAfterAuthUntil {
+                scanDialogs(reporting: Date() < guardUntil || Date() < returnAfterAuthUntil)
+            }
         }
         Timer.scheduledTimer(withTimeInterval: Self.focusTick, repeats: true) { [self] _ in
             if Date() < guardUntil { guardWindow() }
@@ -793,10 +800,37 @@ final class Watcher {
             oursUntil[app.processIdentifier] = Date() + Self.oursGrace
         }
         if let name = command["allow"] as? String, let app = running(name) {
-            allowed = app.processIdentifier
-            allowedUntil = Date() + Self.allowGrace  // only for the call that asked: later it can't come forward again
-            keptHidden.remove(app.processIdentifier)
+            let pid = app.processIdentifier
+            if command["return_after_auth"] as? Bool == true {
+                let prev = NSWorkspace.shared.frontmostApplication
+                if let prev, prev.processIdentifier != pid, prev.localizedName != "ucu-island" {
+                    returnAfterAuthApp = prev
+                } else if let f = front, f.processIdentifier != pid, f.localizedName != "ucu-island" {
+                    returnAfterAuthApp = f
+                }
+                returnAfterAuthUntil = Date() + 45.0
+            }
+            allowed = pid
+            allowedUntil = Date() + max(Self.allowGrace, 8.0)  // only for the call that asked: later it can't come forward again
+            oursUntil[pid] = nil
+            keptHidden.remove(pid)
             bringBack(app)
+            if command["front"] as? Bool == true {
+                let raiseFront = {
+                    app.unhide()
+                    let el = appElement(pid)
+                    if let main: AXUIElement = attribute(el, kAXMainWindowAttribute) {
+                        AXUIElementPerformAction(main, kAXRaiseAction as CFString)
+                    } else if let first = (attribute(el, kAXWindowsAttribute) as [AXUIElement]?)?.first {
+                        AXUIElementSetAttributeValue(first, kAXMainAttribute as CFString, kCFBooleanTrue)
+                        AXUIElementPerformAction(first, kAXRaiseAction as CFString)
+                    }
+                    AXUIElementSetAttributeValue(el, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                    app.activate()
+                }
+                raiseFront()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: raiseFront)
+            }
             log("\(app.localizedName ?? "?") came to the user at the agent's request")
         }
         if let busy = command["busy"] as? Bool {
@@ -1135,17 +1169,49 @@ final class Watcher {
 
     // Password and permission prompts come from system processes, not from the app that caused them, and those
     // processes can't be observed in advance. Their AX windows can still be read once they are on screen.
+    // Biometric/passkey prompts also emit `auth_prompt` on appear and disappear so the notch Touch ID pill stays in sync.
     func scanDialogs(reporting: Bool) {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []
         var told = Set<String>()
+        var visibleAuth = Set<Int>()
         for window in list {
             guard let owner = window[kCGWindowOwnerName as String] as? String, Self.dialogOwners.contains(owner),
-                  let id = window[kCGWindowNumber as String] as? Int, seenDialogs.insert(id).inserted,
-                  reporting, told.insert(owner).inserted,
+                  let id = window[kCGWindowNumber as String] as? Int else { continue }
+            if Self.authDialogOwners.contains(owner) {
+                visibleAuth.insert(id)
+            }
+            guard seenDialogs.insert(id).inserted, reporting, told.insert(owner).inserted,
                   let pid = window[kCGWindowOwnerPID as String] as? Int else { continue }
             let found: [AXUIElement] = attribute(appElement(pid_t(pid)), kAXWindowsAttribute) ?? []
             report(found.first, owner: owner, kind: "system dialog")
+            if Self.authDialogOwners.contains(owner) {
+                activeAuthDialogs.insert(id)
+                var event: [String: Any] = ["event": "auth_prompt", "active": true, "app": owner]
+                if let win = found.first {
+                    let info = contents(of: win)
+                    event["title"] = title(win)
+                    event["text"] = info.text == title(win) ? "" : info.text
+                }
+                emit(event)
+            }
+        }
+        if !activeAuthDialogs.isEmpty {
+            activeAuthDialogs.formIntersection(visibleAuth)
+            if activeAuthDialogs.isEmpty {
+                emit(["event": "auth_prompt", "active": false])
+                if let back = returnAfterAuthApp, Date() < returnAfterAuthUntil {
+                    returnAfterAuthApp = nil
+                    returnAfterAuthUntil = Date.distantPast
+                    allowed = nil
+                    allowedUntil = Date.distantPast
+                    if !back.isTerminated {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                            back.activate()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1200,10 +1266,13 @@ final class Watcher {
     }
 
     func activated(_ app: NSRunningApplication) {
+        let name = app.localizedName ?? "?"
+        // Never fight ucu's own Notch Island or macOS system Touch ID / passkey prompts.
+        if app.executableURL?.lastPathComponent == "ucu-island" || Self.authDialogOwners.contains(name) { return }
         let previous = front, pid = app.processIdentifier, launched = app.launchDate ?? .distantPast
         let isNew = launched > busySince && Date() < busyUntil  // started during the call that is running
         let ours = Date() < oursUntil[pid] ?? .distantPast
-        let owned = launchedHidden.contains(pid), name = app.localizedName ?? "?"
+        let owned = launchedHidden.contains(pid)
         // Whether the user came to it is settled here, once, before the app is asked anything: a busy app answers
         // seconds later, and by then their click is no longer new, so it would be undone.
         let onDock = clickedDockIcon(of: app)

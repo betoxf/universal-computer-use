@@ -168,13 +168,14 @@ class ServerTest(unittest.TestCase):
         self.assertIn("ucu rules:", rules)
         self.assertIn("confirmations", rules)
         names = [tool["name"] for tool in server.request("tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["look", "act", "list_windows", "focus_window", "move_to_desktop", "safari", "chrome"])
+        self.assertEqual(names, ["look", "act", "list_windows", "focus_window", "move_to_desktop", "safari", "chrome",
+                                 "ask_user", "vault"])
         # A client that reconnects after an update reads the tools again.
         self.assertIn({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}, server.notifications)
 
     def test_keeps_tool_definitions_and_rules_small(self):
         tools = json.dumps(self.server.request("tools/list")["result"]["tools"])
-        self.assertLess(len(tools), 7000)  # two browser tools
+        self.assertLess(len(tools), 10000)  # two browser tools, notch approvals and blind vault
 
     def test_shows_a_window_as_numbered_text(self):
         text = self.server.text(self.server.look())

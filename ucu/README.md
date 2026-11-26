@@ -127,6 +127,17 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
   window comes to your screen and the front, only when you ask to see it.
 - `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
 - `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own tabs.
+- `ask_user {title, detail?, kind?, browser?, app?, window?, domain?, touch_id?, remember_key?}`: drops a non-activating
+  black pill out of the MacBook notch so you can approve sensitive clicks (like "Continue with Google" or creating an API
+  key) without switching apps or stopping the agent's turn. With `kind: "passkey"` (or automatically whenever macOS opens
+  a Touch ID / passkey prompt during agent work), the notch shows the Touch ID icon on the left and `"Please touch the key"`
+  on the right.
+- `vault {op, ...}`: encrypted Keychain-backed credential and secret vault whose raw values never enter chat or process
+  arguments. `list` returns metadata only; `fill` autofills saved logins autonomously on matching domains or drops a
+  compact notch form where you can enter a login and remember it for future times; `capture` blindly captures a newly
+  created API key from a page element (or intercepts a Copy button's clipboard write without touching your clipboard) or a
+  native app and returns only its id and masked preview; `paste` injects a vault id into a browser field, native app field
+  (via `--stdin`), or local `.env` file. Known vault secrets are also scrubbed from `look` and browser `read` output.
 
 A step is `{do, on, ...}`, where `on` is a number from `look`, or `{do, name, ...}` with the element's name, which needs
 no `look` first:
@@ -319,6 +330,31 @@ A native Open dialog, such as Chrome's Load unpacked, opens in the background an
 in it needs the keyboard, so agents ask you to pick it. An unpacked extension loaded once can be reloaded in the background
 from the Reload button on `chrome://extensions`.
 
+### Notch Island & encrypted vault
+
+Sensitive actions don't need to interrupt your window or put passwords and API keys into chat:
+
+- **Active-agent cursor pile & hover preview:** whenever agents are driving the Mac, their exact colored UCU cursors
+  pile tightly onto the left side of the notch (right side untouched). Hover any cursor in the pile to peek at a compact
+  live mini-preview of what that agent is currently seeing, where its cursor is, and what it's doing; click the preview
+  to jump to that app, or move away to collapse back into the notch.
+- **Passkey / Touch ID indicator:** when a page or macOS opens a Touch ID / passkey prompt (`coreautha`,
+  `AuthenticationServicesAgent`, `SecurityAgent`) during agent work, the MacBook notch expands with only the Touch ID
+  icon on the left and `"Please touch the key"` on the right, and collapses as soon as authentication finishes.
+- **Quick notch approvals:** for actions such as clicking `"Continue with Google"` or pasting a secret to a new target,
+  the notch expands quietly without stealing focus (`Approve` / `Show` / `Deny`, or `⌃⌥↵` / `⌃⌥⎋`).
+- **Remembered logins & blind API keys:** logins and captured secrets live in an AES-256-GCM encrypted vault
+  (`~/Library/Application Support/ucu/vault.enc`) whose master key is kept in macOS Keychain. Saved logins fill
+  autonomously on their matching domain (strictly refusing mismatched domains) with a brief notch toast; missing logins
+  can be typed right in the notch with **Remember for future times** checked. Manage entries from the terminal too:
+
+```bash
+./ucu vault list
+./ucu vault add github --kind login --domain github.com --username you@example.com
+./ucu vault remove github
+./ucu island demo passkey   # preview passkey, approve, login, or toast live
+```
+
 ### Several agents
 
 Each chat has its own engine, so chats on different apps work at the same time. Each also keeps a small file in
@@ -368,16 +404,17 @@ touch ~/Library/Application\ Support/ucu/no-auto-update
 ./ucu uninstall
 ```
 
-This removes the server, hook, engine, `ucu-window` and the Chrome extension's host. Your policy, logs and backups
-stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
+This removes the server, hook, engine, `ucu-window`, `ucu-island` and the Chrome extension's host. Your policy,
+encrypted vault, logs and backups stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
 
 ## How it works
 
 | Path | What it does |
 | --- | --- |
-| `ucu` | The `install`, `uninstall`, `update`, `doctor`, `deny`, `allow` and `denied` commands. |
-| `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text and adds notes. |
-| `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows, holds the private desktop and draws each chat's cursor. |
+| `ucu` | The `install`, `uninstall`, `update`, `doctor`, `deny`, `allow`, `denied`, `vault` and `island` commands. |
+| `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text, scrubs secrets and adds notes. |
+| `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows and auth prompts, holds the private desktop and draws each chat's cursor. |
+| `native/ucu-island.swift` | Shared per-user daemon (`~/.local/bin/ucu-island`) over `island.sock` that renders the MacBook Notch Dynamic Island and owns the Keychain-backed AES-GCM secret vault. |
 | `native/browser.js` | The browser side of the `safari` and `chrome` tools, run with `osascript`. |
 | `chrome-extension/` | UCU's Chrome extension, which makes the agent's window and loads addresses with Chrome staying behind. |
 | `scripts/ucu-chrome-host.py` | The extension's native messaging host. It relays between the extension and each chat's server over `~/Library/Application Support/ucu/chrome.sock`. |

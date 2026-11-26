@@ -119,8 +119,17 @@ def answer_safari(request, state, reply):
         tab = {"url": request["url"], "mark": request["mark"]}
         window["tabs"].append(tab)
         reply["own"] = where(window, tab, None)
+        hints = {}
+        if "sign-in" in request["url"]:
+            hints["password"] = True
+        if "oauth" in request["url"]:
+            hints["oauth"] = ["Google"]
+        if "passkey" in request["url"]:
+            hints["passkey"] = True
+        if "quick-login" in request["url"]:
+            hints["quick_login"] = ["Continue as Fernanda"]
         return {"window_id": window["window_id"], "tab_index": len(window["tabs"]), "url": request["url"],
-                "title": "T", "loaded": True, **({"password": True} if "sign-in" in request["url"] else {})}
+                "title": "T", "loaded": True, **hints}
     if "own" not in request:  # a window of the chat's own, on the agent's desktop: a copy of a page, or one away
         window = next((window for window in state["windows"] if window["window_id"] == request.get("window_id")), None)
         if window and op == "navigate":
@@ -146,9 +155,17 @@ def answer_safari(request, state, reply):
                 "loaded": True}
     if op == "locate":
         front = os.path.exists(os.path.join(os.environ["HOME"], "tab-in-front"))
+        extra = {}
+        if request.get("auth_hints"):
+            if "quick-login" in tab["url"]:
+                extra["quick_login"] = ["Continue as Fernanda"]
+            if "oauth" in tab["url"]:
+                extra["oauth"] = ["Google"]
+            if "passkey" in tab["url"]:
+                extra["passkey"] = True
         return {"window_id": window["window_id"], "tab_index": index, "url": tab["url"], "title": "T",
                 "current": front, "visible": True, "minimized": False,
-                "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800}}
+                "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800}, **extra}
     return None
 
 
@@ -214,6 +231,57 @@ def answer(request, state, reply):
             {"ref": "c1", "tag": "a", "text": "Docs", "href": "https://a.test/docs"},
             {"ref": "c2", "tag": "input", "type": "file", "text": ""},
             {"ref": "c3", "tag": "a", "text": "Elsewhere", "href": "https://b.test/x"}]}
+    if op == "read":
+        leak = os.path.join(os.environ["HOME"], "page-text")
+        if os.path.exists(leak):
+            return {"url": "https://a.test/start", "content": open(leak).read()}
+        return {"op": op}
+    if op == "locate":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        extra = {}
+        if request.get("auth_hints"):
+            if "quick-login" in tab["url"]:
+                extra["quick_login"] = ["Continue as Fernanda"]
+            if "oauth" in tab["url"]:
+                extra["oauth"] = ["Google"]
+            if "passkey" in tab["url"]:
+                extra["passkey"] = True
+        return {"window_id": window["window_id"], "tab_index": request["tab_index"], "url": tab["url"], "title": "T",
+                "current": True, "visible": True, "minimized": False,
+                "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800}, **extra}
+    if op == "click_auth_option":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        lbl = f"Continue with {request.get('provider')}" if request.get("method") == "oauth" else (
+            "Sign in with Passkey" if request.get("method") == "passkey" else str(request.get("label") or request.get("account")))
+        return {"clicked": lbl, "method": request.get("method"), "host": host}
+    if op == "fill_login":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        want = (request.get("expected_domain") or "").lower()
+        if want and host != want and not host.endswith("." + want):
+            raise RuntimeError(f"Domain mismatch: tab is on {host}, expected {want}")
+        filled = [k for k in ("username", "password") if request.get(k)]
+        return {"filled": filled, "submitted": bool(request.get("submit", True)), "host": host}
+    if op == "type_secret":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        return {"typed": len(request.get("secret") or ""), "host": host}
+    if op == "capture_secret":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        src = "clipboard_intercept" if (request.get("click_ref") or request.get("click_selector")) else "code"
+        return {"secret": "sk-proj-supersecret987654", "host": host, "source": src}
+    if op == "watch_login_autofill":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        return {"captured": True, "username": "icloud@apple.test", "password": "apple-passwords-touchid-secret", "host": host}
     if op == "upload":
         return {"uploaded": [file["name"] for file in request["files"]], "into": "input"}
     if op in ("click", "type"):  # the page says where that was on screen while it is in sight
@@ -229,9 +297,10 @@ def answer(request, state, reply):
 
 
 def main():
-    request = json.loads(sys.argv[-1])
+    via_stdin = sys.argv[-1] == "stdin"
+    request = json.loads(sys.stdin.read() if via_stdin else sys.argv[-1])
     with open(LOG, "a") as handle:
-        handle.write(json.dumps({"at": time.time(), "osascript": request}) + "\n")
+        handle.write(json.dumps({"at": time.time(), "osascript": request, "via_stdin": via_stdin}) + "\n")
     state = load()
     reply = {"ok": True}
     if request.get("vigil") and os.path.exists(os.path.join(os.environ["HOME"], "page-asleep")):

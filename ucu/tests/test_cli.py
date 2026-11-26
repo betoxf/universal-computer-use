@@ -110,6 +110,7 @@ class CliTest(unittest.TestCase):
         backup = next((self.home / "Library/Application Support/ucu/backups").iterdir())
         self.assertEqual(json.loads((backup / "opencode.json").read_text()), OPENCODE)
         self.assertTrue((self.home / ".local/bin/ucu-window").exists())
+        self.assertTrue((self.home / ".local/bin/ucu-island").exists())
         self.assertTrue((self.home / ".local/bin/ucu-engine").exists())
         host = self.read_json(CHROME_HOST)
         self.assertEqual((host["name"], host["allowed_origins"]),
@@ -145,6 +146,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.read_json(".claude/settings.json"), {"model": "opus", "hooks": {"Stop": [OTHER_HOOK]}})
         self.assertEqual(self.read_json(".config/opencode/opencode.json"), OPENCODE)
         self.assertFalse((self.home / ".local/bin/ucu-window").exists())
+        self.assertFalse((self.home / ".local/bin/ucu-island").exists())
         self.assertFalse((self.home / CHROME_HOST).exists())
         self.assertFalse((self.home / ".local/bin/ucu-chrome-host").exists())
         self.assertEqual(self.read_json(POLICY), edited)
