@@ -35,7 +35,7 @@ class FakeIslandProxy(WatchingProxy):
         self.auth_prefs = {}
         self.accounts = {}
         self.next_approve = {"decision": "approved", "remembered": False}
-        self.next_request = {"decision": "filled", "username": "beto@test.io",
+        self.next_request = {"decision": "filled", "username": "beto@login.test",
                              "secret": "typed-in-notch-pass-99", "remember": True}
         self.passkey_events = []
 
@@ -463,7 +463,7 @@ class PasskeyTouchTest(unittest.TestCase):
 class VaultAutofillAndSecretRelayTest(unittest.TestCase):
     def test_fills_saved_login_autonomously_via_stdin_without_exposing_secret(self):
         proxy = FakeIslandProxy(self)
-        proxy.seed_vault("github", kind="login", domains=["a.test"], username="beto@test.io",
+        proxy.seed_vault("github", kind="login", domains=["a.test"], username="beto@login.test",
                          secret="ultra-secret-password-42")
         proxy.safari(op="open", url="https://a.test/login")
         reply = proxy.call("vault", op="fill", browser="safari")
@@ -481,7 +481,7 @@ class VaultAutofillAndSecretRelayTest(unittest.TestCase):
 
     def test_blocks_filling_login_on_mismatched_domain(self):
         proxy = FakeIslandProxy(self)
-        proxy.seed_vault("github", kind="login", domains=["github.com"], username="beto@test.io", secret="gh-secret-99")
+        proxy.seed_vault("github", kind="login", domains=["github.com"], username="beto@login.test", secret="gh-secret-99")
         proxy.chrome(op="open", url="https://evilgithub.com/login")
         reply = proxy.call("vault", op="fill", browser="chrome", id="github")
         self.assertTrue(reply["result"]["isError"])
