@@ -125,6 +125,7 @@ pub(super) fn mouse_click(
             count: args.count,
             modifiers: parse_modifiers(&args.modifiers)?,
             app: args.app,
+            window_id: args.window_id,
         },
         adapter,
         context,

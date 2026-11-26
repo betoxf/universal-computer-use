@@ -9,7 +9,8 @@ has a button called Fresh that is a new element at every read, and the one from 
 button called Old at its first read only. "Ghost" has an image called Shown that is in every read and that the
 engine never finds. "Closing" loses its second window at the first step. After two clicks every
 window has a button called Later. Google Chrome has two windows with the same title: the user's, and one where ucu puts
-the agent's on the fake desktop.
+the agent's on the fake desktop. For an app whose name starts with "Dated" it is an engine from before a click
+could name its window, and "Dated Twin" has two windows at one place.
 """
 import json
 import os
@@ -98,8 +99,20 @@ def main():
                 "bounds": {"x": 0, "y": 33, "width": 1512, "height": 859}},
                {"id": "w-6", "title": "Mail - Google Chrome",
                 "bounds": {"x": -1900, "y": -1160, "width": 1280, "height": 900}}])
+    elif command == "list-windows" and arguments[arguments.index("--app") + 1] == "Moved":
+        # read at 100,200, and the user has moved it since
+        reply([{"id": "w-1", "title": "Moved", "bounds": {"x": 500.0, "y": 600.0, "width": 300.0, "height": 400.0}}])
+    elif command == "list-windows" and arguments[arguments.index("--app") + 1] == "Dated Twin":
+        place = {"x": 100.0, "y": 200.0, "width": 300.0, "height": 400.0}
+        reply([{"id": "w-1", "title": "One", "bounds": place}, {"id": "w-2", "title": "Two", "bounds": place}])
     elif command == "list-windows":  # the real engine's data is the list itself
         reply([{"id": "w-1", "title": "One"}, {"id": "w-2", "title": "Two"}])
+    elif command == "batch" and any(str(entry["args"].get("app", "")).startswith("Dated")
+                                    and "window_id" in entry["args"] for entry in json.loads(arguments[1])):
+        reply(error={"code": "INVALID_ARGS", "suggestion": "Use the same argument names as the matching CLI command",
+                     "message": "Batch entry 0 ('mouse-click') failed validation: Invalid batch args for "
+                                "'mouse-click': unknown field `window_id`, expected one of `xy`, `button`, `count`, "
+                                "`modifiers`, `app`"})
     elif command == "batch":
         results = []
         for entry in json.loads(arguments[1]):
