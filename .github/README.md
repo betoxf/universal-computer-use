@@ -40,8 +40,23 @@ Reading a small window such as Calculator takes about 260 ms and 169 tokens; the
 
 ## Install
 
-You need macOS with the Xcode Command Line Tools, Rust through [rustup](https://rustup.rs), Python 3.9 or newer, and
-[Claude Code](https://claude.com/claude-code) with the `claude` command on your `PATH`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh | bash
+```
+
+The installer checks for macOS with the Xcode Command Line Tools, Python 3.9 or newer, git, and
+[Claude Code](https://claude.com/claude-code) or opencode. If Rust is missing, it asks before installing it with
+[rustup](https://rustup.rs); add `-s -- --yes` after `bash` to let it go ahead without asking. It then clones UCU to
+`~/.ucu` and runs `ucu install` and `ucu doctor` from there. To read the script before you run it, open
+[`ucu/install.sh`](https://github.com/betoxf/universal-computer-use/blob/main/ucu/install.sh), or download it first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/betoxf/universal-computer-use/main/ucu/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+To install by hand instead, install Rust and run:
 
 ```bash
 git clone https://github.com/betoxf/universal-computer-use.git
@@ -50,7 +65,7 @@ cd universal-computer-use/ucu
 ./ucu doctor
 ```
 
-UCU runs from that folder and updates itself from it. Start a new Claude Code session to pick it up. The app that runs
+UCU runs from its clone and updates itself there. Start a new Claude Code session to pick it up. The app that runs
 Claude Code needs Accessibility permission, and Screen Recording for screenshots.
 
 Before you use it: agents get real access to every app you don't deny. Read
