@@ -1507,20 +1507,24 @@ final class Watcher {
         // The sheet's buttons that could be pressed when it opened. Once one of them can't, the sheet has what it
         // asked for and is only finishing: Safari's stays for 1.4 s more, saying it is done, and needs no front for it.
         var buttons = [AXUIElement](), done = false
+        var toldWaiting = false  // the user was told that a pause of theirs is waited for
         init(app: NSRunningApplication, window: AXUIElement, number: Int) {
             (self.app, self.window, self.number) = (app, window, number)
         }
     }
 
-    // The keyboard leaves the user's window only after a pause in their typing, and after a longer one once they have
-    // typed into a pause of that length: the key that ended it went to the sheet, and nothing here can catch a key or
-    // send it on to their app, which takes a permission to read the keyboard that ucu doesn't ask for. The rest of
-    // what their hands do stops for less, as none of it is lost. A touch on the sensor is none of these.
-    static let touchQuiet = 1.2, touchBackOff = 4.0, touchIdle = 0.7, touchSettle = 1.0
+    // Nothing tells a process that a finger is on the sensor: macOS refuses the one call that would (BiometricKit's
+    // presence detection, error 1), and reads the finger only for the app in front. So the app has the front
+    // whenever the user's hands are still, and the pause is as short as the time a hand takes to reach the sensor,
+    // which makes reaching for it the pause. The key that ends a pause they didn't mean goes to the sheet: nothing
+    // here can catch a key or send it on to their app, which takes a permission to read the keyboard that ucu
+    // doesn't ask for. So each such key doubles the pause that is waited for, up to four seconds. The rest of what
+    // their hands do stops for less, as none of it is lost. A touch on the sensor is none of these.
+    static let touchQuiet = 0.8, touchBackOff = 4.0, touchIdle = 0.5, touchSettle = 1.0
     // What the user does is looked for a hundred times a second, so that a shortcut's key finds their app in front
     // again, and the sheet a third as often: it is the app that answers that.
     static let touchTick = 0.01, touchSheetTicks = 3
-    static let touchTries = 3, touchPress = 5.0, touchNudge = 0.3
+    static let touchTries = 3, touchPress = 5.0, touchNudge = 0.3, touchTell = 1.0
     static let touchInput: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
                                             .mouseMoved, .leftMouseDragged, .scrollWheel]
     static let windowNumber = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow").map {
@@ -1621,7 +1625,7 @@ final class Watcher {
     }
 
     func isPause(for touch: Touch) -> Bool {
-        let quiet = touch.mistaken > 0 ? Self.touchBackOff : Self.touchQuiet
+        let quiet = min(Self.touchBackOff, Self.touchQuiet * pow(2, Double(touch.mistaken)))
         return Self.secondsSince(.keyDown) >= quiet && !Self.touchInput.contains { Self.secondsSince($0) < Self.touchIdle }
     }
 
@@ -1771,6 +1775,11 @@ final class Watcher {
         }
         if let asked = touch.asked, Date() >= asked.until, !(touch.armedAt != nil && !touch.cameForward) {
             return endTouch("busy")
+        }
+        // A user who is busy isn't interrupted, and hears why nothing happens: the notch asks them to pause.
+        if touch.asked != nil, touch.armedAt == nil, !touch.toldWaiting, -touch.since.timeIntervalSinceNow > Self.touchTell {
+            touch.toldWaiting = true
+            emit(["event": "touch", "waiting": true])
         }
         if touch.watch == nil, let by = touch.pressBy, Date() >= by { return endTouch("abandoned") }
         if let watch = touch.watch {

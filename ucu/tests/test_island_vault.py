@@ -398,6 +398,13 @@ class PasskeyTouchTest(unittest.TestCase):
         self.cleared(proxy)
         self.assertEqual(self.lit(proxy), ["Pause, then touch", "Sign in to a.test"])
 
+    def test_asks_a_busy_user_to_pause_before_anything_is_pressed(self):
+        proxy = self.at_sign_in("waiting")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual(said["sheet"], "closed")
+        self.cleared(proxy)
+        self.assertEqual(self.lit(proxy), ["Pause, then touch", "Sign in to a.test"])
+
     def test_presses_again_when_the_user_got_in_before_the_press(self):
         proxy = self.at_sign_in("interrupted")
         said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
@@ -424,6 +431,7 @@ class PasskeyTouchTest(unittest.TestCase):
         refused = proxy.vault(op="fill", browser="safari")
         self.assertTrue(refused["result"]["isError"])
         self.assertIn("opens only in a pause of theirs", proxy.text(refused))
+        self.assertIn("for 90 seconds", proxy.text(refused))
         self.assertEqual(self.presses(proxy), [])
         self.assertEqual(len(proxy.commands("touchEnd")), 1)
         self.assertEqual(self.lit(proxy), [])

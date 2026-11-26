@@ -16,7 +16,8 @@ exists, the user is typing and doesn't pause.
 A passkey sheet on a window out of sight goes as $HOME/touch says: "busy" (the user never pauses), "old" (a helper
 from before it could hold one, which says nothing), "left" (an earlier call's sheet is still open), "none" (the press
 opens nothing), "interrupted" (the user got in before the first press, and the second opens it), "typing" (the sheet
-opens while the user types, and the finger is read once they pause), "timeout" (nobody touches) or "refused" (the sheet
+opens while the user types, and the finger is read once they pause), "waiting" (the user types on for a while before
+the press can be made), "timeout" (nobody touches) or "refused" (the sheet
 closes without taking a touch). Otherwise the sheet opens, the finger is read, and it closes.
 Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the
 other commands.
@@ -126,6 +127,9 @@ def answer(command):
             return send({"id": command["id"], "state": "busy", "front": "Mail"})
         if plan == "left":
             return send({"id": command["id"], "state": "sheet"})
+        if plan == "waiting":  # they were typing: the notch asks them to pause, and then they do
+            send({"event": "touch", "waiting": True})
+            time.sleep(0.3)
         send({"id": command["id"], "state": "armed"})
         send({"event": "touch", "armed": True})
     elif "touchWatch" in command:

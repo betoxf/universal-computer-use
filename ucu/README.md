@@ -413,12 +413,17 @@ Sensitive actions don't need to interrupt your window or put passwords and API k
 - **Passkey sign-in without the page:** when a page offers a passkey, `vault` `fill` moves the agent's Safari tab to
   its private desktop and presses the page's passkey button there, as a user would, so the Touch ID sheet opens where
   you don't see it. The notch then shows the Touch ID icon and the site, such as `"Sign in to example.com"`, and you
-  touch the sensor. Safari reads a finger only while it is the active app, so ucu makes it the active app, with
-  nothing on your screen moving, only while you aren't typing, clicking or moving the pointer, and gives your app back
-  the moment you do, or the sheet closes. While you are busy the notch says `"Pause, then touch"`. Nobody touching for
-  90 seconds cancels the sheet. In Chrome, where this isn't measured, the agent's window comes to you and you touch
-  there. A system Touch ID or password dialog (`coreautha`, `AuthenticationServicesAgent`, `SecurityAgent`) that opens
-  during agent work lights the notch too, with `"Please touch the key"`.
+  touch the sensor. macOS reads a finger only for the app in front, and tells no other app that a finger is on the
+  sensor. So ucu makes Safari the app in front, with nothing on your screen moving, whenever your hands have been
+  still for a moment (0.8 s after a key, 0.5 s after the mouse), and gives your app back when you type, click or move
+  the pointer, and when the sheet has your touch. Reaching for the sensor is pause enough. While your hands are busy
+  the notch says `"Pause, then touch"`, and before the sheet is open it waits for your first pause to open it. A key
+  you press while Safari has the front goes to the sheet, which ignores it, and is lost to your app: ucu can't pass it
+  on without a permission to read the keyboard. Each such key doubles the pause ucu waits for, up to 4 seconds. If
+  nobody touches for 90 seconds the agent is told, and the sheet goes with its tab. In Chrome, where this isn't
+  measured, the agent's window comes to you and you touch there. A system Touch ID or password dialog (`coreautha`,
+  `AuthenticationServicesAgent`, `SecurityAgent`) that opens during agent work lights the notch too, with
+  `"Please touch the key"`.
 - **Quick notch approvals:** for actions such as clicking `"Continue with Google"` or pasting a secret to a new target,
   the notch expands quietly without stealing focus (`Approve` / `Show` / `Deny`, or `⌃⌥↵` / `⌃⌥⎋`).
 - **Remembered logins & blind API keys:** logins and captured secrets live in an AES-256-GCM encrypted vault

@@ -118,8 +118,9 @@ TOUCH_LIMIT = 90      # seconds the user has to touch before the sheet is cancel
 TOUCH_TRIES = 2       # presses, when the user did something just as the first was made
 TOUCH_READY = "Sign in to {}"      # what the notch says while the finger is read,
 TOUCH_PAUSE = "Pause, then touch"  # and while the user types or moves the pointer, when it isn't
-TOUCH_BUSY = ("The user is working in {}, and the passkey sheet opens only in a pause of theirs: their keyboard goes "
-              "to it for a moment. Nothing was pressed. Try again in a while.")
+TOUCH_BUSY = ("The user went on working in {} for {} seconds while the notch asked them to pause, and the passkey sheet "
+              "opens only in a pause of theirs: their keyboard goes to it for a moment. Nothing was pressed. Say in "
+              "the chat what you need, or try again in a while.")
 NO_TOUCH = ("This Mac's ucu-window can't hold a passkey sheet for the user's touch: it is older than this server. "
             "`ucu update` builds one that can. Until then `show` them the tab and ask them to sign in there.")
 TOUCH_FAILED = "{} couldn't take the user's touch out of their sight ({}). `show` them the tab and ask them there."
@@ -2292,17 +2293,23 @@ class Server:
         if touching is None:
             return
         if message.get("sheet") is False or message.get("done"):  # the finger was read: nothing more is asked
-            touching["lit"] = False
+            touching["lit"], touching["shown"] = False, None
             self.island.passkey(active=False)
             return
+        if message.get("waiting"):  # no sheet yet: it opens in their next pause, which the notch asks for
+            touching["lit"] = True
         if message.get("sheet"):
-            touching["lit"], touching["text"] = True, str(message.get("text") or "")
+            touching["lit"] = touching["sheet"] = True
+            touching["text"] = str(message.get("text") or "")
         if "armed" in message:
             touching["armed"] = bool(message["armed"])
-        if touching.get("lit"):
-            prompt = TOUCH_READY.format(touching["host"]) if touching.get("armed") else TOUCH_PAUSE
-            self.island.passkey(active=True, prompt=prompt, detail=touching.get("text", "")[:90],
-                                timeout=touching["limit"])
+        if touching.get("lit"):  # the finger is read while the sheet is open and the browser has the front
+            reads = touching.get("sheet") and touching.get("armed")
+            prompt = TOUCH_READY.format(touching["host"]) if reads else TOUCH_PAUSE
+            if prompt != touching.get("shown"):
+                touching["shown"] = prompt
+                self.island.passkey(active=True, prompt=prompt, detail=touching.get("text", "")[:90],
+                                    timeout=touching["limit"])
 
     def show_context(self, arguments):
         """Bring the referenced browser tab or app window forward when the user clicks Show in the notch."""
@@ -2688,17 +2695,21 @@ class Server:
         helper's word alone. Every way out of here gives the front back and clears the notch. Return what the helper
         said at the end."""
         self.windows.start()
-        number, turn = page["window_id"], self.front_turn()
+        number, turn, until = page["window_id"], self.front_turn(), time.monotonic() + limit
         self.touching = {"host": host, "limit": limit}
         try:
             for last in (attempt + 1 == TOUCH_TRIES for attempt in range(TOUCH_TRIES)):
-                begun = self.windows.ask({"touch": workspace.app, "window": number, "wait": BORROW_WAIT},
-                                         BORROW_WAIT + 5)
+                # The user has the whole time to pause in. A helper from before it could do this never answers, which
+                # shows within the time any helper takes to say where it is.
+                if self.windows.ask({"situation": True}, SITUATION_TIMEOUT) is None:
+                    raise ToolError(NO_TOUCH)
+                wait = max(BORROW_WAIT, until - time.monotonic())
+                begun = self.windows.ask({"touch": workspace.app, "window": number, "wait": wait}, wait + 5)
                 if begun is None:
                     raise ToolError(NO_TOUCH)
                 state = begun.get("state")
                 if state == "busy":
-                    raise ToolError(TOUCH_BUSY.format(begun.get("front") or "another app"))
+                    raise ToolError(TOUCH_BUSY.format(begun.get("front") or "another app", round(wait)))
                 if state == "lent":
                     raise ToolError(FRONT_TAKEN)
                 if state not in ("armed", "sheet"):
@@ -2710,8 +2721,9 @@ class Server:
                                         "press.")
                     self.windows.send({"ours": workspace.app})
                     self.point_click(workspace.app, point, {"do": "click"}, f"w-{number}")
-                ended = self.windows.ask({"touchWatch": True, "opens": TOUCH_OPEN, "limit": limit},
-                                         limit + TOUCH_OPEN + 10) or {}
+                left = max(10, until - time.monotonic())
+                ended = self.windows.ask({"touchWatch": True, "opens": TOUCH_OPEN, "limit": left},
+                                         left + TOUCH_OPEN + 10) or {}
                 # A press the user's own typing or click got in before reaches a page that isn't the active one, which
                 # opens nothing: it is made once more, in their next pause.
                 if last or not (ended.get("state") == "none" and ended.get("interrupted")):
