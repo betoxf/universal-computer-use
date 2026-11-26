@@ -2645,6 +2645,28 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    // This app has the front only while a field on the island takes the keyboard, which `requestTextInputFocus`
+    // asks for. Whenever it gets the front otherwise, the app the user was in has it back.
+    private var userApp: NSRunningApplication?
+    func giveStrayFrontBack() {
+        let own = ProcessInfo.processInfo.processIdentifier
+        userApp = NSWorkspace.shared.frontmostApplication.flatMap { $0.processIdentifier == own ? nil : $0 }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            guard app.processIdentifier == own else {
+                self.userApp = app
+                return
+            }
+            // Nor while the user is asked for their finger by this app itself, which macOS may bring forward for it.
+            guard self.panel?.allowKeyFocus != true, !self.authenticatingTouchID, let back = self.userApp,
+                  !back.isTerminated else { return }
+            back.activate(options: [])
+        }
+    }
+
     private func restorePreviousAppIfNeeded() {
         panel?.allowKeyFocus = false
         if let prev = previousApp, !prev.isTerminated {
@@ -3956,7 +3978,13 @@ final class IslandDaemon {
             exit(0)
         }
 
-        NSApplication.shared.setActivationPolicy(.accessory)
+        // macOS makes an app that has windows the active one as it starts, when the app in front started it: a chat's
+        // server does, while the user is in that chat. Started that way this app took their keyboard 0.2 s later, in
+        // 5 of 6 starts, and kept it. So it starts as a process without windows, which isn't activated, and becomes
+        // one with windows when it first shows the island. If it is made the active app all the same, the user's app
+        // has the front back at once.
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        island.giveStrayFrontBack()
         NSApplication.shared.run()
         exit(0)
     }
