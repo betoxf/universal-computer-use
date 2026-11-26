@@ -132,6 +132,16 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
   the window what that is.
 - `move_to_desktop {app}`: moves an app's windows to the agent's private desktop.
 - `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own tabs.
+- `ask_user {title, detail?, kind?, browser?, app?, window?, domain?, touch_id?, remember_key?}`: drops a non-activating
+  black pill out of the MacBook notch so you can approve sensitive clicks (like "Continue with Google" or creating an API
+  key) without switching apps or stopping the agent's turn. With `kind: "passkey"` and `browser`, it signs in with your
+  passkey the way `vault` `fill` does: see "Passkey sign-in without the page" below.
+- `vault {op, ...}`: encrypted Keychain-backed credential and secret vault whose raw values never enter chat or process
+  arguments. `list` returns metadata only; `fill` autofills saved logins autonomously on matching domains or drops a
+  compact notch form where you can enter a login and remember it for future times; `capture` blindly captures a newly
+  created API key from a page element (or intercepts a Copy button's clipboard write without touching your clipboard) or a
+  native app and returns only its id and masked preview; `paste` injects a vault id into a browser field, native app field
+  (via `--stdin`), or local `.env` file. Known vault secrets are also scrubbed from `look` and browser `read` output.
 
 A step is `{do, on, ...}`, where `on` is a number from `look`, or `{do, name, ...}` with the element's name, which needs
 no `look` first:
@@ -293,7 +303,8 @@ over; one asking about unsaved changes stays open, hidden, until you look at it.
 its windows come back to your screen, where you can watch the agent work in it, and the app is yours from then on. UCU
 goes by the icon you clicked and not by how long ago you clicked: a busy app comes forward more than a second after the
 click, and an agent's step in between changes nothing. The agent is told the app is on your screen and to leave it
-there. If virtual displays are not available, apps are
+there. The same click brings the windows back when the app is in front already with its windows out of your sight,
+where nothing comes forward for it, and so does a click on the agent's preview of the app at the notch. If virtual displays are not available, apps are
 shown behind your windows instead. A window of an agent's own left there when the desktop goes, such as its browser
 window after a crash, goes to the Dock rather than onto your screen.
 
@@ -352,9 +363,34 @@ page is a tab in your window again. While it
 is away Safari has a window you don't see, so a link you click in another app can open there: UCU moves such a tab to
 your window at the agent's next step.
 
+A tab you may be looking at is never closed under you. When the agent takes away the tab your window shows, in a
+window with tabs of yours or after it showed you that tab, the tab stays open, and the agent goes on in a copy of its
+page. When the agent's page comes back, at `show` or when the turn ends, it comes into the tab that stayed open for you
+if that is still at its address. It comes into a new tab if you went on in yours, or if you are looking at yours and the
+agent's page has moved on, so that nothing changes under your eyes unless the agent shows it to you.
+
+**Coming to Safari always gets you a window.** While a page is away, Safari has a window you can't see, so it opens
+none when you click its Dock icon or switch to it. With no window of your own on screen that would get you nothing.
+UCU answers the click at once, also in the middle of a long step of the agent's:
+
+- With a window of yours on screen, that window comes forward as always, and nothing of the agent's moves.
+- With a window of yours in the Dock or in another Space, that window comes back to you.
+- With no window of yours at all, the agent's window comes to your screen, in front, with its page as it is. It is
+  yours from then on: the agent keeps working in its tab there, and the tabs you open beside it are left alone.
+
+A click on the agent's preview at the notch asks for its page itself. With a window of yours on screen the page opens
+in a tab of that window, in front, and the agent moves into that tab at its next step, where the page loads again. With
+none, the agent's window comes as above. A page that is in a tab of your window already comes to the front there.
+
+You can put your own Safari window in the Dock while a page is away. It stays there, and the keyboard goes to the app
+whose window you see, not to the agent's page.
+
 **In Chrome each chat works in a window of its own**, on the private desktop whenever the agent works in it, where pages
 behave as on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls.
-It is hidden when the turn ends, stays for the next page when its tabs close, and closes when the chat ends.
+It is hidden when the turn ends, stays for the next page when its tabs close, and closes when the chat ends. When you
+click Chrome's Dock icon, or switch to Chrome, with no window of your own on screen, a window of yours in the Dock comes
+back. If you have none, the chat's window comes to your screen, in front, as `show` does, and you use it there while
+the agent keeps working in it. A click on the agent's preview at the notch brings that window too.
 
 - `show` brings that window to your screen, in front, when you ask to see it or have to do something in it, such as
   sign in. It is a normal window that you use, and the agent keeps working in the same one, so there is one page and no
@@ -391,6 +427,45 @@ Both need permission for the app running Claude Code to control the browser, whi
 A native Open dialog, such as Chrome's Load unpacked, opens in the background and its sidebar works, but choosing a file
 in it needs the keyboard, so agents ask you to pick it. An unpacked extension loaded once can be reloaded in the background
 from the Reload button on `chrome://extensions`.
+
+### Notch Island & encrypted vault
+
+Sensitive actions don't need to interrupt your window or put passwords and API keys into chat:
+
+- **Active-agent cursor pile & hover preview:** whenever agents are driving the Mac, their exact colored UCU cursors
+  pile tightly onto the left side of the notch (right side untouched). The pile stays still while agents work, and a
+  cursor stirs once in a while: a slow tilt or a small step, a few times a minute at most. Hover any cursor in the pile to peek at a compact
+  live mini-preview of what that agent is currently seeing, where its cursor is, and what it's doing; click the preview
+  to jump to that app, or move away to collapse back into the notch.
+- **Passkey sign-in without the page:** when a page offers a passkey, `vault` `fill` moves the agent's Safari tab to
+  its private desktop and presses the page's passkey button there, as a user would, so the Touch ID sheet opens where
+  you don't see it. The notch then shows the Touch ID icon and the site, such as `"Sign in to example.com"`, and you
+  touch the sensor. macOS reads a finger only for the app in front, and tells no other app that a finger is on the
+  sensor. So ucu makes Safari the app in front, with nothing on your screen moving, whenever your hands have been
+  still for a moment (0.8 s after a key, 0.5 s after the mouse), and gives your app back when you type, click or move
+  the pointer, and when the sheet has your touch. Reaching for the sensor is pause enough. While your hands are busy
+  the notch says `"Pause, then touch"`, and before the sheet is open it waits for your first pause to open it. The
+  Touch ID mark shows what the sheet is doing: it is dim while it waits for you, sends out a ring while your finger
+  is read, turns an arc while the sheet signs in, and becomes a check before the island closes. A key
+  you press while Safari has the front goes to the sheet, which ignores it, and is lost to your app: ucu can't pass it
+  on without a permission to read the keyboard. Each such key doubles the pause ucu waits for, up to 4 seconds. If
+  nobody touches for 90 seconds the agent is told, and the sheet goes with its tab. In Chrome, where this isn't
+  measured, the agent's window comes to you and you touch there. A system Touch ID or password dialog (`coreautha`,
+  `AuthenticationServicesAgent`, `SecurityAgent`) that opens during agent work lights the notch too, with
+  `"Please touch the key"`.
+- **Quick notch approvals:** for actions such as clicking `"Continue with Google"` or pasting a secret to a new target,
+  the notch expands quietly without stealing focus (`Approve` / `Show` / `Deny`, or `⌃⌥↵` / `⌃⌥⎋`).
+- **Remembered logins & blind API keys:** logins and captured secrets live in an AES-256-GCM encrypted vault
+  (`~/Library/Application Support/ucu/vault.enc`) whose master key is kept in macOS Keychain. Saved logins fill
+  autonomously on their matching domain (strictly refusing mismatched domains) with a brief notch toast; missing logins
+  can be typed right in the notch with **Remember for future times** checked. Manage entries from the terminal too:
+
+```bash
+./ucu vault list
+./ucu vault add github --kind login --domain github.com --username you@example.com
+./ucu vault remove github
+./ucu island demo passkey   # preview passkey, approve, login, or toast live
+```
 
 ### Several agents
 
@@ -441,16 +516,17 @@ touch ~/Library/Application\ Support/ucu/no-auto-update
 ./ucu uninstall
 ```
 
-This removes the server, hook, engine, `ucu-window` and the Chrome extension's host. Your policy, logs and backups
-stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
+This removes the server, hook, engine, `ucu-window`, `ucu-island` and the Chrome extension's host. Your policy,
+encrypted vault, logs and backups stay in `~/Library/Application Support/ucu/` and `~/Library/Logs/ucu/`.
 
 ## How it works
 
 | Path | What it does |
 | --- | --- |
-| `ucu` | The `install`, `uninstall`, `update`, `doctor`, `deny`, `allow` and `denied` commands. |
-| `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text and adds notes. |
-| `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows, holds the private desktop and draws each chat's cursor. |
+| `ucu` | The `install`, `uninstall`, `update`, `doctor`, `deny`, `allow`, `denied`, `vault` and `island` commands. |
+| `scripts/ucu-proxy.py` | The MCP server. It runs the engine, keeps the deny list, renders windows as short text, scrubs secrets and adds notes. |
+| `native/ucu-window.swift` | `ucu-window list/focus` and `ucu-window watch`, which opens apps hidden, reports new windows and auth prompts, holds the private desktop and draws each chat's cursor. |
+| `native/ucu-island.swift` | Shared per-user daemon (`~/.local/bin/ucu-island`) over `island.sock` that renders the MacBook Notch Dynamic Island and owns the Keychain-backed AES-GCM secret vault. |
 | `native/browser.js` | The browser side of the `safari` and `chrome` tools, run with `osascript`. |
 | `chrome-extension/` | UCU's Chrome extension, which makes the agent's window and loads addresses with Chrome staying behind. |
 | `scripts/ucu-chrome-host.py` | The extension's native messaging host. It relays between the extension and each chat's server over `~/Library/Application Support/ucu/chrome.sock`. |

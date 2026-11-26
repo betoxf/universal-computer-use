@@ -119,10 +119,23 @@ def answer_safari(request, state, reply):
         tab = {"url": request["url"], "mark": request["mark"]}
         window["tabs"].append(tab)
         reply["own"] = where(window, tab, None)
+        hints = {}
+        if "sign-in" in request["url"]:
+            hints["password"] = True
+        if "oauth" in request["url"]:
+            hints["oauth"] = ["Google"]
+        if "passkey" in request["url"]:
+            hints["passkey"] = True
+        if "quick-login" in request["url"]:
+            hints["quick_login"] = ["Continue as Fernanda"]
         return {"window_id": window["window_id"], "tab_index": len(window["tabs"]), "url": request["url"],
-                "title": "T", "loaded": True, **({"password": True} if "sign-in" in request["url"] else {})}
+                "title": "T", "loaded": True, **hints}
     if "own" not in request:  # a window of the chat's own, on the agent's desktop: a copy of a page, or one away
         window = next((window for window in state["windows"] if window["window_id"] == request.get("window_id")), None)
+        if window and op == "adopt":  # it comes to the user's screen, and its tab carries the chat's mark
+            window["visible"] = True
+            window["tabs"][0]["mark"] = request["mark"]
+            return where(window, window["tabs"][0], None)
         if window and op == "navigate":
             window["tabs"] = [{"url": request["url"]}]
             return {"window_id": window["window_id"], "tab_index": 1, "url": request["url"], "title": "T",
@@ -146,9 +159,17 @@ def answer_safari(request, state, reply):
                 "loaded": True}
     if op == "locate":
         front = os.path.exists(os.path.join(os.environ["HOME"], "tab-in-front"))
+        extra = {}
+        if request.get("auth_hints"):
+            if "quick-login" in tab["url"]:
+                extra["quick_login"] = ["Continue as Fernanda"]
+            if "oauth" in tab["url"]:
+                extra["oauth"] = ["Google"]
+            if "passkey" in tab["url"]:
+                extra["passkey"] = True
         return {"window_id": window["window_id"], "tab_index": index, "url": tab["url"], "title": "T",
                 "current": front, "visible": True, "minimized": False,
-                "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800}}
+                "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800}, **extra}
     return None
 
 
@@ -214,6 +235,61 @@ def answer(request, state, reply):
             {"ref": "c1", "tag": "a", "text": "Docs", "href": "https://a.test/docs"},
             {"ref": "c2", "tag": "input", "type": "file", "text": ""},
             {"ref": "c3", "tag": "a", "text": "Elsewhere", "href": "https://b.test/x"}]}
+    if op == "read":
+        leak = os.path.join(os.environ["HOME"], "page-text")
+        if os.path.exists(leak):
+            return {"url": "https://a.test/start", "content": open(leak).read()}
+        return {"op": op}
+    if op == "locate":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        extra = {}
+        if request.get("auth_hints"):
+            if "quick-login" in tab["url"]:
+                extra["quick_login"] = ["Continue as Fernanda"]
+            if "oauth" in tab["url"]:
+                extra["oauth"] = ["Google"]
+            if "passkey" in tab["url"]:
+                extra["passkey"] = True
+        return {"window_id": window["window_id"], "tab_index": request["tab_index"], "url": tab["url"], "title": "T",
+                "current": True, "visible": True, "minimized": False,
+                "bounds": {"x": 40, "y": 65, "width": 1280, "height": 800}, **extra}
+    if op == "click_auth_option":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        lbl = f"Continue with {request.get('provider')}" if request.get("method") == "oauth" else (
+            "Sign in with Passkey" if request.get("method") == "passkey" else str(request.get("label") or request.get("account")))
+        found = {"clicked": lbl, "method": request.get("method"), "host": host}
+        if request.get("real"):  # the button is only found: where it is on screen, while the page is in sight
+            in_sight = os.path.exists(os.path.join(os.environ["HOME"], "page-in-sight"))
+            found["point"] = [640, 480] if in_sight else None
+        return found
+    if op == "fill_login":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        want = (request.get("expected_domain") or "").lower()
+        if want and host != want and not host.endswith("." + want):
+            raise RuntimeError(f"Domain mismatch: tab is on {host}, expected {want}")
+        filled = [k for k in ("username", "password") if request.get(k)]
+        return {"filled": filled, "submitted": bool(request.get("submit", True)), "host": host}
+    if op == "type_secret":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        return {"typed": len(request.get("secret") or ""), "host": host}
+    if op == "capture_secret":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        src = "clipboard_intercept" if (request.get("click_ref") or request.get("click_selector")) else "code"
+        return {"secret": "sk-proj-supersecret987654", "host": host, "source": src}
+    if op == "watch_login_autofill":
+        window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
+        tab = window["tabs"][request["tab_index"] - 1]
+        host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
+        return {"captured": True, "username": "icloud@apple.test", "password": "apple-passwords-touchid-secret", "host": host}
     if op == "upload":
         return {"uploaded": [file["name"] for file in request["files"]], "into": "input"}
     if op in ("click", "type"):  # the page says where that was on screen while it is in sight
@@ -223,15 +299,20 @@ def answer(request, state, reply):
         return "text"
     if op == "wait_for":  # a page that isn't in sight stands still, so what it waits for never comes
         return {"found": not os.path.exists(os.path.join(os.environ["HOME"], "page-asleep"))}
+    if op == "restore_users_window":  # whether the user had a window of their own in the Dock
+        return {"restored": os.path.exists(os.path.join(os.environ["HOME"], "users-window-docked"))}
     if op == "hide_window" and os.path.exists(os.path.join(os.environ["HOME"], "window-moved")):
         return {"hidden": False, "moved": True}
     return {"op": op}
 
 
 def main():
-    request = json.loads(sys.argv[-1])
+    via_stdin = sys.argv[-1] == "stdin"
+    request = json.loads(sys.stdin.read() if via_stdin else sys.argv[-1])
     with open(LOG, "a") as handle:
-        handle.write(json.dumps({"at": time.time(), "osascript": request}) + "\n")
+        handle.write(json.dumps({"at": time.time(), "osascript": request, "via_stdin": via_stdin}) + "\n")
+    if request.get("op") == "wait_for" and os.path.exists(os.path.join(os.environ["HOME"], "slow-step")):
+        time.sleep(3)  # a long step of the agent's, during which the user may ask for what it has out of sight
     state = load()
     reply = {"ok": True}
     if request.get("vigil") and os.path.exists(os.path.join(os.environ["HOME"], "page-asleep")):

@@ -59,6 +59,13 @@ regexes = [
 ]
 
 [[rules.allowlists]]
+description = "Addresses in the reserved .test domain, which nobody can own, as test fixtures use them"
+regexTarget = "match"
+regexes = [
+  '''(?i)^[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)*test$''',
+]
+
+[[rules.allowlists]]
 description = "Compressed image, audio, and video bytes"
 paths = [
   '''(?i)\.(avif|bmp|gif|heic|jpe?g|m4v|mkv|mov|mp3|mp4|ogg|png|wav|webm|webp)$''',
@@ -82,15 +89,19 @@ regexes = [
 ]
 
 # ---------------------------------------------------------------------------
-# Global allowlist: local generated artifacts only. Benign privacy matches are
-# allowlisted on their own rules so they cannot suppress credential findings.
+# Global allowlist: local generated artifacts, and exact values that have the
+# shape of a credential and are none. Benign privacy matches are allowlisted on
+# their own rules so they cannot suppress credential findings.
 # ---------------------------------------------------------------------------
 [allowlist]
-description = "Local generated artifacts, and the public key that pins UCU's Chrome extension id"
+description = "Local generated artifacts, the public key that pins UCU's Chrome extension id, and the made-up secrets of the vault's tests"
 # The manifest's "key" is the extension's public key, which Chrome derives its id from: not a secret. Only this
 # exact value is allowed, so any other key-shaped value is still found.
 regexes = [
   '''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuCWBS2z2\+a3hnhKPrCDc\+\+Sh6cVRPIZsBTXiOFEG1mdbuTuR3RRK4FUrC9QbJcf67Alxl\+mBshBWFQagOuA4JOCpjee9FRmpVqqbDlA9MWbRfuFWJL80BPEizHX0Pfb9L\+pRmKfS3OYbeYB9WpMXkyAdcUe\+7pRA3HEIHnJo0HLVelFLg/AlRiaxao73U7dWcEAW53ZUxu0XhNJ5XxPH2/HLjp8L3XGqVxUUi7cNGmorhXUPasS5mLdP/kY8Np3QqKH2CgT72QBGvJUwk/ECYplz1QZ4OfbsldFvX3g7FTi\+wT4zvvdWBB83n/daYtLK4JpUA1HZLdoLuc6/kAJ7HQIDAQAB$''',
+  # What the vault's tests store, fill and paste: passwords and keys that open nothing. Each is allowed by its exact
+  # value, so a real key of the same shape is still found.
+  '''^(sk-proj-supersecret987654|sk-proj-rotated9999|sk_live_secretvalue999|sk-test-12345678|apple-passwords-touchid-secret|ultra-secret-password-42|typed-in-notch-pass-99|tok-native-99887766|pw-secret-12345|pw-work-22|pw-personal-11|my-secret-pw|gh-secret-99)$''',
 ]
 paths = [
   '''(^|/)target/''',

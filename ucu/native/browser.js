@@ -9,6 +9,7 @@
 // Allow JavaScript from Apple Events (Safari: Develop menu; Chrome: View > Developer), and every one needs Automation
 // access to the browser.
 ObjC.import("AppKit");
+ObjC.import("Foundation");
 
 const BLANK = /^(about:blank|favorites:|chrome:\/\/newtab)/;
 const MARK = "ucu-tab";  // where a page's session storage holds the mark of the chat whose tab it is in
@@ -45,8 +46,16 @@ const BROWSERS = {
 
 let B = null, browser = null;
 
+function readRequest(argv) {
+  if (argv[0] === "stdin") {
+    const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+    return JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)));
+  }
+  return JSON.parse(argv[0]);
+}
+
 function run(argv) {
-  const request = JSON.parse(argv[0]);
+  const request = readRequest(argv);
   try {
     B = BROWSERS[request.browser || "safari"];
     if (!B) throw new Error(`Unknown browser ${request.browser}`);
@@ -259,7 +268,9 @@ function usersWindows() {
 
 // While a chat's page is in a window of its own on the agent's desktop, Safari can put a link the user clicks in
 // another app there, as a tab beside it, where they would never see it. Such a tab goes to a window of theirs.
+// Once the user has brought that window to their screen, the tabs they open in it are where they want them.
 function handBack(win) {
+  if (onUsersScreen(win)) return;
   for (let index = win.tabs.length; index >= 2; index--) {
     const url = urlOf(win.tabs[index - 1]), theirs = usersWindows()[0];
     if (url && theirs) theirs.tabs.push(browser.Tab({ url }));
@@ -337,22 +348,95 @@ function describe(win, tab, index) {
   return { window_id: B.id(win), tab_index: index, url: urlOf(tab), title };
 }
 
-// Where a tab is after it went to a page. A page that asks for a password is one the user may have to sign in to,
-// which the agent hears, as they can't see its tab where it is. A sign-in form often comes after the page has loaded,
-// so a `wait` that came to nothing looks for one too.
+// Where a tab is after it went to a page. A page that asks for a password, saved-account quick login, OAuth sign-in
+// or passkey says so, so the agent tries on-screen saved sessions first and only uses Vault when a password is needed.
 function arrived(win, tab, index, done) {
   const at = Object.assign(describe(win, tab, index), { loaded: done });
-  if (asksPassword(tab)) at.password = true;
+  const hints = authHints(tab);
+  if (hints.password) at.password = true;
+  if (hints.passkey) at.passkey = true;
+  if (hints.oauth && hints.oauth.length) at.oauth = hints.oauth;
+  if (hints.quick_login && hints.quick_login.length) at.quick_login = hints.quick_login;
   return at;
 }
 
-function asksPassword(tab) {
+function authHints(tab) {
   try {
-    return js(tab, "(function(){return Array.prototype.some.call(document.querySelectorAll('input[type=password]'),"
-      + "function(e){return e.getClientRects().length>0})})()") === true;
+    return page(tab, function () {
+      const allDocs = function (root) {
+        const out = [root];
+        const frames = root.querySelectorAll ? root.querySelectorAll("iframe") : [];
+        for (let i = 0; i < frames.length; i++) {
+          try {
+            const d = frames[i].contentDocument;
+            if (d && out.indexOf(d) === -1) out.push.apply(out, allDocs(d));
+          } catch (e) {}
+        }
+        return out;
+      };
+      const queryAll = function (sel) {
+        const out = [];
+        const docs = allDocs(document);
+        for (let i = 0; i < docs.length; i++) {
+          const list = docs[i].querySelectorAll(sel);
+          for (let j = 0; j < list.length; j++) out.push(list[j]);
+        }
+        return out;
+      };
+      const visible = function (el) { return el && el.getClientRects().length > 0 && !el.disabled; };
+      const password = queryAll("input[type=password]").some(visible);
+      let passkey = false;
+      const oauth = [];
+      const quick_login = [];
+      const seen = {};
+      const seenQuick = {};
+      const buttons = queryAll("button,a,[role=button],[role=link],input[type=submit],input[type=button]");
+      for (let i = 0; i < buttons.length && i < 240; i++) {
+        const el = buttons[i];
+        if (!visible(el)) continue;
+        const text = (el.innerText || el.value || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+        if (!text || text.length > 80) continue;
+        if (!passkey && /\b(passkey|touch\s*id|security\s*key|webauthn)\b/i.test(text)) passkey = true;
+        const m = text.match(/\b(?:continue|sign\s*in|log\s*in)\s+with\s+(google|apple|github|microsoft)\b/i);
+        if (m) {
+          const provider = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+          if (!seen[provider] && oauth.length < 3) { seen[provider] = true; oauth.push(provider); }
+        }
+        if (/\b(?:continue|log\s*in|sign\s*in|proceed)\s+as\b/i.test(text)
+            || /\b(?:use\s+(?:saved|this)\s+account|saved\s+login)\b/i.test(text)) {
+          const short = text.slice(0, 48);
+          if (!seenQuick[short.toLowerCase()] && quick_login.length < 3) {
+            seenQuick[short.toLowerCase()] = true;
+            quick_login.push(short);
+          }
+        }
+      }
+      if (!passkey) {
+        const heading = [document.title || ""].concat(
+          queryAll("h1,h2,[role=heading]").map(function (h) { return h.innerText || ""; })
+        ).join(" ");
+        if (/\b(passkey|security\s*key|webauthn)\b/i.test(heading) || /\/(?:challenge\/pk|two-factor\/webauthn)\b/i.test(location.pathname)) {
+          passkey = true;
+        }
+      }
+      return { password, passkey, oauth, quick_login };
+    }, {});
   } catch (e) {
-    return false;  // a page that runs no script
+    return { password: false, passkey: false, oauth: [], quick_login: [] };  // a page that runs no script
   }
+}
+
+function bringBrowserToFront() {
+  try { browser.activate(); } catch (e) {}
+  try {
+    const bundleId = B === BROWSERS.chrome ? "com.google.Chrome" : "com.apple.Safari";
+    const list = $.NSRunningApplication.runningApplicationsWithBundleIdentifier($(bundleId));
+    if (list && list.count > 0) {
+      const running = list.objectAtIndex(0);
+      running.unhide;
+      running.activateWithOptions($.NSApplicationActivateAllWindows | $.NSApplicationActivateIgnoringOtherApps);
+    }
+  } catch (e) {}
 }
 
 const OPS = {
@@ -470,16 +554,58 @@ const OPS = {
     win.bounds = { x: area.origin.x + 40, y: full.size.height - area.origin.y - area.size.height + 40, width, height };
     win.visible = true;
     win.index = 1;
-    browser.activate();
+    bringBrowserToFront();
     return { shown: true };
+  },
+
+  // The user clicked the browser's Dock icon with no window of theirs before them. With nothing of a chat's out of
+  // their sight the browser would have brought one of theirs back, from the Dock or from another Space. That is
+  // done here, and the reply says whether they had one.
+  restore_users_window() {
+    const theirs = usersWindows()[0];
+    if (!theirs) return { restored: false };
+    if (B.minimized(theirs)) theirs.miniaturized = false;
+    theirs.index = 1;
+    bringBrowserToFront();
+    return { restored: true };
+  },
+
+  // The user asked for the browser while a chat's page was in a window of its own on the agent's desktop, where a
+  // click on the Dock icon gets them nothing: that window comes to their screen as `show_to_user` brings one. Its tab
+  // gets the chat's mark first, by which the chat finds it among the tabs the user opens beside it.
+  adopt(req) {
+    const { win, tab } = tabOf(req);
+    if (onUsersScreen(win)) throw new Error("That window is on the user's screen already.");
+    stamp(tab, req.mark);
+    OPS.show_to_user(req);
+    let origin = null;
+    try { origin = js(tab, "location.origin") || null; } catch (e) { /* a page that runs no script */ }
+    return { mark: req.mark, window_id: B.id(win), tab_index: req.tab_index, known: tabUrls(win), origin };
   },
 
   // Where a tab is and whether its window shows it now, which a screenshot of it needs.
   locate(req) {
     const { win, tab } = tabOf(req);
-    return Object.assign(describe(win, tab, req.tab_index), {
+    const out = Object.assign(describe(win, tab, req.tab_index), {
       current: B.currentIndex(win) === req.tab_index, visible: win.visible(), minimized: B.minimized(win),
       bounds: win.bounds() });
+    if (req.auth_hints) {
+      const hints = authHints(tab);
+      if (hints.quick_login && hints.quick_login.length) out.quick_login = hints.quick_login;
+      if (hints.oauth && hints.oauth.length) out.oauth = hints.oauth;
+      if (hints.passkey) out.passkey = true;
+      if (hints.password) out.password = true;
+      try {
+        const rawUrl = out.url || "";
+        const m = rawUrl.match(/[?&](?:app_domain|redirect_uri)=([^&]+)/i);
+        if (m) {
+          const decoded = decodeURIComponent(m[1]);
+          const hm = decoded.match(/^https?:\/\/([^/:?#]+)/i);
+          if (hm) out.oauth_target = hm[1].toLowerCase();
+        }
+      } catch (e) {}
+    }
+    return out;
   },
 
   // The user asked to see a chat's tab in their window: it becomes the tab in front, of the window and app in front.
@@ -488,7 +614,7 @@ const OPS = {
     if (B.minimized(win)) win.miniaturized = false;
     if (B.currentIndex(win) !== req.tab_index) B.select(win, tab, req.tab_index);
     win.index = 1;
-    browser.activate();
+    bringBrowserToFront();
     return { shown: true };
   },
 
@@ -660,6 +786,460 @@ const OPS = {
     }, { ref: req.ref || null, selector: req.selector || null, files: req.files.map((f) => ({ name: f.name, type: f.type })) });
   },
 
+  // Fill username and/or password blindly from UCU Vault. Enforces strict domain matching inside the live page
+  // and never echoes the password in its reply.
+  fill_login(req) {
+    const { win, tab } = tabOf(req);
+    return onScreen(win, page(tab, function (a) {
+      const host = (location.hostname || "").toLowerCase();
+      if (a.expected_domain) {
+        const want = a.expected_domain.toLowerCase();
+        if (host !== want && !host.endsWith("." + want)) {
+          throw new Error("Domain mismatch: tab is on " + host + ", expected " + want);
+        }
+      }
+      const allDocs = function (root) {
+        const out = [root];
+        const frames = root.querySelectorAll ? root.querySelectorAll("iframe") : [];
+        for (let i = 0; i < frames.length; i++) {
+          try {
+            const d = frames[i].contentDocument;
+            if (d && out.indexOf(d) === -1) out.push.apply(out, allDocs(d));
+          } catch (e) {}
+        }
+        return out;
+      };
+      const queryAll = function (sel, scope) {
+        if (scope && scope !== document) {
+          return Array.prototype.slice.call(scope.querySelectorAll(sel));
+        }
+        const out = [];
+        const docs = allDocs(document);
+        for (let i = 0; i < docs.length; i++) {
+          const list = docs[i].querySelectorAll(sel);
+          for (let j = 0; j < list.length; j++) out.push(list[j]);
+        }
+        return out;
+      };
+      const isVisible = function (el) {
+        if (!el || el.disabled || el.readOnly) return false;
+        const view = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+        const s = view.getComputedStyle(el);
+        return s.display !== "none" && s.visibility !== "hidden" && el.getClientRects().length > 0;
+      };
+      const putText = function (el, val) {
+        const doc = el.ownerDocument || document;
+        const view = doc.defaultView || window;
+        el.focus();
+        let ok = false;
+        try {
+          el.select();
+          ok = doc.execCommand("insertText", false, val) && String(el.value) === val;
+        } catch (e) {}
+        if (ok) {
+          el.dispatchEvent(new view.Event("change", { bubbles: true }));
+        } else {
+          const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+          setter.call(el, val);
+          el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: val, inputType: "insertText" }));
+          el.dispatchEvent(new view.Event("change", { bubbles: true }));
+        }
+      };
+
+      const pwdEl = a.password_selector
+        ? queryAll(a.password_selector)[0]
+        : queryAll("input[type=password]").find(isVisible);
+
+      let userEl = a.username_selector ? queryAll(a.username_selector)[0] : null;
+      if (!userEl && a.username) {
+        const scope = (pwdEl && pwdEl.form) || document;
+        const candidates = queryAll(
+          "input:not([type=password]):not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])",
+          scope
+        ).filter(isVisible);
+        const score = function (el) {
+          const hint = [el.type, el.autocomplete, el.name, el.id, el.placeholder, el.getAttribute("aria-label")].join(" ").toLowerCase();
+          if (el.type === "email" || /username|email|login|identifier/.test(hint)) return 3;
+          if (/user|account|phone/.test(hint)) return 2;
+          return el.type === "text" || !el.type ? 1 : 0;
+        };
+        candidates.sort(function (x, y) { return score(y) - score(x); });
+        userEl = candidates.find(function (el) { return score(el) > 0; }) || null;
+      }
+
+      const filled = [];
+      let lastEl = null;
+      if (a.username && userEl) {
+        putText(userEl, a.username);
+        filled.push("username");
+        lastEl = userEl;
+      }
+      if (a.password && pwdEl) {
+        putText(pwdEl, a.password);
+        filled.push("password");
+        lastEl = pwdEl;
+      }
+      if (!filled.length) {
+        throw new Error("No visible login fields found on " + host);
+      }
+
+      let submitted = false;
+      if (a.submit && lastEl) {
+        const doc = lastEl.ownerDocument || document;
+        const view = doc.defaultView || window;
+        const form = lastEl.form;
+        const nextBtn = Array.prototype.find.call(
+          doc.querySelectorAll("button,[role=button],input[type=submit]"),
+          function (el) {
+            if (!isVisible(el)) return false;
+            const t = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim();
+            return /^(next|continue|sign\s*in|log\s*in|submit|verify)$/i.test(t);
+          }
+        );
+        const formBtn = form && Array.prototype.find.call(
+          form.querySelectorAll("button[type=submit],input[type=submit],button:not([type=button])"),
+          isVisible
+        );
+        const btn = formBtn || nextBtn;
+        if (btn) {
+          btn.click();
+          submitted = true;
+        } else if (form) {
+          form.requestSubmit ? form.requestSubmit() : form.submit();
+          submitted = true;
+        } else {
+          const key = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
+          lastEl.dispatchEvent(new view.KeyboardEvent("keydown", key));
+          lastEl.dispatchEvent(new view.KeyboardEvent("keyup", key));
+          submitted = true;
+        }
+      }
+      const r = lastEl.getBoundingClientRect();
+      const spot = document.visibilityState !== "visible" ? null
+        : [Math.max(0, window.outerWidth - window.innerWidth) + r.x + r.width / 2,
+           window.outerHeight - window.innerHeight + r.y + r.height / 2];
+      return {
+        filled,
+        submitted,
+        host,
+        needs_next_step: !!a.password && !pwdEl,
+        spot,
+      };
+    }, {
+      username: req.username || "",
+      password: req.password || "",
+      expected_domain: req.expected_domain || null,
+      username_selector: req.username_selector || null,
+      password_selector: req.password_selector || null,
+      submit: req.submit !== false,
+    }));
+  },
+
+  // Inject a secret (API key, token, OTP) blindly into a targeted field without echoing its value.
+  type_secret(req) {
+    const { win, tab } = tabOf(req);
+    return onScreen(win, page(tab, function (a) {
+      const host = (location.hostname || "").toLowerCase();
+      if (a.expected_domain) {
+        const want = a.expected_domain.toLowerCase();
+        if (host !== want && !host.endsWith("." + want)) {
+          throw new Error("Domain mismatch: tab is on " + host + ", expected " + want);
+        }
+      }
+      const el = a.ref ? document.querySelector(`[data-ucu-ref="${a.ref}"]`) : document.querySelector(a.selector);
+      if (!el) throw new Error("No element found for " + (a.ref || a.selector));
+      el.focus();
+      let inserted = false;
+      if (a.clear && a.secret && !(el instanceof HTMLSelectElement)) {
+        try {
+          if (el.isContentEditable) getSelection().selectAllChildren(el);
+          else el.select();
+          inserted = document.execCommand("insertText", false, a.secret)
+            && (el.isContentEditable ? el.textContent : String(el.value)) === a.secret;
+        } catch (e) {}
+      }
+      if (inserted) {
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (el.isContentEditable) {
+        if (a.clear) el.textContent = "";
+        el.textContent += a.secret;
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: a.secret, inputType: "insertText" }));
+      } else {
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+        setter.call(el, (a.clear ? "" : el.value) + a.secret);
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: a.secret, inputType: "insertText" }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (a.submit) {
+        const key = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
+        const proceed = el.dispatchEvent(new KeyboardEvent("keydown", key));
+        el.dispatchEvent(new KeyboardEvent("keyup", key));
+        if (proceed && el.form) { el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit(); }
+      }
+      const r = el.getBoundingClientRect();
+      const spot = document.visibilityState !== "visible" ? null
+        : [Math.max(0, window.outerWidth - window.innerWidth) + r.x + r.width / 2,
+           window.outerHeight - window.innerHeight + r.y + r.height / 2];
+      return { typed: a.secret.length, host, spot };
+    }, {
+      ref: req.ref || null,
+      selector: req.selector || null,
+      secret: req.secret || "",
+      expected_domain: req.expected_domain || null,
+      clear: req.clear !== false,
+      submit: !!req.submit,
+    }));
+  },
+
+  // Blindly read a newly generated API key/secret from an element or by intercepting a Copy button's
+  // navigator.clipboard.writeText call (never touching the user's real macOS clipboard).
+  capture_secret(req) {
+    const { tab } = tabOf(req);
+    if (req.click_ref || req.click_selector) {
+      const targetExpr = req.click_ref
+        ? `document.querySelector('[data-ucu-ref=' + ${literal(req.click_ref)} + ']')`
+        : `document.querySelector(${literal(req.click_selector)})`;
+      const script = `
+        var el = ${targetExpr};
+        if (!el) throw new Error("No copy button found for " + ${literal(req.click_ref || req.click_selector)});
+        var captured = null;
+        var origWrite = navigator.clipboard && navigator.clipboard.writeText
+          ? navigator.clipboard.writeText.bind(navigator.clipboard) : null;
+        var onCopy = function(ev) {
+          try {
+            var sel = window.getSelection ? String(window.getSelection()) : "";
+            if (sel && !captured) captured = sel;
+          } catch (e) {}
+        };
+        document.addEventListener("copy", onCopy, true);
+        if (navigator.clipboard) {
+          try {
+            Object.defineProperty(navigator.clipboard, "writeText", {
+              configurable: true,
+              value: function(text) { captured = String(text || ""); return Promise.resolve(); }
+            });
+          } catch (e) {
+            try { navigator.clipboard.writeText = function(text) { captured = String(text || ""); return Promise.resolve(); }; } catch (e2) {}
+          }
+        }
+        try {
+          el.click();
+          for (var i = 0; i < 30 && !captured; i++) {
+            await new Promise(function(r) { setTimeout(r, 50); });
+          }
+        } finally {
+          document.removeEventListener("copy", onCopy, true);
+          if (navigator.clipboard && origWrite) {
+            try { Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: origWrite }); }
+            catch (e) { try { navigator.clipboard.writeText = origWrite; } catch (e2) {} }
+          }
+        }
+        if (!captured || !captured.trim()) throw new Error("Clicking that button did not copy a secret via clipboard.");
+        return { secret: captured.trim(), host: (location.hostname || "").toLowerCase(), source: "clipboard_intercept" };
+      `;
+      return awaited(tab, script, 5);
+    }
+    return page(tab, function (a) {
+      let el = null;
+      if (a.ref) el = document.querySelector(`[data-ucu-ref="${a.ref}"]`);
+      else if (a.selector) el = document.querySelector(a.selector);
+      else {
+        const candidates = document.querySelectorAll("input[readonly],textarea[readonly],code,pre");
+        for (const c of candidates) {
+          if (!c.getClientRects().length) continue;
+          const v = (c.value !== undefined ? String(c.value) : String(c.innerText || c.textContent || "")).trim();
+          if (v.length >= 16 && v.length <= 512 && !/\s/.test(v)) { el = c; break; }
+        }
+      }
+      if (!el) throw new Error("No secret element found for " + (a.ref || a.selector || "auto-detect"));
+      const raw = (el.value !== undefined && el.value !== "" ? String(el.value) : String(el.innerText || el.textContent || "")).trim();
+      if (!raw) throw new Error("That element is empty.");
+      return { secret: raw, host: (location.hostname || "").toLowerCase(), source: el.tagName.toLowerCase() };
+    }, { ref: req.ref || null, selector: req.selector || null });
+  },
+
+  // Click a remembered or chosen sign-in option on the page: OAuth provider (e.g. Google), Passkey,
+  // saved-session quick login ("Continue as ..."), or a matching account tile on an account chooser.
+  click_auth_option(req) {
+    const { win, tab } = tabOf(req);
+    return onScreen(win, page(tab, function (a) {
+      const allDocs = function (root) {
+        const out = [root];
+        const frames = root.querySelectorAll ? root.querySelectorAll("iframe") : [];
+        for (let i = 0; i < frames.length; i++) {
+          try {
+            const d = frames[i].contentDocument;
+            if (d && out.indexOf(d) === -1) out.push.apply(out, allDocs(d));
+          } catch (e) {}
+        }
+        return out;
+      };
+      const visible = function (el) {
+        if (!el || el.disabled) return false;
+        const view = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+        const s = view.getComputedStyle(el);
+        return s.display !== "none" && s.visibility !== "hidden" && el.getClientRects().length > 0;
+      };
+      const items = [];
+      const docs = allDocs(document);
+      for (let i = 0; i < docs.length; i++) {
+        const found = docs[i].querySelectorAll("button,a,[role=button],[role=link],input[type=submit],input[type=button],[data-identifier],[data-email],li");
+        for (let j = 0; j < found.length; j++) {
+          if (visible(found[j])) items.push(found[j]);
+        }
+      }
+      const labelOf = function (el) {
+        return (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("data-identifier") || el.getAttribute("data-email") || "").replace(/\s+/g, " ").trim();
+      };
+      let target = null;
+      if (a.method === "oauth" && a.provider) {
+        const prov = a.provider.toLowerCase();
+        target = items.find(function (el) {
+          const t = labelOf(el).toLowerCase();
+          return t.length <= 80 && t.includes(prov) && /(continue|sign\s*in|log\s*in|with)/.test(t);
+        }) || items.find(function (el) {
+          const t = labelOf(el).toLowerCase();
+          return t.length <= 40 && t.includes(prov);
+        });
+      } else if (a.method === "passkey") {
+        target = items.find(function (el) {
+          const t = labelOf(el).toLowerCase();
+          return t.length <= 80 && /\b(passkey|touch\s*id|security\s*key|webauthn)\b/.test(t);
+        }) || items.find(function (el) {
+          const t = labelOf(el).toLowerCase();
+          return /^(continue|verify|try\s+again|authenticate)$/.test(t);
+        });
+      } else if (a.method === "quick_login" && a.label) {
+        const want = a.label.toLowerCase();
+        target = items.find(function (el) { return labelOf(el).toLowerCase() === want; })
+          || items.find(function (el) { return labelOf(el).toLowerCase().includes(want); });
+      } else if (a.method === "account" && a.account) {
+        const want = a.account.toLowerCase();
+        target = items.find(function (el) {
+          const t = labelOf(el).toLowerCase();
+          return t.length <= 140 && t.includes(want);
+        });
+      }
+      if (!target) {
+        throw new Error("No matching sign-in button found for " + JSON.stringify({ method: a.method, provider: a.provider, label: a.label, account: a.account }));
+      }
+      target.scrollIntoView({ block: "center", behavior: "instant" });
+      const view = (target.ownerDocument && target.ownerDocument.defaultView) || window;
+      try { view.focus(); target.focus(); } catch (e) {}
+      const r = target.getBoundingClientRect();
+      const at = { bubbles: true, cancelable: true, view: view, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+      // A click made here is one the page can tell from the user's, and a passkey sheet opens for the user's only.
+      // With `real` the button is only found: ucu presses it where it is on the screen.
+      for (const type of a.real ? [] : ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+        target.dispatchEvent(type.startsWith("pointer") ? new view.PointerEvent(type, at) : new view.MouseEvent(type, at));
+      }
+      if (!a.real) target.click();
+      // Where that is in the window. A button in a frame is where its frame is, plus where it is in the frame.
+      let left = r.x + r.width / 2, top = r.y + r.height / 2;
+      for (let frame = view.frameElement; frame; frame = frame.ownerDocument.defaultView.frameElement) {
+        const box = frame.getBoundingClientRect();
+        left += box.x + frame.clientLeft;
+        top += box.y + frame.clientTop;
+      }
+      const spot = document.visibilityState !== "visible" ? null
+        : [Math.max(0, window.outerWidth - window.innerWidth) + left, window.outerHeight - window.innerHeight + top];
+      return { clicked: labelOf(target).slice(0, 80), method: a.method, host: (location.hostname || "").toLowerCase(), spot };
+    }, {
+      method: req.method || null,
+      provider: req.provider || null,
+      label: req.label || null,
+      account: req.account || null,
+      real: !!req.real,
+    }));
+  },
+
+  // Focus the login field so Safari/Chrome's native Apple Passwords AutoFill offers the matching account with Touch ID,
+  // then blindly capture the filled username + password as soon as AutoFill populates them (never echoing to LLM).
+  watch_login_autofill(req) {
+    const { tab } = tabOf(req);
+    const waitSec = Math.min(Number(req.timeout_seconds) || 40, EVAL_WAIT);
+    const script = `
+      var allDocs = function(root) {
+        var out = [root];
+        var frames = root.querySelectorAll ? root.querySelectorAll("iframe") : [];
+        for (var i = 0; i < frames.length; i++) {
+          try {
+            var d = frames[i].contentDocument;
+            if (d && out.indexOf(d) === -1) out.push.apply(out, allDocs(d));
+          } catch (e) {}
+        }
+        return out;
+      };
+      var queryAll = function(sel, scope) {
+        if (scope && scope !== document) return Array.prototype.slice.call(scope.querySelectorAll(sel));
+        var out = [], docs = allDocs(document);
+        for (var i = 0; i < docs.length; i++) {
+          var list = docs[i].querySelectorAll(sel);
+          for (var j = 0; j < list.length; j++) out.push(list[j]);
+        }
+        return out;
+      };
+      var isVisible = function(el) {
+        if (!el || el.disabled || el.readOnly) return false;
+        var view = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+        var s = view.getComputedStyle(el);
+        return s.display !== "none" && s.visibility !== "hidden" && el.getClientRects().length > 0;
+      };
+      var findFields = function() {
+        var pwd = queryAll("input[type=password]").find(isVisible) || null;
+        var scope = (pwd && pwd.form) || document;
+        var inputs = queryAll(
+          "input:not([type=password]):not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])",
+          scope
+        ).filter(isVisible);
+        var score = function(el) {
+          var hint = [el.type, el.autocomplete, el.name, el.id, el.placeholder, el.getAttribute("aria-label")].join(" ").toLowerCase();
+          if (el.type === "email" || /username|email|login|identifier/.test(hint)) return 3;
+          if (/user|account|phone/.test(hint)) return 2;
+          return el.type === "text" || !el.type ? 1 : 0;
+        };
+        inputs.sort(function(a, b) { return score(b) - score(a); });
+        var user = inputs.find(function(el) { return score(el) > 0; }) || null;
+        return { user: user, pwd: pwd };
+      };
+      var initial = findFields();
+      var startPwd = initial.pwd ? String(initial.pwd.value || "") : "";
+      var focusTarget = (initial.user && !initial.user.value) ? initial.user : (initial.pwd || initial.user);
+      if (focusTarget) {
+        try { focusTarget.scrollIntoView({ block: "center", behavior: "instant" }); focusTarget.focus(); focusTarget.click(); } catch (e) {}
+      }
+      var captured = null;
+      var grab = function() {
+        var f = findFields();
+        var u = f.user ? String(f.user.value || "").trim() : "";
+        var p = f.pwd ? String(f.pwd.value || "") : "";
+        if (p && p !== startPwd && p.length >= 4) {
+          captured = { username: u, password: p, host: (location.hostname || "").toLowerCase() };
+        }
+      };
+      var onSubmit = function() { grab(); };
+      document.addEventListener("submit", onSubmit, true);
+      document.addEventListener("input", grab, true);
+      document.addEventListener("change", grab, true);
+      try {
+        var deadline = Date.now() + ${Math.floor(waitSec * 1000)};
+        while (Date.now() < deadline && !captured) {
+          grab();
+          if (captured) break;
+          await new Promise(function(r) { setTimeout(r, 120); });
+        }
+      } finally {
+        document.removeEventListener("submit", onSubmit, true);
+        document.removeEventListener("input", grab, true);
+        document.removeEventListener("change", grab, true);
+      }
+      if (!captured) return { captured: false, host: (location.hostname || "").toLowerCase() };
+      return Object.assign({ captured: true }, captured);
+    `;
+    return awaited(tab, script, waitSec);
+  },
+
   wait_for(req) {
     const { tab } = tabOf(req);
     const deadline = Date.now() + (req.timeout_seconds || 10) * 1000;
@@ -673,7 +1253,13 @@ const OPS = {
       } catch (e) { /* navigating */ }
       delay(0.2);
     }
-    return asksPassword(tab) ? { found: false, password: true } : { found: false };
+    const hints = authHints(tab);
+    const out = { found: false };
+    if (hints.password) out.password = true;
+    if (hints.passkey) out.passkey = true;
+    if (hints.oauth && hints.oauth.length) out.oauth = hints.oauth;
+    if (hints.quick_login && hints.quick_login.length) out.quick_login = hints.quick_login;
+    return out;
   },
 };
 

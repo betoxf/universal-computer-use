@@ -63,6 +63,7 @@ import threading
 import time
 import traceback
 import unicodedata
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -112,6 +113,30 @@ ASK_LIMIT = 120       # characters of what an agent asks of the user that show o
 FRONT_LOCK = Path.home() / "Library/Application Support/ucu/front.lock"  # held by the chat whose app is in front
 FRONT_TAKEN = "Another agent's steps have the front of the user's screen right now. Try again in a moment."
 BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
+TOUCH_OPEN = 3        # seconds a sheet has to open after the press: Safari took 0.35 to 0.7
+TOUCH_LIMIT = 90      # seconds the user has to touch before the sheet is cancelled
+TOUCH_TRIES = 2       # presses, when the user did something just as the first was made
+TOUCH_READY = "Sign in to {}"      # what the notch says while the finger is read,
+TOUCH_PAUSE = "Pause, then touch"  # and while the user types or moves the pointer, when it isn't
+TOUCH_TAKEN = "Done"               # and once the sheet took the touch, for a notch app from before it said so itself
+TOUCH_BUSY = ("The user went on working in {} for {} seconds while the notch asked them to pause, and the passkey sheet "
+              "opens only in a pause of theirs: their keyboard goes to it for a moment. Nothing was pressed. Say in "
+              "the chat what you need, or try again in a while.")
+NO_TOUCH = ("This Mac's ucu-window can't hold a passkey sheet for the user's touch: it is older than this server. "
+            "`ucu update` builds one that can. Until then `show` them the tab and ask them to sign in there.")
+TOUCH_FAILED = "{} couldn't take the user's touch out of their sight ({}). `show` them the tab and ask them there."
+TOUCH_CLOSED = ("The passkey sheet opened where the user doesn't see it, the notch asked them for their touch, and "
+                "the sheet took it and closed. Read the page to see where the sign-in went.")
+TOUCH_REFUSED = ("The passkey sheet opened where the user doesn't see it and closed without taking a touch: it was "
+                 "cancelled, or the sign-in was refused. Read the page to see what it says.")
+TOUCH_NONE = ("The page's passkey button was pressed as a user would press it, and no sheet opened. The page may "
+              "need another step first, or offer the passkey elsewhere: read it.")
+TOUCH_TIMEOUT = ("The notch asked the user for their touch for {} seconds and they didn't give it, so nothing was "
+                 "signed in. {} Say in the chat what you need, or try again when they are there.")
+TOUCH_SHOWN = ("A passkey sheet is held out of the user's sight only in Safari, on your private desktop, which is "
+               "what was measured to work. So your tab is in front of the user with the passkey button pressed: "
+               "they touch there. Wait for them, then go on.")
+TOUCH_ASK = "Touch ID to sign in to {}"
 USER_BUSY = ("The user is working in {}, and these steps take their pointer, and may bring {} to the front. Do what "
              "can be done behind, try again in a while, or ask them.")
 USER_TYPED = ("The user started typing while {} was in front for your steps, so the rest of them were not made, and "
@@ -145,8 +170,27 @@ DONE_NOTE = "[ucu: The user clicked Done on what you asked of them in {}. Go on 
 TRY_FRONT_NOTE = "If the picture shows no change either, the app may take input only in front: pass `front: true`."
 UNREAD_NOTE = ("That is what can be read of it: a click by xy may have changed its picture, which `look` with "
                "screenshot shows.")
-SIGN_IN_NOTE = ("This page asks for a password. If the user has to sign in, `show` them this tab, with `text` saying "
-                "what to do, and leave it open: they can't see it where it is.")
+SIGN_IN_NOTE = ("This page has a password field. Read it first: if a saved account, \"Continue as…\" or another "
+                "one-click sign-in is there, click that yourself. Only if a password is truly required, call `vault` "
+                "(op: \"fill\"), which fills a saved login or asks the user at the notch, or `show` them this tab, with "
+                "`text` saying what to do, and leave it open: they can't see it where it is.")
+QUICK_LOGIN_NOTE = ("[ucu: This page already has a saved account / one-click sign-in on screen ({}). Try clicking it "
+                    "yourself first instead of asking the user for a password—only call `vault` (op: \"fill\") if a "
+                    "password is still needed afterwards.]")
+OAUTH_NOTE = ("[ucu: This page offers Sign in with {}. Call `ask_user` before clicking it so the user can approve "
+              "from the notch without switching apps.]")
+PASSKEY_HINT_NOTE = ("[ucu: This page offers sign-in with a passkey. A click of yours opens no sheet: call `vault` "
+                     "(op: \"fill\") on it, which presses the button as a user would on your private desktop, and "
+                     "the notch asks the user for their touch.]")
+AUTH_PROMPT_NOTE = ("[ucu: macOS is asking for Touch ID or a password ({}), and the notch says so. Whether the user "
+                    "can answer it from where they are hasn't been measured: if nothing happens, `show` them the "
+                    "window.]")
+ISLAND_HELPER = Path.home() / ".local/bin/ucu-island"
+ISLAND_SOCKET = Path.home() / "Library/Application Support/ucu/island.sock"
+VAULT_FILE = Path.home() / "Library/Application Support/ucu/vault.enc"
+ISLAND_TIMEOUT = 180
+ISLAND_START_WAIT = 3.0
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SAFARI_TIMEOUT = 45   # seconds; a page showing a dialog blocks every script until it is answered
 SAFARI_PAINT = 0.45   # seconds Safari takes to paint a page that has been hidden
 ALERT_NOTE = ("[ucu: {} played an alert sound during your last actions, which usually means it rejected an input. "
@@ -198,6 +242,19 @@ other work and try again, or ask them.
 to sign in (focus_window with activate, or `show` in the browser tools): they can't see your windows, so do it \
 before you ask them, and say what you need with `ask` or `text`, which shows on the window until they are done. \
 Never use the clipboard, which is theirs.
+- Be adaptive and try what is already on screen first: before stopping or asking the user for a password, read the \
+page and try any saved session, "Continue as…", "Continue", "Accept", or already-signed-in account button on the \
+site the user asked you to use. Only call `vault` (op: "fill") to prompt the user when no on-screen one-click \
+sign-in works and a password is truly needed.
+- For sensitive clicks (such as "Continue with Google", creating an API key, or risky submits), call `ask_user` \
+first: it drops a quiet prompt at the MacBook notch so the user can approve without switching apps and you keep \
+working without stopping your turn. For a passkey, call `vault` (op: "fill") on the page instead: ucu presses its \
+passkey button out of the user's sight, and the notch asks for their touch only while the sheet is really open.
+- For logins, passwords, API keys and tokens, use `vault` so raw secrets never enter chat: `vault` (op: "fill") \
+autofills saved logins autonomously on matching domains or asks the user right in the notch (with "Remember for \
+future times"); `vault` (op: "capture") reads a newly created API key blindly (or intercepts a Copy button without \
+touching the user's clipboard) and returns only an id; `vault` (op: "paste") puts that id into a browser field, a \
+native app field, or a `.env` file.
 - ucu opens a closed app out of the user's sight. Never use `open`, AppleScript or System Events on apps.
 - For Safari and Chrome, use the `safari` and `chrome` tools: they work in tabs of your own while the user is in \
 theirs. Put what belongs together in one call's `steps`.
@@ -292,6 +349,46 @@ WINDOW_TOOLS.append(
                     "popup, open chrome-extension://<id>/<its page> in your tab: a popup closes once Chrome loses "
                     "focus.",
      "inputSchema": WINDOW_TOOLS[-1]["inputSchema"]})
+WINDOW_TOOLS.extend([
+    {"name": "ask_user",
+     "description": "Ask at the MacBook notch without stealing focus or stopping your turn (e.g. \"Continue with "
+                    "Google\" or creating an API key). `kind`: `approve` (default, Approve/Show/Deny), `passkey` "
+                    "(with `browser`: presses the page's passkey button out of the user's sight and waits for their "
+                    "touch), or `touch_id`. Pass `browser` or `app`+`window` for Show; `remember_key` offers session "
+                    "remember.",
+     "inputSchema": {"type": "object", "required": ["title"], "properties": {
+         "title": {"type": "string"}, "detail": {"type": "string"},
+         "kind": {"enum": ["approve", "passkey", "touch_id"]}, "active": {"type": "boolean"},
+         "browser": {"enum": ["safari", "chrome"]}, "app": {"type": "string"}, "window": {"type": "string"},
+         "domain": {"type": "string"}, "touch_id": {"type": "boolean"},
+         "remember_key": {"type": "string"}, "global_key": {"type": "string"}, "timeout_seconds": {"type": "number"}}}},
+    {"name": "vault",
+     "description": "Encrypted Keychain vault; raw secrets never enter chat. `list` (metadata only); `fill` (autofills "
+                    "saved login on matching domain or prompts in notch with Remember; `browser` or `app`); `request` "
+                    "(notch entry); `capture` (`from`: safari/chrome/app, `label`; `ref`/`selector` or `click_ref`/"
+                    "`click_selector` intercepts Copy without touching clipboard, returns id+preview); `paste` (`id`, "
+                    "`to`: safari/chrome/app/env_file with `ref`/`selector`, `on`/`name`, or `path`+`key`); `delete` (`id`).",
+     "inputSchema": {"type": "object", "required": ["op"], "properties": {
+         "op": {"enum": ["list", "fill", "request", "capture", "paste", "delete"]},
+         "id": {"type": "string"}, "kind": {"enum": ["login", "api_key", "secret", "otp"]},
+         "label": {"type": "string"}, "domain": {"type": "string"},
+         "domains": {"type": "array", "items": {"type": "string"}},
+         "browser": {"enum": ["safari", "chrome"]}, "from": {"enum": ["safari", "chrome", "app"]},
+         "to": {"enum": ["safari", "chrome", "app", "env_file"]},
+         "app": {"type": "string"}, "window": {"type": "string"},
+         "window_id": {"type": "integer"}, "tab_index": {"type": "integer"},
+         "ref": {"type": "string"}, "selector": {"type": "string"},
+         "click_ref": {"type": "string"}, "click_selector": {"type": "string"},
+         "username_selector": {"type": "string"}, "password_selector": {"type": "string"},
+         "username_hint": {"type": "string"}, "account": {"type": "string"}, "on": {"type": "integer"},
+         "username_on": {"type": "integer"}, "password_on": {"type": "integer"},
+         "name": {"type": "string"}, "mode": {"enum": ["set-value", "type"]},
+         "path": {"type": "string"}, "key": {"type": "string"},
+         "clear": {"type": "boolean"}, "submit": {"type": "boolean"},
+         "remember": {"type": "boolean"}, "prompt_if_missing": {"type": "boolean"},
+         "force_prompt": {"type": "boolean"}, "reason": {"type": "string"}, "allow_user_tab": {"type": "boolean"},
+         "allow_current_tab": {"type": "boolean"}, "timeout_seconds": {"type": "number"}}}},
+])
 LOCAL_TOOLS = {tool["name"]: tool for tool in WINDOW_TOOLS}
 POLICY_SUMMARY = """# Computer Use confirmations (ucu's summary)
 
@@ -316,11 +413,293 @@ def app_key(name):
     return "".join(c for c in str(name) if unicodedata.category(c) != "Cf").strip().casefold()
 
 
-def sign_in_note(result, note):
-    """Add to a step's note that its page asks for a password, which browser.js says of a page a tab went to."""
-    if isinstance(result, dict) and result.pop("password", None):
-        return f"{note}\n{SIGN_IN_NOTE}" if note else SIGN_IN_NOTE
-    return note
+def host_of(url):
+    """Lowercase hostname of a URL or bare host, or None."""
+    if not url:
+        return None
+    raw = str(url).strip()
+    if not raw:
+        return None
+    parsed = urllib.parse.urlparse(raw if "://" in raw else f"https://{raw}")
+    return (parsed.hostname or "").strip(".").lower() or None
+
+
+def sign_in_note(result, note, island=None):
+    """Add adaptive auth hints (per-site remembered OAuth/Passkey/password, quick_login, OAuth, passkey)."""
+    if not isinstance(result, dict):
+        return note
+    extra = []
+    quick = result.pop("quick_login", None) or []
+    has_password = bool(result.pop("password", None))
+    oauth = result.pop("oauth", None) or []
+    has_passkey = bool(result.pop("passkey", None))
+    host = host_of(result.get("url"))
+
+    if not (quick or has_password or oauth or has_passkey):
+        return note
+
+    plan = island.auth_plan(host, oauth=oauth, passkey=has_passkey, quick_login=quick) if (island and host) else None
+    action = (plan or {}).get("action")
+
+    if action == "oauth" and plan.get("auto"):
+        prov = plan.get("provider") or "OAuth"
+        acct = f" ({plan['account']})" if plan.get("account") else ""
+        extra.append(
+            f"[ucu: UCU knows you sign in to {host} with {prov}{acct} ({plan.get('source', 'saved')}). "
+            f"Call `vault` (op: \"fill\") to click Sign in with {prov} automatically without interrupting the user.]"
+        )
+    elif action == "passkey" and plan.get("auto"):
+        extra.append(
+            f"[ucu: UCU remembers you use Passkey on {host}. Call `vault` (op: \"fill\") to trigger Passkey "
+            "automatically (the notch will show Touch ID).]"
+        )
+    elif action == "password" and plan.get("entry"):
+        first = plan["entry"]
+        user = f", user {quoted(first['username'])}" if first.get("username") else ""
+        extra.append(
+            f"This page asks for a password. UCU Vault has a saved login for {host} (id {quoted(first['id'])}"
+            f"{user}): call `vault` (op: \"fill\") to fill it in the background without interrupting the user, "
+            "or `show` them this tab first if they need to act directly."
+        )
+    elif quick:
+        opts = ", ".join(quoted(str(q)) for q in quick)
+        extra.append(QUICK_LOGIN_NOTE.format(opts))
+    elif has_password:
+        saved = island.saved_logins(host) if (island and host) else []
+        if saved:
+            first = saved[0]
+            user = f", user {quoted(first['username'])}" if first.get("username") else ""
+            extra.append(
+                f"This page asks for a password. UCU Vault has a saved login for {host} (id {quoted(first['id'])}"
+                f"{user}): call `vault` (op: \"fill\") to fill it in the background without interrupting the user, "
+                "or `show` them this tab first if they need to act directly."
+            )
+        else:
+            extra.append(SIGN_IN_NOTE)
+
+    if oauth and action != "oauth":
+        extra.append(OAUTH_NOTE.format(" / ".join(str(p) for p in oauth)))
+    if has_passkey and action != "passkey":
+        extra.append(PASSKEY_HINT_NOTE)
+    if not extra:
+        return note
+    joined = "\n".join(extra)
+    return f"{note}\n{joined}" if note else joined
+
+
+def validate_env_target(path_str, key):
+    """Check that `path_str` is a safe absolute `.env` path and `key` is a valid env var name."""
+    if not key or not ENV_KEY_RE.match(str(key)):
+        raise ToolError("Pass a valid env var `key` such as OPENAI_API_KEY.")
+    if not path_str:
+        raise ToolError("Pass `path`, an absolute path to a `.env` file.")
+    target = Path(str(path_str)).expanduser()
+    if not target.is_absolute():
+        raise ToolError(f"{path_str} is not an absolute path.")
+    name = target.name
+    if not (name == ".env" or name.startswith(".env.") or name.endswith(".env")):
+        raise ToolError(f"Refusing to write a secret into {name}: only `.env` files are allowed.")
+    resolved = target.resolve(strict=False)
+    forbidden = ("/System", "/Library", "/etc", "/private/etc", "/usr", "/bin", "/sbin",
+                 str((Path.home() / ".ssh").resolve(strict=False)))
+    if any(str(resolved) == root or str(resolved).startswith(root + "/") for root in forbidden):
+        raise ToolError(f"Refusing to write to protected path {resolved}.")
+    if target.exists() and target.is_dir():
+        raise ToolError(f"{target} is a directory.")
+    return target, resolved
+
+
+def write_env_secret(path_str, key, secret):
+    """Atomically add or update KEY=VALUE in a local .env file without echoing the secret."""
+    target, _resolved = validate_env_target(path_str, key)
+
+    raw = str(secret)
+    if raw == "" or any(ch in raw for ch in (' ', '\t', '"', "'", '#', '$', '\n', '\r', '`', '\\')):
+        escaped = (raw.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+                   .replace("\n", "\\n").replace("\r", "\\r"))
+        formatted = f'{key}="{escaped}"'
+    else:
+        formatted = f"{key}={raw}"
+
+    line_re = re.compile(rf"^(\s*(?:export\s+)?){re.escape(key)}\s*=")
+    lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+    replaced = False
+    new_lines = []
+    for line in lines:
+        match = line_re.match(line)
+        if match and not replaced:
+            new_lines.append(f"{match.group(1)}{formatted}")
+            replaced = True
+        else:
+            new_lines.append(line)
+    if not replaced:
+        new_lines.append(formatted)
+    body = "\n".join(new_lines) + "\n"
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.ucu-tmp-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, target)
+    return "updated" if replaced else "added"
+
+
+class IslandClient:
+    """Talks to the shared `ucu-island` Notch UI & encrypted vault daemon over island.sock."""
+
+    def __init__(self, who, color, identity=None):
+        self.who = who
+        self.color = color
+        self.identity = identity or (lambda: {})
+        self.lock = threading.Lock()
+        self.may_have_secrets = None
+        self.banners, self.sending = collections.deque(), threading.Lock()
+
+    def _connect_and_send(self, payload, timeout):
+        with socket.socket(socket.AF_UNIX) as link:
+            link.settimeout(timeout)
+            link.connect(str(ISLAND_SOCKET))
+            link.sendall(encode(payload))
+            raw = link.makefile().readline()
+        if not raw:
+            raise RuntimeError("ucu-island closed the connection without replying.")
+        return json.loads(raw)
+
+    def ensure_started(self):
+        if ISLAND_SOCKET.exists():
+            try:
+                self._connect_and_send({"op": "ping"}, 1.5)
+                return True
+            except (OSError, ValueError, RuntimeError):
+                pass
+        if not ISLAND_HELPER.exists():
+            return False
+        with self.lock:
+            if ISLAND_SOCKET.exists():
+                try:
+                    self._connect_and_send({"op": "ping"}, 1.5)
+                    return True
+                except (OSError, ValueError, RuntimeError):
+                    pass
+            try:
+                subprocess.Popen([str(ISLAND_HELPER), "serve"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                return False
+            deadline = time.monotonic() + ISLAND_START_WAIT
+            while time.monotonic() < deadline:
+                if ISLAND_SOCKET.exists():
+                    try:
+                        self._connect_and_send({"op": "ping"}, 1.0)
+                        return True
+                    except (OSError, ValueError, RuntimeError):
+                        pass
+                time.sleep(0.05)
+        return False
+
+    def call(self, request, timeout=ISLAND_TIMEOUT, start=True):
+        payload = {**self.identity(), **request, "who": self.who(), "color": self.color()}
+        try:
+            reply = self._connect_and_send(payload, timeout)
+        except (OSError, ValueError, RuntimeError):
+            if not start or not self.ensure_started():
+                raise ToolError("ucu-island is not available; run `ucu install` to build it.") from None
+            try:
+                reply = self._connect_and_send(payload, timeout)
+            except (OSError, ValueError, RuntimeError) as error:
+                raise ToolError(f"ucu-island could not answer ({error}).") from None
+        if isinstance(reply, dict):
+            if "has_secrets" in reply:
+                self.may_have_secrets = bool(reply["has_secrets"])
+            elif reply.get("entry") is not None:
+                self.may_have_secrets = True
+        if not isinstance(reply, dict) or not reply.get("ok"):
+            raise ToolError(str((reply or {}).get("error") or "ucu-island request failed."))
+        return reply
+
+    def try_call(self, request, timeout=2.0, start=False):
+        try:
+            return self.call(request, timeout=timeout, start=start)
+        except ToolError:
+            return None
+
+    def saved_logins(self, domain):
+        if not domain:
+            return []
+        if not ISLAND_SOCKET.exists() and not VAULT_FILE.exists():
+            return []
+        reply = self.try_call({"op": "vault_list", "domain": domain, "kind": "login"},
+                              timeout=2.0, start=VAULT_FILE.exists())
+        return (reply or {}).get("items") or []
+
+    def auth_plan(self, domain, account=None, oauth=(), passkey=False, quick_login=()):
+        if not domain:
+            return None
+        prefs_exist = (Path.home() / "Library/Application Support/ucu/auth-prefs.json").exists() \
+            or (Path.home() / "Library/Application Support/ucu/approvals.json").exists()
+        if not ISLAND_SOCKET.exists() and not VAULT_FILE.exists() and not prefs_exist:
+            return None
+        payload = {"op": "auth_plan", "domain": domain, "oauth": list(oauth or []),
+                   "passkey": bool(passkey), "quick_login": list(quick_login or [])}
+        if account:
+            payload["account"] = str(account)
+        return self.try_call(payload, timeout=2.0, start=VAULT_FILE.exists() or prefs_exist)
+
+    def redact(self, text):
+        if not text or not isinstance(text, str):
+            return text
+        if self.may_have_secrets is False:
+            return text
+        if self.may_have_secrets is None and not ISLAND_SOCKET.exists() and not VAULT_FILE.exists():
+            return text
+        reply = self.try_call({"op": "redact", "text": text}, timeout=2.0, start=VAULT_FILE.exists())
+        if reply and isinstance(reply.get("text"), str):
+            return reply["text"]
+        return text
+
+    def passkey(self, active, prompt=None, detail="", timeout=60, state=None):
+        """Show or clear the Touch ID banner, without waiting for the notch. What is asked goes out in the order it
+        was asked: a banner cleared just after it was lit would otherwise stay lit when the two overtake each other.
+        `state` is what its mark shows: "waiting" while the finger isn't read, "ready" while it is, and "done" once
+        the sheet took the touch, after which the banner says so and goes by itself."""
+        payload = {"op": "passkey", "active": bool(active), "detail": detail, "timeout_seconds": timeout}
+        if prompt:
+            payload["prompt"] = prompt
+        if state:
+            payload["state"] = state
+        self.banners.append(payload)
+        threading.Thread(target=self.send_banners, daemon=True).start()
+
+    def send_banners(self):
+        with self.sending:
+            while self.banners:
+                payload = self.banners.popleft()
+                self.try_call(payload, 2.0, bool(payload["active"]))
+
+    def toast(self, text, icon="key.fill"):
+        threading.Thread(target=self.try_call, args=({"op": "toast", "text": text, "icon": icon}, 2.0, True),
+                         daemon=True).start()
+
+    def publish_agent_state(self, active, app=None, window_title=None, window_id=None, action=None, cursor_norm=None):
+        """Update this chat's live cursor in the left-of-notch pile and hover mini-preview."""
+        if not ISLAND_SOCKET.exists() and not (active and ISLAND_HELPER.exists()):
+            return
+        payload = {"op": "agent_state", "session_id": str(os.getpid()), "pid": os.getpid(), "active": bool(active)}
+        if app:
+            payload["app"] = str(app)
+        if window_title:
+            payload["window_title"] = str(window_title)[:80]
+        if window_id:
+            payload["window_id"] = int(window_id)
+        if action:
+            payload["action"] = str(action)[:80]
+        if cursor_norm:
+            payload["cursor_norm"] = [round(float(cursor_norm[0]), 3), round(float(cursor_norm[1]), 3)]
+        threading.Thread(target=self.try_call, args=(payload, 2.0, bool(active)), daemon=True).start()
 
 
 def valid_place(xy):
@@ -544,14 +923,19 @@ class BrowserWorkspace:
         self.reply = {}      # browser.js's last reply, whole
         self.used = False    # the chat used this tool, so ucu-window treats the browser as one it works in
         self.shared = False  # the window is on the user's screen, for them to use too
+        self.coming = False  # the user asked for the window, and it is on its way to their screen
         self.known = None    # what told its tabs apart when the chat last looked, while it is shared
         self.lock = threading.Lock()
 
-    def call(self, request, timeout=SAFARI_TIMEOUT):
+    def call(self, request, timeout=SAFARI_TIMEOUT, secret=False):
         request, self.reply = {**request, "browser": self.tool}, {}
         try:
-            result = subprocess.run(["osascript", "-l", "JavaScript", str(BROWSER_BACKEND), json.dumps(request)],
-                                    capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            if secret:
+                result = subprocess.run(["osascript", "-l", "JavaScript", str(BROWSER_BACKEND), "stdin"],
+                                        capture_output=True, text=True, timeout=timeout, input=json.dumps(request))
+            else:
+                result = subprocess.run(["osascript", "-l", "JavaScript", str(BROWSER_BACKEND), json.dumps(request)],
+                                        capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"{self.app} didn't answer in time. A page may be showing a dialog, or macOS may be "
                                f"asking the user to let this app control {self.app}.") from None
@@ -564,6 +948,58 @@ class BrowserWorkspace:
         if not reply.get("ok"):
             raise RuntimeError(self.explain(str(reply.get("error"))))
         return reply["result"]
+
+    def aside(self, request, timeout=15):
+        """Ask the page backend for what the user is waiting for, while a step of the agent's may be running under
+        the lock. Nothing of the workspace is read or written here. Returns the backend's whole reply, with its
+        `result` and the tab's `own` record where it gives one, or None when it didn't work."""
+        try:
+            result = subprocess.run(["osascript", "-l", "JavaScript", str(BROWSER_BACKEND),
+                                     json.dumps({**request, "browser": self.tool})],
+                                    capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            reply = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return None
+        return reply if reply.get("ok") else None
+
+    @staticmethod
+    def asks_for_it(report):
+        """Whether the user's click asks for what the chat has out of their sight. One on the chat's preview at the
+        notch does. One on the Dock icon does only when it would get them nothing, with no window of the browser
+        in their sight: a click that brings them a window of their own is answered by that window."""
+        return bool(report.get("asked") or not report.get("inSight"))
+
+    def gave_their_own(self, report):
+        """Whether a click on the Dock icon was answered with a window of the user's own: one they had in the Dock,
+        or in another Space, comes back to them, as it would with nothing of the chat's out of their sight. Then
+        nothing of the chat's comes. A click at the notch asks for the chat's page, so nothing of theirs moves."""
+        if report.get("asked"):
+            return False
+        self.server.windows.send({"allow": self.app})
+        reply = self.aside({"op": "restore_users_window"})
+        return bool(reply and (reply.get("result") or {}).get("restored"))
+
+    def check_allowed(self):
+        denied = self.server.denied_apps()
+        if denied is None or self.keys & {app_key(app) for app in denied}:
+            raise ToolError(f"{self.app} is on the user's deny list, or the list can't be read. Tell the user.")
+        self.server.windows.send({"watch": [app_key(self.app)], "own": True})
+        self.used = True
+
+    def tab_op(self, request, arguments, mutating=True, secret=False, timeout=SAFARI_TIMEOUT):
+        """Run one internal browser.js operation on the addressed tab (used by vault fill/capture/paste)."""
+        self.check_allowed()
+        with self.lock:
+            self.follow(request["op"], arguments)
+            self.reveal_quietly()
+            target = self.target(arguments)
+            if mutating:
+                self.guard(target, arguments)
+            result = self.call({**request, **target}, timeout=timeout, secret=secret)
+            self.point_out(result)
+            if self.shared:
+                self.remember()
+            return result
 
     def point_out(self, result):
         """Send the chat's cursor to where a step in a page landed, which the page says while it is in sight.
@@ -659,7 +1095,7 @@ class BrowserWorkspace:
 
     def reveal(self):
         """Put the window on the agent's desktop for the rest of the turn; return whether it just went there."""
-        if self.shared or self.shown or self.window is None:
+        if self.shared or self.shown or self.coming or self.window is None:
             return False
         self.place = self.desktop_place()
         if not self.place:
@@ -817,7 +1253,7 @@ class BrowserWorkspace:
                 raise RuntimeError(f"Unknown operation {op}. Pass `op`, or `steps`.")
             if self.shared and op != "list":
                 self.remember()
-        note = sign_in_note(result, note)
+        note = sign_in_note(result, note, self.server.island)
         return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)},
                 *([{"type": "text", "text": note}] if note else [])]
 
@@ -858,6 +1294,40 @@ class BrowserWorkspace:
         if self.tab is None and op != "open" and "tab_index" not in arguments:
             raise RuntimeError(f"{change} Yours can't be told from them now: pass tab_index for the one you mean.")
         return f"[ucu: {change}]"
+
+    CAME_NOTE = ("[ucu: The user asked for {}, by its Dock icon or your preview at the notch, while your window was "
+                 "out of their sight, so it is on their screen now, in front, as after `show`. They can use it, and "
+                 "you keep working in it. `hide` takes it back when they are done.]")
+
+    def user_came(self, report):
+        """The user clicked the browser's Dock icon, or the chat's preview at the notch. The browser opens no window
+        for a Dock click while it has one, and the chat's is out of their sight, so the click would get them
+        nothing: the chat's window comes to them, as `show` brings it. This runs on a thread of its own, and the
+        window moves at once, also during a long step of the agent's: only what the chat keeps of it waits."""
+        window = self.window
+        if window is not None and self.shared and report.get("asked"):  # theirs already: it only comes to the front
+            self.server.windows.send({"allow": self.app})
+            self.aside({"op": "show_tab", "window_id": window, "tab_index": self.tab or 1})
+            return
+        if window is None or self.shared or self.coming or not self.asks_for_it(report):
+            return
+        self.coming = True  # so that no step of the agent's puts it back on its desktop meanwhile
+        try:
+            if self.gave_their_own(report):
+                return
+            self.server.windows.send({"allow": self.app})
+            if not self.aside({"op": "show_to_user", "window_id": window, "tab_index": self.tab or 1}):
+                return
+            with self.lock:
+                if self.window != window:
+                    return
+                self.shared, self.shown = True, False
+                self.remember()
+        except RuntimeError:
+            return
+        finally:
+            self.coming = False
+        self.server.windows.note(self.CAME_NOTE.format(self.app))
 
     def take_back(self):
         """Take the window off the user's screen, out of sight again, where the chat works in it as before."""
@@ -952,6 +1422,18 @@ class SafariWorkspace(BrowserWorkspace):
     AWAY_NOTE = ("Your tab is now in a window of its own on your private desktop, where its page runs at full speed. "
                  "`click` with `real: true` presses an element there as a user would, which a page that ignores "
                  "clicks made by script accepts. It goes back to the user's window when your turn ends.")
+    LEFT_NOTE = ("The user may be looking at that tab, so it stays open in their window: leave it to them. What "
+                 "follows is a copy of its page. ")
+    CAME_NOTE = ("[ucu: The user asked for Safari, by its Dock icon or your preview at the notch, while your tab was "
+                 "on your private desktop. Its window is on their screen now, in front, and theirs to use: your tab "
+                 "is in it as before, and they may open tabs of their own beside it. Read your page again before "
+                 "you go on.]")
+
+    SEEN_NOTE = ("[ucu: The user clicked your preview at the notch, so your tab is in front of them now, in their own "
+                 "window. Keep working in it.]")
+    JOINED_NOTE = ("[ucu: The user clicked your preview at the notch while your tab was on your private desktop, so "
+                   "its page is in a tab of their own window now, in front, and that tab is yours from here on. The "
+                   "page was loaded again there: read it before you go on.]")
 
     def __init__(self, server, tool):
         super().__init__(server, tool)
@@ -976,15 +1458,15 @@ class SafariWorkspace(BrowserWorkspace):
                 return page, None
         return None, {"window_id": window, "tab_index": tab}
 
-    def in_tab(self, request, page, named=False, timeout=SAFARI_TIMEOUT):
+    def in_tab(self, request, page, named=False, timeout=SAFARI_TIMEOUT, secret=False):
         """Do a step in one of the chat's tabs. `named` says the agent gave its tab_index, which after ucu lost the
         tab's mark is its word that the tab there is its own."""
         if page.get("away"):  # in a window of its own, where nothing moves it
             return self.call({**request, "window_id": page["window_id"], "tab_index": 1, "away": True},
-                             timeout=timeout)
+                             timeout=timeout, secret=secret)
         own = {**page, "claim": page["tab_index"]} if named and self.claimable is page else page
         try:
-            result = self.call({**request, "own": own, "vigil": True}, timeout=timeout)
+            result = self.call({**request, "own": own, "vigil": True}, timeout=timeout, secret=secret)
         except RuntimeError:
             lost = self.reply.get("lost")
             if lost and lost.get("candidate") is None:  # gone, or not to be told from the user's tabs
@@ -995,11 +1477,39 @@ class SafariWorkspace(BrowserWorkspace):
         page.update(self.reply.get("own") or {})
         return result
 
+    def away_spot(self, request, arguments):
+        """Take the chat's own tab to its private desktop, find there what `request` names without pressing it, and
+        return the page and what was found, with where it is on the screen."""
+        self.check_allowed()
+        with self.lock:
+            self.settle()
+            page, _theirs = self.aim(arguments)
+            if page is None:
+                raise RuntimeError("A passkey sign-in works in your own tab: open the page in one first.")
+            self.send_away(page, "tab_index" in arguments)
+            return page, self.in_tab({**request, "real": True}, page, "tab_index" in arguments)
+
+    def tab_op(self, request, arguments, mutating=True, secret=False, timeout=SAFARI_TIMEOUT):
+        """Run one internal browser.js operation on the addressed Safari tab (used by vault fill/capture/paste)."""
+        self.check_allowed()
+        with self.lock:
+            self.settle()
+            page, theirs = self.aim(arguments)
+            if page:
+                result = self.in_tab(request, page, "tab_index" in arguments, timeout=timeout, secret=secret)
+            else:
+                if mutating:
+                    self.guard(theirs, arguments)
+                result = self.call({**request, **theirs, "vigil": True}, timeout=timeout, secret=secret)
+            self.point_out(result)
+            return result
+
     def run_one(self, arguments):
         op, note = arguments.get("op"), None
         if op in ("navigate", "click", "type", "upload"):  # the agent goes on in the page: nothing is asked any more
             self.server.resume(self.app)
         with self.lock:
+            self.settle()
             if op == "list":
                 here = [page for page in self.pages if not page.get("away")]
                 result = self.call({"op": "list", "marks": [page["mark"] for page in here],
@@ -1041,9 +1551,10 @@ class SafariWorkspace(BrowserWorkspace):
                 if page is None:
                     raise RuntimeError("`show` brings your own tab to the user. Theirs are where they left them.")
                 self.server.quiet(self.app)
-                self.come_back(page)
+                self.come_back(page, to_user=True)
                 self.server.windows.send({"allow": self.app})  # the user asked: it may come forward
                 result = self.in_tab({"op": "show_tab"}, page, "tab_index" in arguments)
+                page["shown"] = True
                 result["note"] = "Your tab is in front of the user now, in their own window. Keep working in it."
                 if arguments.get("text"):
                     self.server.ask_user(self.app, arguments["text"])
@@ -1083,7 +1594,7 @@ class SafariWorkspace(BrowserWorkspace):
                     result["content"] = interactive_lines(result["content"], result.get("url"))
             else:
                 raise RuntimeError(f"Unknown operation {op}. Pass `op`, or `steps`.")
-        note = sign_in_note(result, note)
+        note = sign_in_note(result, note, self.server.island)
         return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)},
                 *([{"type": "text", "text": note}] if note else [])]
 
@@ -1125,9 +1636,23 @@ class SafariWorkspace(BrowserWorkspace):
             except RuntimeError:
                 pass
 
+    @staticmethod
+    def in_front(at):
+        """Whether a tab is the one its window shows the user now."""
+        return bool(at.get("current") and at.get("visible") and not at.get("minimized"))
+
+    def user_sees(self, page, at):
+        """Whether a tab of the chat's is one the user may be looking at: the one its window shows, in a window
+        that has tabs of theirs too, or after the agent showed it to them. A window Safari got for the chat's
+        first page, with nothing of theirs in it, is behind what they use."""
+        mine = [other for other in self.pages if not other.get("away") and other.get("window_id") == page["window_id"]]
+        return self.in_front(at) and bool(page.get("shown") or len(page.get("known") or []) > len(mine))
+
     def send_away(self, page, named):
         """Load a tab's page in a window on the agent's desktop, and close the tab in the user's window. Safari
-        loads a tab again when it moves to another window, so nothing is lost by opening the address there."""
+        loads a tab again when it moves to another window, so nothing is lost by opening the address there. A tab
+        the user may be looking at is not closed under them: it stays open, with its mark, and the chat goes on
+        in the copy under a new one."""
         if page.get("away"):
             return {"away": True}
         at = self.in_tab({"op": "locate"}, page, named)
@@ -1142,27 +1667,128 @@ class SafariWorkspace(BrowserWorkspace):
         except RuntimeError:
             self.close_away({"window_id": window})
             raise
-        try:
-            self.call({"op": "close_tab", "own": page}, timeout=15)
-        except RuntimeError:
-            pass
-        mark = page["mark"]
+        left = {**page, "url": at["url"]} if self.user_sees(page, at) else None
+        if not left:
+            try:
+                self.call({"op": "close_tab", "own": page}, timeout=15)
+            except RuntimeError:
+                pass
+        mark = f"{self.token}-{next(self.numbers)}" if left else page["mark"]
         page.clear()
         page.update(away=True, mark=mark, window_id=window, tab_index=1, place=place)
-        return {**result, "note": self.AWAY_NOTE}
+        if left:
+            page["left"] = left
+        return {**result, "note": (self.LEFT_NOTE if left else "") + self.AWAY_NOTE}
 
-    def come_back(self, page):
-        """Put a page that is away back in the user's window, as a tab of the chat's behind theirs."""
+    def come_back(self, page, to_user=False):
+        """Put a page that is away back in the user's window, as a tab of the chat's behind theirs: the tab that
+        stayed open there for them, if it can take the page, and a new one otherwise."""
         if not page.get("away"):
             return
-        window = page["window_id"]
+        window, left = page["window_id"], page.get("left")
         try:
             url = self.call({"op": "locate", "window_id": window, "tab_index": 1})["url"]
-            self.call({"op": "open_tab", "url": url, "mark": page["mark"]})
-            page.clear()
-            page.update(self.reply["own"])
+            if not (left and self.rejoin(page, left, url, to_user)):
+                self.call({"op": "open_tab", "url": url, "mark": page["mark"]})
+                page.clear()
+                page.update(self.reply["own"])
         finally:
             self.close_away({"window_id": window})
+
+    def rejoin(self, page, left, url, to_user):
+        """Make the tab that stayed open for the user the chat's again, at the page's address, and say whether
+        that worked. It doesn't for a tab they went on in, which is theirs for good, nor for one they are looking
+        at that would have to go to another address without the agent showing it: the page then comes back in a
+        tab of its own, as it did before."""
+        own = {key: value for key, value in left.items() if key != "url"}
+        try:
+            at = self.call({"op": "locate", "own": own, "vigil": True})
+            own = self.reply.get("own") or own
+            if at.get("url") != left["url"] or (url != at["url"] and self.in_front(at) and not to_user):
+                return False
+            if url != at["url"]:
+                self.call({"op": "navigate", "own": own, "url": url, "vigil": True})
+                own = self.reply.get("own") or own
+        except RuntimeError:
+            return False
+        page.clear()
+        page.update(own)
+        return True
+
+    def user_came(self, report):
+        """The user clicked Safari's Dock icon, or the chat's preview at the notch. Safari opens no window for a Dock
+        click while it has one, and the chat's is on the agent's desktop, so with no window of their own in sight
+        the click would get them nothing: the window of each page the chat has away comes to their screen then,
+        with the page as it is. With a window of theirs in sight only the notch asks for the chat's page, and it
+        joins that window as a tab, as it does when the turn ends. This runs on a thread of its own, and they get
+        what they asked for at once, also during a long step of the agent's. What the chat keeps of the page
+        changes at its next step, in `settle`."""
+        if not self.asks_for_it(report):
+            return
+        if not report.get("inSight") and any(page.get("away") for page in list(self.pages)) \
+                and self.gave_their_own(report):
+            return
+        came = joined = False
+        for page in list(self.pages):
+            seen = dict(page)
+            if not seen.get("away") or "came" in seen or "wanted" in seen:
+                continue
+            if report.get("inSight"):
+                joined = self.lend(page, seen) or joined
+                continue
+            self.server.windows.send({"allow": self.app})
+            reply = self.aside({"op": "adopt", "window_id": seen["window_id"], "tab_index": 1, "mark": seen["mark"]})
+            if reply and page.get("away") and page.get("window_id") == seen["window_id"]:
+                page["came"] = {**reply["result"], "shown": True}
+                came = True
+        if not (came or joined):
+            last = self.pages[-1] if self.pages else None
+            seen = dict(last) if last else {}
+            if report.get("asked") and seen and not seen.get("away") and "came" not in seen:
+                self.server.windows.send({"allow": self.app})
+                if self.aside({"op": "show_tab", "own": seen, "vigil": True}):
+                    last["shown"] = True  # they may be looking at it from now on
+                    self.server.windows.note(self.SEEN_NOTE)
+            return
+        if self.lock.acquire(blocking=False):
+            try:
+                self.settle()
+            finally:
+                self.lock.release()
+        self.server.windows.note(self.CAME_NOTE if came else self.JOINED_NOTE)
+
+    def lend(self, page, seen):
+        """Open the page of a tab that is away in a tab of the user's own window, in front, and say whether one was
+        opened. The chat's page moves into that tab at its next step, and is one page with it from then on."""
+        at = self.aside({"op": "locate", "window_id": seen["window_id"], "tab_index": 1})
+        url = at and at["result"].get("url")
+        opened = url and self.aside({"op": "open_tab", "url": url, "mark": f"{self.token}-{next(self.numbers)}"})
+        own = opened and opened.get("own")
+        if not own:
+            return False
+        self.server.windows.send({"allow": self.app})
+        self.aside({"op": "show_tab", "own": own, "vigil": True})
+        if not (page.get("away") and page.get("window_id") == seen["window_id"]):
+            return False
+        page["left"], page["wanted"] = {**own, "url": url}, True
+        return True
+
+    def settle(self):
+        """What the user got while a step ran becomes what the chat keeps. A page whose window they brought to their
+        screen is a tab in a window of theirs from then on, found by its mark as the chat's other tabs are, and no
+        longer one to bring back or to close. A page that was opened for them in a tab of their own window moves
+        into that tab. Called with the lock held, before anything is done with the chat's pages."""
+        for page in list(self.pages):
+            own, wanted = page.pop("came", None), page.pop("wanted", None)
+            if own and page.get("away"):
+                page.clear()
+                page.update(own)
+            elif wanted and page.get("away"):
+                try:
+                    self.come_back(page, to_user=True)
+                    page["shown"] = True
+                except RuntimeError:
+                    pass
 
     def close_away(self, page):
         try:
@@ -1187,6 +1813,7 @@ class SafariWorkspace(BrowserWorkspace):
         """After the turn nothing of the chat's stays on the agent's desktop, which goes: a page that was away is a
         tab in the user's window again."""
         with self.lock:
+            self.settle()
             for page in [page for page in self.pages if page.get("away")]:
                 try:
                     self.come_back(page)
@@ -1198,10 +1825,12 @@ class WindowWatcher:
     """Runs `ucu-window watch` while the chat works. Without the helper, or with one from before it could watch,
     everything here does nothing, and the agent just doesn't get what it adds."""
 
-    def __init__(self, color, who, taken):
+    def __init__(self, color, who, taken, auth_prompt=None, touch=None):
         self.color = color     # gives this chat's cursor color
         self.who = who         # gives who the chat is, for the focus log
         self.taken = taken     # hears which apps ucu kept out of sight the user came to
+        self.auth_prompt = auth_prompt  # hears macOS Touch ID / passkey system dialogs appear & disappear
+        self.touch = touch     # hears of the passkey sheet the chat waits at: there or not, and read right now or not
         self.process = None
         self.unusable = False  # it exited by itself, so it isn't started again
         self.lock = threading.Lock()
@@ -1211,6 +1840,7 @@ class WindowWatcher:
         self.expected = {}  # (app_key, "window" or "focus") -> until when the agent knows about such reports
         self.desktop = None  # where the agent's desktop was last seen; it goes with the helper
         self.rested = None   # the helper told the turn is over: it goes, unless it keeps ucu's apps out of sight
+        self.clicked = None  # hears of the user's click on the Dock icon of a browser the chat works in
 
     def start(self):
         if self.process is None and not self.unusable:
@@ -1237,6 +1867,19 @@ class WindowWatcher:
                 if slot:
                     slot[1] = message
                     slot[0].set()
+            elif message.get("event") == "touch":
+                if self.touch:
+                    self.touch(message)
+            elif message.get("event") == "auth_prompt":
+                if self.auth_prompt:
+                    self.auth_prompt(message)
+                if message.get("active"):
+                    detail = " — ".join(part for part in (message.get("app"), message.get("title"),
+                                                          message.get("text")) if part)
+                    self.note(AUTH_PROMPT_NOTE.format(detail or "Touch ID"))
+            elif "came" in message:  # the user came to a browser the chat works in: what comes of it is the news
+                if self.clicked:
+                    self.clicked(message)
             elif "event" in message and not self.is_expected(message):
                 if message["event"] == "taken":
                     self.taken(message.get("names") or [])
@@ -1423,10 +2066,14 @@ class Engine:
                     pass
 
     @classmethod
-    def run(cls, *arguments, timeout=ENGINE_TIMEOUT):
+    def run(cls, *arguments, timeout=ENGINE_TIMEOUT, stdin_text=None):
         try:
-            done = subprocess.run([str(ENGINE), *arguments], capture_output=True, text=True, timeout=timeout,
-                                  stdin=subprocess.DEVNULL, env=cls.environment())
+            if stdin_text is not None:
+                done = subprocess.run([str(ENGINE), *arguments], capture_output=True, text=True, timeout=timeout,
+                                      input=stdin_text, env=cls.environment())
+            else:
+                done = subprocess.run([str(ENGINE), *arguments], capture_output=True, text=True, timeout=timeout,
+                                      stdin=subprocess.DEVNULL, env=cls.environment())
         except subprocess.TimeoutExpired:
             raise ToolError("The app didn't answer in time.") from None
         except OSError as error:
@@ -1618,7 +2265,10 @@ class Server:
         self.folder = working_folder()
         self.alerts = AlertWatcher()
         self.sessions = Sessions()
-        self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker, self.user_took)
+        self.island = IslandClient(self.asker, lambda: self.sessions.cursor_color(self.folder), self.harness_info)
+        self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker, self.user_took,
+                                     self.on_auth_prompt, self.on_touch)
+        self.windows.clicked = self.user_clicked
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
@@ -1628,6 +2278,7 @@ class Server:
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
         self.parked_apps = set()            # those of them on the agent's desktop, as app_key names
+        self.touching = None                # the passkey sheet the chat waits at: what the notch says of it
         self.views = {}                     # (app, window) -> the last View
         self.running = 0                    # tool calls in flight
         self.last_end = 0
@@ -1688,6 +2339,8 @@ class Server:
         except Exception as error:  # a bug must still answer, or the client waits for its tool timeout
             content, failed = [{"type": "text", "text": bug_report(error)}], True
         content += [{"type": "text", "text": note} for note in self.finish(started, name in ("look", "act"))]
+        if name != "ask_user":
+            content = self.scrub_content(content)
         self.write({"id": request_id, "result": {"content": content, "isError": failed}})
 
     def begin(self):
@@ -1734,12 +2387,18 @@ class Server:
             with self.lock:
                 self.hidden_apps.pop(app_key(arguments.get("app") or ""), None)
                 self.parked_apps.discard(app_key(arguments.get("app") or ""))
+        if name in ("look", "act", "safari", "chrome", "vault", "focus_window", "move_to_desktop"):
+            self.report_activity(name, arguments)
         if name == "look":
             return self.look(arguments)
         if name == "act":
             return self.act(arguments)
         if name in self.browsers:
             return self.browsers[name].run(arguments)
+        if name == "ask_user":
+            return self.notch_ask(arguments)
+        if name == "vault":
+            return self.vault_op(arguments)
         if name == "move_to_desktop":
             text, failed = self.move_to_desktop(str(arguments.get("app") or ""))
         else:
@@ -1756,6 +2415,775 @@ class Server:
         if failed:
             raise ToolError(text)
         return [{"type": "text", "text": text}]
+
+    # --- notch island, passkey indicator and blind secret vault -----------
+    def scrub_content(self, content):
+        """Scrub any known vault secret from returned text so plaintext never leaks into LLM context."""
+        out = []
+        for item in content:
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                out.append({**item, "text": self.island.redact(item["text"])})
+            else:
+                out.append(item)
+        return out
+
+    def report_activity(self, name, arguments):
+        """Publish a concise 1-line live activity status to the left-of-notch cursor pile."""
+        app = arguments.get("app")
+        title = arguments.get("window") or ""
+        wid = None
+        action = None
+        if name == "look":
+            action = f"Looking at {app}" + (f" ({arguments['find']})" if arguments.get("find") else "")
+        elif name == "act":
+            steps = arguments.get("steps") or []
+            first = steps[0] if steps and isinstance(steps[0], dict) else {}
+            verb = str(first.get("do") or "acting")
+            target = first.get("name") or first.get("keys") or first.get("text")
+            if len(steps) > 1:
+                action = f"{verb.capitalize()} + {len(steps) - 1} steps in {app}"
+            elif target:
+                action = f"{verb.capitalize()} {quoted(str(target)[:28])}"
+            else:
+                action = f"{verb.capitalize()} in {app}"
+        elif name in self.browsers:
+            app = BROWSERS[name][0]
+            op = arguments.get("op")
+            if not op and isinstance(arguments.get("steps"), list) and arguments["steps"]:
+                first = arguments["steps"][0]
+                op = first.get("op") if isinstance(first, dict) else "steps"
+                url = first.get("url") if isinstance(first, dict) else None
+            else:
+                url = arguments.get("url")
+            host = host_of(url)
+            title = host or title
+            if op in ("open", "navigate") and host:
+                action = f"Opening {host}"
+            elif op == "click":
+                what = arguments.get("text") or arguments.get("selector") or arguments.get("ref") or "element"
+                action = f"Clicking {str(what)[:28]}"
+            elif op == "type":
+                action = "Typing in page"
+            elif op == "read":
+                action = f"Reading {host or app}"
+            elif op == "wait":
+                action = f"Waiting on {host or app}"
+            else:
+                action = f"Working in {app}"
+        elif name == "vault":
+            vop = arguments.get("op") or ""
+            browser = arguments.get("browser") or arguments.get("from") or arguments.get("to")
+            if browser in BROWSERS:
+                app = BROWSERS[browser][0]
+            action = {"fill": "Filling login", "capture": "Capturing secret", "paste": "Pasting secret",
+                      "request": "Requesting credential"}.get(vop, f"Vault {vop}")
+        elif name == "focus_window":
+            action = f"Focusing {arguments.get('title') or app}"
+        elif name == "move_to_desktop":
+            action = f"Moving {app} to agent desktop"
+        if app or action:
+            self.island.publish_agent_state(True, app=app, window_title=title, window_id=wid, action=action)
+
+    def on_auth_prompt(self, message):
+        """Mirror a system Touch ID or password dialog onto the notch's Touch ID banner while it is on screen."""
+        active = bool(message.get("active"))
+        detail = " · ".join(part for part in (message.get("title"), message.get("text")) if part)[:90]
+        if not detail and message.get("app"):
+            detail = f"Passkey · {message['app']}"
+        self.island.passkey(active=active, prompt="Please touch the key", detail=detail)
+
+    def on_touch(self, message):
+        """What the helper says of the passkey sheet the chat waits at. The notch asks for the touch only while a real
+        sheet is open, and says whether the finger is read right now: it is only while the browser has the front,
+        which it has in a pause of the user's."""
+        touching = self.touching
+        if touching is None:
+            return
+        if message.get("done"):  # the sheet took the touch: the banner thinks, says it is done, and goes by itself
+            touching["lit"], touching["shown"] = False, None
+            self.island.passkey(active=True, prompt=TOUCH_TAKEN, timeout=5, state="done")
+            return
+        if message.get("sheet") is False:
+            touching["lit"], touching["shown"] = False, None
+            self.island.passkey(active=False)
+            return
+        if message.get("waiting"):  # no sheet yet: it opens in their next pause, which the notch asks for
+            touching["lit"] = True
+        if message.get("sheet"):
+            touching["lit"] = touching["sheet"] = True
+            touching["text"] = str(message.get("text") or "")
+        if "armed" in message:
+            touching["armed"] = bool(message["armed"])
+        if touching.get("lit"):  # the finger is read while the sheet is open and the browser has the front
+            reads = touching.get("sheet") and touching.get("armed")
+            prompt = TOUCH_READY.format(touching["host"]) if reads else TOUCH_PAUSE
+            if prompt != touching.get("shown"):
+                touching["shown"] = prompt
+                self.island.passkey(active=True, prompt=prompt, detail=touching.get("text", "")[:90],
+                                    timeout=touching["limit"], state="ready" if reads else "waiting")
+
+    def show_context(self, arguments):
+        """Bring the referenced browser tab or app window forward when the user clicks Show in the notch."""
+        browser = arguments.get("browser")
+        if browser in self.browsers:
+            self.browsers[browser].run({"op": "show", **{k: arguments[k] for k in ("window_id", "tab_index")
+                                                         if k in arguments}})
+            return True
+        app = arguments.get("app")
+        title = arguments.get("window")
+        if app and title:
+            self.windows.send({"allow": str(app)})
+            with self.lock:
+                self.hidden_apps.pop(app_key(app), None)
+                self.parked_apps.discard(app_key(app))
+            _text, failed = run_window_tool("focus_window", {"app": app, "title": title, "activate": True})
+            return not failed
+        return False
+
+    def notch_ask(self, arguments):
+        title = str(arguments.get("title") or "").strip()
+        if not title:
+            raise ToolError("Pass `title`, a short description of what you are asking.")
+        kind = str(arguments.get("kind") or "approve")
+        detail = str(arguments.get("detail") or "")
+        timeout = float(arguments.get("timeout_seconds") or 120)
+        browser = arguments.get("browser")
+        app = arguments.get("app")
+        domain = host_of(arguments.get("domain"))
+        badge = domain or (BROWSERS[browser][0] if browser in BROWSERS else None) or app or "UCU"
+        if kind == "passkey":
+            if arguments.get("active") is False:  # there is nothing to turn off: the banner goes with its sheet
+                return [{"type": "text", "text": json.dumps({"ok": True, "kind": "passkey", "active": False})}]
+            if browser not in self.browsers:
+                raise ToolError("Pass `browser`: the notch asks for a touch only for a passkey sheet that is open "
+                                "on your own tab, which this opens with the page's passkey button.")
+            workspace = self.browsers[browser]
+            located = workspace.tab_op({"op": "locate"}, arguments, mutating=False)
+            return self.passkey_sign_in(workspace, arguments, host_of(located.get("url")) or domain or badge, "asked",
+                                        limit=timeout)
+
+        can_show = (browser in self.browsers) or bool(app and arguments.get("window"))
+        req = {
+            "op": "approve",
+            "title": title,
+            "detail": detail,
+            "badge": badge,
+            "domain": domain,
+            "app": app,
+            "can_show": can_show,
+            "touch_id": bool(arguments.get("touch_id") or kind == "touch_id"),
+            "timeout_seconds": timeout,
+        }
+        if arguments.get("remember_key"):
+            req["remember_key"] = str(arguments["remember_key"])
+            req["remember_label"] = f"Always allow on {badge}"
+        global_key = arguments.get("global_key")
+        if not global_key:
+            # Automatically offer "Always allow everywhere" for OAuth sign-in prompts like "Continue with Google".
+            oauth_match = re.search(r"\b(?:continue|sign\s*in|log\s*in)\s+with\s+(google|apple|github|microsoft)\b",
+                                    f"{title} {detail}", re.IGNORECASE)
+            if oauth_match:
+                provider = oauth_match.group(1).lower()
+                global_key = f"oauth:{provider}"
+                if not req.get("remember_key") and domain:
+                    req["remember_key"] = f"oauth:{provider}:{domain}"
+                    req["remember_label"] = f"Always allow on {domain}"
+        if global_key:
+            req["global_key"] = str(global_key)
+            req["global_label"] = "Always allow everywhere"
+        reply = self.island.call(req, timeout=timeout + 15)
+        decision = reply.get("decision") or "denied"
+        result = {"decision": decision}
+        if reply.get("remembered"):
+            result["remembered"] = True
+        if reply.get("scope"):
+            result["scope"] = reply["scope"]
+        if decision == "show":
+            shown = False
+            try:
+                shown = self.show_context(arguments)
+            except (ToolError, RuntimeError):
+                shown = False
+            result["shown"] = shown
+            result["note"] = ("The user clicked Show in the notch; their window/tab is in front now."
+                              if shown else "The user clicked Show in the notch; call `show` or `focus_window` with activate: true.")
+        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
+
+    def vault_op(self, arguments):
+        op = arguments.get("op")
+        if op == "list":
+            reply = self.island.call({
+                "op": "vault_list",
+                "domain": arguments.get("domain"),
+                "app": arguments.get("app"),
+                "kind": arguments.get("kind"),
+            }, timeout=10)
+            accts = (self.island.try_call({"op": "account_list"}, timeout=5) or {}).get("accounts") or []
+            out = {"items": reply.get("items") or []}
+            if accts:
+                out["accounts"] = accts
+            return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+        if op == "fill":
+            return self.vault_fill(arguments)
+        if op == "request":
+            return self.vault_request(arguments)
+        if op == "capture":
+            return self.vault_capture(arguments)
+        if op == "paste":
+            return self.vault_paste(arguments)
+        if op == "delete":
+            entry_id = str(arguments.get("id") or "").strip()
+            if not entry_id:
+                raise ToolError("Pass `id` of the vault entry to delete.")
+            reply = self.island.call({"op": "vault_delete", "id": entry_id, "confirm": True},
+                                     timeout=float(arguments.get("timeout_seconds") or 120) + 15)
+            return [{"type": "text", "text": json.dumps({"deleted": bool(reply.get("deleted")),
+                                                         "decision": reply.get("decision", "approved")})}]
+        raise ToolError(f"Unknown vault op {op}. Use list, fill, request, capture, paste or delete.")
+
+    def vault_request(self, arguments):
+        kind = str(arguments.get("kind") or "secret")
+        domain = host_of(arguments.get("domain"))
+        label = str(arguments.get("label") or domain or arguments.get("app") or kind)
+        timeout = float(arguments.get("timeout_seconds") or 120)
+        can_show = (arguments.get("browser") in self.browsers) or bool(arguments.get("app") and arguments.get("window"))
+        reply = self.island.call({
+            "op": "vault_request",
+            "id": arguments.get("id"),
+            "kind": kind,
+            "label": label,
+            "domain": domain,
+            "app": arguments.get("app"),
+            "username_hint": arguments.get("username_hint") or "",
+            "can_show": can_show,
+            "remember": arguments.get("remember"),
+            "timeout_seconds": timeout,
+        }, timeout=timeout + 15)
+        decision = reply.get("decision") or "denied"
+        if decision == "show":
+            self.show_context(arguments)
+            return [{"type": "text", "text": json.dumps({"decision": "show"})}]
+        if decision != "filled":
+            return [{"type": "text", "text": json.dumps({"decision": decision})}]
+        # Never return raw secret to the LLM: only the metadata handle!
+        return [{"type": "text", "text": json.dumps({
+            "decision": "filled",
+            "entry": reply.get("entry"),
+            "remembered": bool(reply.get("remembered")),
+        }, ensure_ascii=False)}]
+
+    def vault_fill(self, arguments):
+        browser = arguments.get("browser")
+        app = arguments.get("app")
+        timeout = float(arguments.get("timeout_seconds") or 120)
+        if browser in self.browsers:
+            workspace = self.browsers[browser]
+            located = workspace.tab_op({"op": "locate", "auth_hints": True}, arguments, mutating=False)
+            host = host_of(located.get("url")) or host_of(arguments.get("domain"))
+            if not host:
+                raise ToolError("Could not determine the current tab's hostname.")
+            account = arguments.get("account") or arguments.get("username_hint")
+            context_domain = host_of(located.get("oauth_target")) or host_of(arguments.get("domain"))
+            avail_oauth = located.get("oauth") or []
+            has_passkey = bool(located.get("passkey"))
+            has_password = bool(located.get("password"))
+            quick = located.get("quick_login") or []
+
+            # 1) Check smart per-site sign-in plan (remembered Google/Passkey preference, global Google rule,
+            #    saved account chooser, learned 2-step email identity, or saved Vault login matching optional `account`)!
+            if not arguments.get("id") and not arguments.get("force_prompt"):
+                plan = self.island.try_call({
+                    "op": "auth_plan",
+                    "domain": host,
+                    "context_domain": context_domain,
+                    "account": account,
+                    "oauth": avail_oauth,
+                    "passkey": has_passkey,
+                    "password": has_password,
+                    "quick_login": quick,
+                }, timeout=5.0, start=True) or {}
+                plan_action = plan.get("action")
+                if plan_action == "oauth" and plan.get("auto"):
+                    provider = plan.get("provider") or "Google"
+                    clicked = workspace.tab_op({"op": "click_auth_option", "method": "oauth", "provider": provider},
+                                               arguments, mutating=True)
+                    self.island.toast(f"Signed in with {provider} · {host}", icon="person.badge.key.fill")
+                    out = {"method": "oauth", "provider": provider, "clicked": clicked.get("clicked"),
+                           "host": host, "auto": True, "source": plan.get("source")}
+                    if plan.get("account") or account:
+                        out["account"] = plan.get("account") or account
+                    return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+                if plan_action == "passkey" and plan.get("auto"):
+                    return self.passkey_sign_in(workspace, arguments, host, plan.get("source"))
+                # Passkey available on the page (and no site preference / saved login / quick session took priority):
+                # auto-click Passkey immediately so the user only taps Touch ID!
+                if has_passkey and plan_action not in ("password", "oauth", "quick_login"):
+                    return self.passkey_sign_in(workspace, arguments, host, "passkey_auto")
+
+            resolved = self.island.call({
+                "op": "vault_resolve",
+                "id": arguments.get("id"),
+                "target_domain": host,
+                "context_domain": context_domain,
+                "kind": "login",
+                "account": account,
+                "has_password": has_password,
+                "can_show": True,
+                "timeout_seconds": timeout,
+            }, timeout=timeout + 15)
+            remembered = False
+            if not resolved.get("found"):
+                if quick and not arguments.get("force_prompt"):
+                    opts = ", ".join(quoted(str(q)) for q in quick)
+                    return [{"type": "text", "text": json.dumps({
+                        "filled": [],
+                        "found": False,
+                        "host": host,
+                        "quick_login_options": quick,
+                        "note": f"This page already offers a one-click sign-in ({opts}). Click it first instead of "
+                                "asking the user for a password; call vault(op: \"fill\", force_prompt: true) only if "
+                                "a password is still required afterwards.",
+                    }, ensure_ascii=False)}]
+                if arguments.get("use_browser_passwords"):
+                    return self._browser_passwords_autofill(workspace, arguments, host, timeout)
+                if arguments.get("prompt_if_missing", True) is False:
+                    return [{"type": "text", "text": json.dumps({"filled": [], "found": False, "host": host})}]
+                resolved = self.island.call({
+                    "op": "vault_request",
+                    "id": arguments.get("id"),
+                    "kind": "login",
+                    "label": arguments.get("label") or host,
+                    "domain": host,
+                    "username_hint": arguments.get("username_hint") or (account or ""),
+                    "account": account,
+                    "available_oauth": avail_oauth,
+                    "has_passkey": has_passkey,
+                    "can_show": True,
+                    "remember": arguments.get("remember", True),
+                    "timeout_seconds": timeout,
+                }, timeout=timeout + 15)
+                remembered = bool(resolved.get("remembered"))
+            else:
+                remembered = bool(resolved.get("remembered"))
+            decision = resolved.get("decision") or "denied"
+            if decision == "choose_auth":
+                method = resolved.get("method") or "oauth"
+                provider = resolved.get("provider")
+                if method == "passkey":
+                    return self.passkey_sign_in(workspace, arguments, host, "chosen", remembered=remembered)
+                clicked = workspace.tab_op({"op": "click_auth_option", "method": method, "provider": provider},
+                                           arguments, mutating=True)
+                return [{"type": "text", "text": json.dumps({
+                    "method": method, "provider": provider, "clicked": clicked.get("clicked"),
+                    "host": host, "remembered": remembered,
+                }, ensure_ascii=False)}]
+            if decision == "show":
+                return self._browser_passwords_autofill(workspace, arguments, host, timeout)
+            if decision not in ("approved", "filled"):
+                return [{"type": "text", "text": json.dumps({"decision": decision, "host": host})}]
+
+            filled = workspace.tab_op({
+                "op": "fill_login",
+                "username": resolved.get("username") or "",
+                "password": resolved.get("secret") or "",
+                "expected_domain": host,
+                "username_selector": arguments.get("username_selector"),
+                "password_selector": arguments.get("password_selector"),
+                "submit": arguments.get("submit", True),
+            }, arguments, mutating=True, secret=True)
+            entry = resolved.get("entry") or {}
+            out = {
+                "filled": filled.get("filled") or [],
+                "submitted": bool(filled.get("submitted")),
+                "host": host,
+                "id": entry.get("id"),
+            }
+            if filled.get("needs_next_step"):
+                out["needs_next_step"] = True
+            if remembered:
+                out["remembered"] = True
+            return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+
+        if app:
+            title = arguments.get("window")
+            app = self.use(app, title)
+            resolved = self.island.call({
+                "op": "vault_resolve",
+                "id": arguments.get("id"),
+                "target_app": app,
+                "kind": "login",
+                "can_show": bool(title),
+                "timeout_seconds": timeout,
+            }, timeout=timeout + 15)
+            remembered = False
+            if not resolved.get("found"):
+                if arguments.get("prompt_if_missing", True) is False:
+                    return [{"type": "text", "text": json.dumps({"filled": [], "found": False, "app": app})}]
+                resolved = self.island.call({
+                    "op": "vault_request",
+                    "id": arguments.get("id"),
+                    "kind": "login",
+                    "label": arguments.get("label") or app,
+                    "app": app,
+                    "username_hint": arguments.get("username_hint") or "",
+                    "can_show": bool(title),
+                    "remember": arguments.get("remember", True),
+                    "timeout_seconds": timeout,
+                }, timeout=timeout + 15)
+                remembered = bool(resolved.get("remembered"))
+            decision = resolved.get("decision") or "denied"
+            if decision == "show":
+                self.show_context(arguments)
+                return [{"type": "text", "text": json.dumps({"decision": "show", "app": app})}]
+            if decision not in ("approved", "filled"):
+                return [{"type": "text", "text": json.dumps({"decision": decision, "app": app})}]
+
+            window = self.window_id(app, title) if title else None
+            view = self.views.get((app_key(app), title)) or self.read(app, window)
+            filled_fields = []
+            username = resolved.get("username") or ""
+            secret = resolved.get("secret") or ""
+            u_num = arguments.get("username_on")
+            p_num = arguments.get("password_on")
+            if u_num is None and username:
+                u_num = next((n for n, (role, _lbl) in view.kinds.items() if role == "textfield" and n != p_num), None)
+            if p_num is None and secret:
+                p_num = next((n for n, (role, lbl) in view.kinds.items()
+                              if "password" in role or "secure" in role or "password" in lbl.casefold()), None)
+            if username and u_num in view.refs:
+                Engine.run("set-value", view.refs[u_num], "--stdin", stdin_text=username)
+                filled_fields.append("username")
+            if secret and p_num in view.refs:
+                Engine.run("set-value", view.refs[p_num], "--stdin", stdin_text=secret)
+                filled_fields.append("password")
+            if not filled_fields:
+                raise ToolError(f"Could not find login fields in {app}. Pass `username_on` and/or `password_on` from `look`.")
+            entry = resolved.get("entry") or {}
+            out = {"filled": filled_fields, "app": app, "id": entry.get("id")}
+            if remembered:
+                out["remembered"] = True
+            return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+
+        raise ToolError("Pass `browser` ('safari' or 'chrome') or `app` for vault `fill`.")
+
+    def passkey_sign_in(self, workspace, arguments, host, source, remembered=False, limit=TOUCH_LIMIT):
+        """Sign in with the user's passkey without bringing them the page. Its passkey button is pressed as a user
+        would press it, in the chat's tab on its private desktop, and the notch asks for their touch while the sheet
+        is open there. Where that can't be done, they get the tab instead and touch there."""
+        out = {"method": "passkey", "host": host, "auto": True, "source": source}
+        if remembered:
+            out["remembered"] = True
+        limit = max(10, min(float(limit or TOUCH_LIMIT), TOUCH_LIMIT))
+        if workspace.tool != "safari" or not workspace.desktop_place():
+            return self.passkey_in_sight(workspace, arguments, host, out)
+        page, found = workspace.away_spot({"op": "click_auth_option", "method": "passkey"}, arguments)
+        out["clicked"] = found.get("clicked")
+        ended = self.touch_sheet(workspace, page, found, host, limit)
+        state = ended.get("state")
+        out["sheet"] = {"timeout": "timed out"}.get(state, state)
+        if state == "closed":
+            out["touched"] = bool(ended.get("done"))
+            out["note"] = TOUCH_CLOSED if out["touched"] else TOUCH_REFUSED
+        elif state == "none":
+            out["note"] = TOUCH_NONE
+        elif state == "timeout":
+            left = ("It was cancelled." if ended.get("cancelled")
+                    else "The sheet is still open on your tab: closing the tab ends it.")
+            out["note"] = TOUCH_TIMEOUT.format(round(limit), left)
+        else:
+            raise ToolError(TOUCH_FAILED.format(workspace.app, state or "no answer"))
+        try:
+            out["url"] = workspace.tab_op({"op": "locate"}, arguments, mutating=False).get("url")
+        except (RuntimeError, ToolError):
+            pass
+        return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+
+    def touch_sheet(self, workspace, page, found, host, limit):
+        """Open a passkey sheet with a real press in the chat's window on its private desktop, and wait there for the
+        user's touch. Safari opens the sheet only for a press made while it is the active app, and reads the finger
+        only while it is: so the helper gives it the front in a pause of the user's, with that window as its main one,
+        which moves nothing on their screen, and gives their app back at whatever they do. The notch says so from the
+        helper's word alone. Every way out of here gives the front back and clears the notch. Return what the helper
+        said at the end."""
+        self.windows.start()
+        number, turn, until = page["window_id"], self.front_turn(), time.monotonic() + limit
+        self.touching = {"host": host, "limit": limit}
+        try:
+            for last in (attempt + 1 == TOUCH_TRIES for attempt in range(TOUCH_TRIES)):
+                # The user has the whole time to pause in. A helper from before it could do this never answers, which
+                # shows within the time any helper takes to say where it is.
+                if self.windows.ask({"situation": True}, SITUATION_TIMEOUT) is None:
+                    raise ToolError(NO_TOUCH)
+                wait = max(BORROW_WAIT, until - time.monotonic())
+                begun = self.windows.ask({"touch": workspace.app, "window": number, "wait": wait}, wait + 5)
+                if begun is None:
+                    raise ToolError(NO_TOUCH)
+                state = begun.get("state")
+                if state == "busy":
+                    raise ToolError(TOUCH_BUSY.format(begun.get("front") or "another app", round(wait)))
+                if state == "lent":
+                    raise ToolError(FRONT_TAKEN)
+                if state not in ("armed", "sheet"):
+                    raise ToolError(TOUCH_FAILED.format(workspace.app, state or "no answer"))
+                if state == "armed":  # no sheet is open yet: the press opens it
+                    point = found.get("point")
+                    if not point:
+                        raise ToolError("That page isn't in sight on your private desktop, so there is nowhere to "
+                                        "press.")
+                    self.windows.send({"ours": workspace.app})
+                    self.point_click(workspace.app, point, {"do": "click"}, f"w-{number}")
+                left = max(10, until - time.monotonic())
+                ended = self.windows.ask({"touchWatch": True, "opens": TOUCH_OPEN, "limit": left},
+                                         left + TOUCH_OPEN + 10) or {}
+                # A press the user's own typing or click got in before reaches a page that isn't the active one, which
+                # opens nothing: it is made once more, in their next pause.
+                if last or not (ended.get("state") == "none" and ended.get("interrupted")):
+                    return ended
+            return {}
+        finally:
+            self.windows.send({"touchEnd": True})
+            self.touching = None
+            self.island.passkey(active=False)
+            turn.close()
+
+    def passkey_in_sight(self, workspace, arguments, host, out):
+        """Where a sheet can't be held out of sight, the user gets the tab with its passkey button pressed, and what
+        to do there is said on the window."""
+        where = {key: arguments[key] for key in ("window_id", "tab_index") if key in arguments}
+        workspace.run({"op": "show", "text": TOUCH_ASK.format(host), **where})
+        real = workspace.tool == "safari"  # there a click made by script opens no sheet
+        found = workspace.tab_op({"op": "click_auth_option", "method": "passkey", "real": real}, arguments,
+                                 mutating=True)
+        if real:
+            workspace.press(found)
+        out.update(clicked=found.get("clicked"), shown=True, note=TOUCH_SHOWN)
+        return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+
+    def _browser_passwords_autofill(self, workspace, arguments, host, timeout):
+        """Show the login tab so Apple Passwords AutoFill offers the matching account via Touch ID, then blindly
+        capture and save the filled credentials into UCU Vault by default so future logins are autonomous."""
+        workspace.run({"op": "show", **{k: arguments[k] for k in ("window_id", "tab_index") if k in arguments}})
+        if not arguments.get("watch_autofill", True):
+            return [{"type": "text", "text": json.dumps({"decision": "show", "shown": True, "host": host})}]
+        watch_sec = min(float(timeout), 35.0)
+        try:
+            watched = workspace.tab_op({"op": "watch_login_autofill", "timeout_seconds": watch_sec},
+                                       arguments, mutating=False, timeout=watch_sec + 10)
+        except (ToolError, RuntimeError):
+            return [{"type": "text", "text": json.dumps({"decision": "show", "shown": True, "host": host})}]
+        if not isinstance(watched, dict) or not watched.get("captured") or not watched.get("password"):
+            return [{"type": "text", "text": json.dumps({"decision": "show", "shown": True, "host": host,
+                                                         "captured": False})}]
+        password = str(watched.pop("password"))
+        username = str(watched.get("username") or "")
+        saved_host = host_of(watched.get("host")) or host
+        stored = self.island.call({
+            "op": "vault_store",
+            "id": arguments.get("id") or saved_host,
+            "kind": "login",
+            "label": arguments.get("label") or saved_host,
+            "domains": [saved_host],
+            "username": username or None,
+            "secret": password,
+            "remember": True,
+            "auto_approve": True,
+            "toast": True,
+        }, timeout=15)
+        entry = stored.get("entry") or {}
+        return [{"type": "text", "text": json.dumps({
+            "decision": "autofilled",
+            "shown": True,
+            "remembered": True,
+            "host": saved_host,
+            "id": entry.get("id"),
+            "filled": [k for k, v in (("username", username), ("password", password)) if v],
+        }, ensure_ascii=False)}]
+
+    @staticmethod
+    def _find_node_secret(tree, target_ref=None, target_name=None):
+        wanted_name = " ".join(str(target_name).split()).casefold() if target_name else None
+
+        def walk(node):
+            if not isinstance(node, dict):
+                return None
+            if target_ref and node.get("ref_id") == target_ref:
+                return str(node.get("value") or node.get("name") or "").strip()
+            if wanted_name:
+                label = " ".join(str(node.get("name") or node.get("description") or "").split()).casefold()
+                if label == wanted_name or (wanted_name and wanted_name in label):
+                    val = str(node.get("value") or node.get("name") or "").strip()
+                    if val:
+                        return val
+            for child in node.get("children") or []:
+                found = walk(child)
+                if found:
+                    return found
+            return None
+
+        return walk(tree)
+
+    def vault_capture(self, arguments):
+        source = arguments.get("from") or arguments.get("browser")
+        label = str(arguments.get("label") or arguments.get("id") or "").strip()
+        if not label:
+            raise ToolError("Pass `label` (e.g. 'OpenAI API key') for vault `capture`.")
+        kind = str(arguments.get("kind") or "api_key")
+        remember = bool(arguments.get("remember", True))
+        secret_val, host, source_kind = None, None, None
+        if source in self.browsers:
+            workspace = self.browsers[source]
+            req = {"op": "capture_secret"}
+            for field in ("ref", "selector", "click_ref", "click_selector"):
+                if arguments.get(field):
+                    req[field] = arguments[field]
+            captured = workspace.tab_op(req, arguments, mutating=bool(req.get("click_ref") or req.get("click_selector")))
+            secret_val = str(captured.get("secret") or "").strip()
+            host = host_of(captured.get("host"))
+            source_kind = captured.get("source")
+        elif source == "app" or arguments.get("app"):
+            app_name = arguments.get("app")
+            title = arguments.get("window")
+            app_name = self.use(app_name, title)
+            window = self.window_id(app_name, title) if title else None
+            snap = self.snapshot(app_name, window)
+            target_ref = None
+            if arguments.get("on") is not None:
+                view = self.views.get((app_key(app_name), title))
+                if not view or arguments["on"] not in view.refs:
+                    raise ToolError(f"There is no element {arguments['on']} in what you last read of {app_name}.")
+                target_ref = view.refs[arguments["on"]]
+            secret_val = self._find_node_secret(snap.get("tree") or {}, target_ref=target_ref,
+                                                target_name=arguments.get("name"))
+            source_kind = app_name
+        else:
+            raise ToolError("Pass `from` ('safari', 'chrome', or 'app') for vault `capture`.")
+
+        if not secret_val:
+            raise ToolError("Captured secret was empty.")
+        domains = list(arguments.get("domains") or [])
+        if host and host not in domains:
+            domains.append(host)
+        stored = self.island.call({
+            "op": "vault_store",
+            "id": arguments.get("id"),
+            "kind": kind,
+            "label": label,
+            "domains": domains,
+            "app": arguments.get("app"),
+            "secret": secret_val,
+            "remember": remember,
+            "auto_approve": True,
+            "toast": True,
+        }, timeout=15)
+        # Plaintext is NEVER returned to the LLM!
+        return [{"type": "text", "text": json.dumps({
+            "captured": True,
+            "entry": stored.get("entry"),
+            "length": len(secret_val),
+            "source": source_kind,
+            "remembered": remember,
+        }, ensure_ascii=False)}]
+
+    def vault_paste(self, arguments):
+        entry_id = str(arguments.get("id") or "").strip()
+        if not entry_id:
+            raise ToolError("Pass `id` of the vault secret to paste.")
+        dest = arguments.get("to") or arguments.get("browser")
+        timeout = float(arguments.get("timeout_seconds") or 120)
+
+        if dest in self.browsers:
+            if not arguments.get("ref") and not arguments.get("selector"):
+                raise ToolError("Pass `ref` or `selector` of the target field for vault `paste`.")
+            workspace = self.browsers[dest]
+            located = workspace.tab_op({"op": "locate"}, arguments, mutating=False)
+            host = host_of(located.get("url"))
+            if not host:
+                raise ToolError("Could not determine the current tab's hostname.")
+            resolved = self.island.call({
+                "op": "vault_resolve",
+                "id": entry_id,
+                "target_domain": host,
+                "can_show": True,
+                "reason": arguments.get("reason") or f"Paste into {host}",
+                "timeout_seconds": timeout,
+            }, timeout=timeout + 15)
+            if not resolved.get("found"):
+                raise ToolError(f"No vault entry found with id {quoted(entry_id)}.")
+            decision = resolved.get("decision") or "denied"
+            if decision == "show":
+                workspace.run({"op": "show", **{k: arguments[k] for k in ("window_id", "tab_index") if k in arguments}})
+                return [{"type": "text", "text": json.dumps({"decision": "show", "shown": True, "host": host})}]
+            if decision != "approved":
+                return [{"type": "text", "text": json.dumps({"pasted": False, "decision": decision, "host": host})}]
+
+            typed = workspace.tab_op({
+                "op": "type_secret",
+                "ref": arguments.get("ref"),
+                "selector": arguments.get("selector"),
+                "secret": resolved.get("secret") or "",
+                "expected_domain": host,
+                "clear": arguments.get("clear", True),
+                "submit": bool(arguments.get("submit", False)),
+            }, arguments, mutating=True, secret=True)
+            return [{"type": "text", "text": json.dumps({
+                "pasted": True, "id": entry_id, "to": dest, "host": host, "typed": typed.get("typed"),
+            }, ensure_ascii=False)}]
+
+        if dest == "app":
+            app = self.use(arguments.get("app"), arguments.get("window"))
+            title = arguments.get("window")
+            window = self.window_id(app, title) if title else None
+            view = self.views.get((app_key(app), title)) or self.read(app, window)
+            number = arguments.get("on")
+            if number is None and arguments.get("name") is not None:
+                view, number = self.find_named(app, window, view, arguments["name"])
+            if number is None or number not in view.refs:
+                raise ToolError(f"Pass `on` or `name` of the target field in {app}.")
+            resolved = self.island.call({
+                "op": "vault_resolve",
+                "id": entry_id,
+                "target_app": app,
+                "can_show": bool(title),
+                "reason": arguments.get("reason") or f"Paste into {app}",
+                "timeout_seconds": timeout,
+            }, timeout=timeout + 15)
+            if not resolved.get("found"):
+                raise ToolError(f"No vault entry found with id {quoted(entry_id)}.")
+            decision = resolved.get("decision") or "denied"
+            if decision == "show":
+                self.show_context(arguments)
+                return [{"type": "text", "text": json.dumps({"decision": "show", "app": app})}]
+            if decision != "approved":
+                return [{"type": "text", "text": json.dumps({"pasted": False, "decision": decision, "app": app})}]
+            mode = str(arguments.get("mode") or "set-value")
+            if mode not in ("set-value", "type"):
+                raise ToolError("`mode` must be 'set-value' or 'type'.")
+            Engine.run(mode, view.refs[number], "--stdin", stdin_text=resolved.get("secret") or "")
+            return [{"type": "text", "text": json.dumps({"pasted": True, "id": entry_id, "to": "app", "app": app})}]
+
+        if dest == "env_file":
+            path_str = str(arguments.get("path") or "").strip()
+            env_key = str(arguments.get("key") or "").strip()
+            target, resolved_path = validate_env_target(path_str, env_key)
+            resolved = self.island.call({
+                "op": "vault_resolve",
+                "id": entry_id,
+                "target_file": str(resolved_path),
+                "can_show": False,
+                "reason": arguments.get("reason") or f"Write {env_key} to {target}",
+                "timeout_seconds": timeout,
+            }, timeout=timeout + 15)
+            if not resolved.get("found"):
+                raise ToolError(f"No vault entry found with id {quoted(entry_id)}.")
+            decision = resolved.get("decision") or "denied"
+            if decision != "approved":
+                return [{"type": "text", "text": json.dumps({"pasted": False, "decision": decision, "path": path_str})}]
+            action = write_env_secret(path_str, env_key, resolved.get("secret") or "")
+            return [{"type": "text", "text": json.dumps({
+                "pasted": True, "id": entry_id, "to": "env_file", "path": path_str, "key": env_key, "action": action,
+            }, ensure_ascii=False)}]
+
+        raise ToolError("Pass `to`: 'safari', 'chrome', 'app', or 'env_file' for vault `paste`.")
 
     def situation(self, **more):
         """Ask the helper where the user is. One built before it knew the question never answers, such as the one a
@@ -1796,6 +3224,27 @@ class Server:
     def asker(self):
         """Who an approval is for: the MCP client's name and the folder it runs in."""
         return "{}:{}".format("-".join(str(self.client.get("name") or "unknown").split()), self.folder)
+
+    def harness_info(self):
+        """Which harness and agent session is requesting the notch UI (shown with its logo)."""
+        raw = str(self.client.get("name") or "").strip()
+        low = raw.lower()
+        if "claude" in low:
+            harness_id, harness = "claude", "Claude Code"
+        elif "cursor" in low:
+            harness_id, harness = "cursor", "Cursor"
+        elif "codex" in low or "openai" in low or "chatgpt" in low:
+            harness_id, harness = "codex", "Codex"
+        elif "opencode" in low:
+            harness_id, harness = "opencode", "opencode"
+        elif "windsurf" in low or "codeium" in low:
+            harness_id, harness = "windsurf", "Windsurf"
+        else:
+            harness_id, harness = "generic", raw if raw and low != "unknown" else "Agent"
+        sub = (os.environ.get("UCU_AGENT") or os.environ.get("AGENT_DESKTOP_AGENT_ID") or "").strip()
+        folder = "" if self.folder == "?" else self.folder
+        agent = sub or folder or "session"
+        return {"harness": harness, "harness_id": harness_id, "agent": agent}
 
     def browser_of(self, key):
         """The browser tool for an app, if it is a browser that has one."""
@@ -1859,6 +3308,14 @@ class Server:
         elif browser_note and reply.get("active") and self.browser_of(app_key(name)):
             self.windows.note(BROWSER_NOTE.format(name, self.browser_of(app_key(name)).tool))
         return reply.get("state")
+
+    def user_clicked(self, report):
+        """The user clicked the Dock icon of a browser the chat works in. This is the helper's reading thread, which
+        must not wait, so what comes of the click happens on another."""
+        workspace = self.browser_of(app_key(report.get("app") or ""))
+        if workspace and workspace.used:
+            report = {**report, "asked": report.get("came") == "notch"}
+            threading.Thread(target=workspace.user_came, args=(report,), daemon=True).start()
 
     def user_took(self, names):
         """The user came to an app ucu kept out of their sight. It is on their screen now and stays there, so it is
@@ -1942,8 +3399,13 @@ class Server:
         data = self.snapshot(app, window)
         lines, refs, points, labels, kinds = render(data)
         found = data.get("window") or {}
-        return View(quoted(found.get("title") or app), lines, refs, points, (data.get("tree") or {}).get("bounds"),
+        view = View(quoted(found.get("title") or app), lines, refs, points, (data.get("tree") or {}).get("bounds"),
                     labels, kinds, found.get("id"))
+        match = re.fullmatch(r"w-(\d+)", str(view.window or ""))
+        if match:
+            self.island.publish_agent_state(True, app=app, window_title=found.get("title") or app,
+                                            window_id=int(match.group(1)))
+        return view
 
     @staticmethod
     def whole(view):
@@ -2298,6 +3760,13 @@ class Server:
                 break
             numbers.append(number)
             points += [view.points[number]] if number in view.points else []
+        if points and view.frame and view.frame.get("width") and view.frame.get("height"):
+            px, py = points[-1]
+            nx = max(0.0, min(1.0, (px - view.frame["x"]) / view.frame["width"]))
+            ny = max(0.0, min(1.0, (py - view.frame["y"]) / view.frame["height"]))
+            match = re.fullmatch(r"w-(\d+)", str(view.window or ""))
+            self.island.publish_agent_state(True, app=app, window_id=int(match.group(1)) if match else None,
+                                            cursor_norm=(nx, ny))
         threading.Thread(target=self.trail, args=(points,), daemon=True).start()
         ran, failure = Engine.batch(entries)
         at, on = index + ran, self.words(view, numbers[ran]) if failure else None
@@ -2475,8 +3944,10 @@ class Server:
             if signalled:
                 threading.Thread(target=self.hide_browsers, daemon=True).start()
                 self.windows.send({"turnEnded": True})
+                self.island.publish_agent_state(False)
             if stop:
                 self.stop_helpers()
+                self.island.publish_agent_state(False)
 
     def run(self):
         signal.signal(signal.SIGINFO, lambda _s, _frame: self.turn_end_signal.set())
@@ -2486,6 +3957,7 @@ class Server:
         threading.Thread(target=self.housekeeping, daemon=True).start()
         while not self.done.wait(1):  # the timeout keeps signal handlers running promptly
             pass
+        self.island.publish_agent_state(False)
         self.alerts.stop()
         for workspace in self.browsers.values():
             workspace.close_window()

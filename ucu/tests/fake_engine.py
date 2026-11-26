@@ -52,6 +52,11 @@ def snapshot(app):
         reads.touch()
     if app == "Ghost":  # a list that makes its items anew whenever it is asked: the engine never finds the one read
         extra = [{"role": "image", "name": "Shown", "ref_id": "@s1:e88", "bounds": {**box, "y": 300.0}}]
+    if app == "SecretApp":
+        extra = [
+            {"role": "textfield", "name": "API Token", "value": "tok-native-99887766", "ref_id": "@s1:e30"},
+            {"role": "textfield", "name": "Password", "value": "", "ref_id": "@s1:e31"},
+        ]
     if clicks() >= 2:  # something that only shows after two clicks
         extra.append({"role": "button", "name": "Later", "ref_id": "@s1:e5", "available_actions": ["Click"]})
     return {"app": app, "window": {"title": app, "id": "w-1"}, "tree": {
@@ -65,10 +70,16 @@ def snapshot(app):
 
 def main():
     arguments = sys.argv[1:]
-    log({"args": arguments, "session": os.environ.get("AGENT_DESKTOP_SESSION")})
+    stdin_text = sys.stdin.read() if "--stdin" in arguments else None
+    entry = {"args": arguments, "session": os.environ.get("AGENT_DESKTOP_SESSION")}
+    if stdin_text is not None:
+        entry["stdin"] = stdin_text
+    log(entry)
     command = arguments[0]
     if command == "session":
         reply({"activation": {"environment": "AGENT_DESKTOP_SESSION", "value": "run-1"}})
+    elif command in ("set-value", "type") and "--stdin" in arguments:
+        reply({"delivered": True})
     elif command == "snapshot":
         app = arguments[arguments.index("--app") + 1]
         if "--window-id" not in arguments and app == "Many":
