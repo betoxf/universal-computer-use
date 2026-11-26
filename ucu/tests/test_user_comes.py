@@ -226,6 +226,27 @@ class DockClickTest(unittest.TestCase):
         self.assertEqual(proxy.safari_calls("adopt"), [])
         self.assertNotIn("Dock icon", texts(proxy.safari(op="read")))
 
+    def test_answers_a_switch_to_the_browser_as_it_does_a_click_on_its_dock_icon(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="away")
+        proxy.report(came="switch", app="Safari", front=False, inSight=False)
+        proxy.wait_until(lambda: proxy.safari_calls("adopt"))
+        self.assertIn("asked for Safari", texts(proxy.safari(op="read")))
+
+    def test_does_nothing_for_a_switch_while_no_page_of_the_chats_is_away(self):
+        """The helper tells of every switch that shows the user no window of the browser, also long after a step."""
+        proxy = WatchingProxy(self)
+        (Path(proxy.home.name) / "users-window-docked").touch()
+        proxy.safari(op="open", url="https://a.test")
+        proxy.report(came="switch", app="Safari", front=False, inSight=False)
+        time.sleep(0.6)
+        self.assertEqual((len(proxy.safari_calls("open_tab")), proxy.safari_calls("show_tab")), (1, []))
+        self.assertEqual((proxy.safari_calls("adopt"), proxy.safari_calls("restore_users_window")), ([], []))
+        said = texts(proxy.safari(op="read"))
+        self.assertNotIn("asked for Safari", said)
+        self.assertNotIn("preview at the notch", said)
+
     def test_does_nothing_in_a_browser_the_chat_doesnt_work_in(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")

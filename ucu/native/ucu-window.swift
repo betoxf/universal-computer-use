@@ -2404,6 +2404,13 @@ final class Watcher {
             if parked[pid] == nil { keepHidden(app, id: nil) }
             return
         }
+        // Coming to an app where the chat works in a window of its own asks for it as much as a click on its Dock icon,
+        // and gets the user as little while the chat's window, out of their sight, is all it has. They come at any
+        // time, also long after the chat's last step, when nothing below is watched: so the chat's server hears here.
+        if theirs, !onDock, isOwn(app), !seesWindow(of: app) {
+            cameTo = (pid, Date())
+            clickedDock(app, front: false, inSight: false, how: "switch")
+        }
         // An app this chat drives can't come forward by itself while the chat works and for a while after, nor one ucu
         // opened, whose place is out of sight, while the chat runs. When the agent is bringing it forward, the user's
         // clicks elsewhere have nothing to do with it. The user's app must still be in sight: if it isn't, they went to
@@ -2427,11 +2434,6 @@ final class Watcher {
         if theirs {
             cameTo = (app.processIdentifier, Date())
             giveKeyboardBack(in: app)
-            // Coming to the app another way than by its Dock icon asks for it as much, and gets the user as little
-            // while all it has is the chat's window out of their sight.
-            if !onDock, isOwn(app), !seesWindow(of: app) {
-                clickedDock(app, front: false, inSight: false, how: "switch")
-            }
             return log("\(over): left in front, as the user clicked \(onDock ? "its Dock icon" : "or switched apps")")
         }
         if isGone(previous) {
