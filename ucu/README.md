@@ -9,6 +9,14 @@
   <p>Fast, light on tokens, and ready for Claude Code, opencode and any MCP client. Built on <a href="https://github.com/vercel-labs/agent-desktop">agent-desktop</a> from Vercel Labs.</p>
 </div>
 
+<p align="center">
+  <img src="assets/demo.gif" alt="A terminal: an MCP client calls ucu's look on Calculator and gets its window as numbered text, then act clicks All Clear, 1, 2, Add, 3, 4 and Equals by name and gets back only what changed, 12 + 34 and 46, then look with find reads the answer, 46" width="760">
+</p>
+
+A real session, recorded as it ran: an MCP client reads Calculator, works out 12 + 34 in one call, and reads the answer.
+Calculator is on the agent's private desktop, out of sight, and a session before the recording left it showing 7 × 6.
+[`scripts/demo.py`](scripts/demo.py) makes the recording again.
+
 ## Why UCU
 
 | Capability | What it gives you |
