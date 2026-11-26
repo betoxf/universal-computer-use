@@ -2548,15 +2548,14 @@ final class NotchIslandController: NSObject, NSTextFieldDelegate {
         return NSImage(contentsOfFile: tmp)
     }
 
+    // A click on a chat's preview asks to see what that chat has of the app. Its window may be on the agent's
+    // desktop, where bringing the app forward shows nothing, and a browser a chat works in is sent back when it comes
+    // forward by itself. So the chat's own helper is told, as "<the chat's process> <the app>", and brings it.
     private func focusAgentApp(_ agent: ActiveAgent) {
-        guard !agent.app.isEmpty else { return }
-        let want = agent.app.lowercased()
-        if let running = NSWorkspace.shared.runningApplications.first(where: {
-            ($0.localizedName?.lowercased() == want) || ($0.bundleIdentifier?.lowercased() == want)
-        }) {
-            running.unhide()
-            running.activate(options: [])
-        }
+        guard !agent.app.isEmpty, let pid = agent.pid else { return }
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name("com.ucu.asked-at-notch"), object: "\(pid) \(agent.app)", userInfo: nil,
+            deliverImmediately: true)
     }
 
     // MARK: Queue Progression

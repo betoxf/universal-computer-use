@@ -268,7 +268,9 @@ function usersWindows() {
 
 // While a chat's page is in a window of its own on the agent's desktop, Safari can put a link the user clicks in
 // another app there, as a tab beside it, where they would never see it. Such a tab goes to a window of theirs.
+// Once the user has brought that window to their screen, the tabs they open in it are where they want them.
 function handBack(win) {
+  if (onUsersScreen(win)) return;
   for (let index = win.tabs.length; index >= 2; index--) {
     const url = urlOf(win.tabs[index - 1]), theirs = usersWindows()[0];
     if (url && theirs) theirs.tabs.push(browser.Tab({ url }));
@@ -554,6 +556,31 @@ const OPS = {
     win.index = 1;
     bringBrowserToFront();
     return { shown: true };
+  },
+
+  // The user clicked the browser's Dock icon with no window of theirs before them. With nothing of a chat's out of
+  // their sight the browser would have brought one of theirs back, from the Dock or from another Space. That is
+  // done here, and the reply says whether they had one.
+  restore_users_window() {
+    const theirs = usersWindows()[0];
+    if (!theirs) return { restored: false };
+    if (B.minimized(theirs)) theirs.miniaturized = false;
+    theirs.index = 1;
+    bringBrowserToFront();
+    return { restored: true };
+  },
+
+  // The user asked for the browser while a chat's page was in a window of its own on the agent's desktop, where a
+  // click on the Dock icon gets them nothing: that window comes to their screen as `show_to_user` brings one. Its tab
+  // gets the chat's mark first, by which the chat finds it among the tabs the user opens beside it.
+  adopt(req) {
+    const { win, tab } = tabOf(req);
+    if (onUsersScreen(win)) throw new Error("That window is on the user's screen already.");
+    stamp(tab, req.mark);
+    OPS.show_to_user(req);
+    let origin = null;
+    try { origin = js(tab, "location.origin") || null; } catch (e) { /* a page that runs no script */ }
+    return { mark: req.mark, window_id: B.id(win), tab_index: req.tab_index, known: tabUrls(win), origin };
   },
 
   // Where a tab is and whether its window shows it now, which a screenshot of it needs.

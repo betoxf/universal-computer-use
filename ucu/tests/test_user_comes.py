@@ -111,80 +111,162 @@ class TabInFrontTest(unittest.TestCase):
 
 
 class DockClickTest(unittest.TestCase):
-    """ucu-window reports the user's click on the Dock icon of a browser the chat works in."""
+    """ucu-window reports the user's click on the Dock icon of a browser the chat works in, and on the chat's preview
+    at the notch."""
 
-    def test_opens_the_page_for_the_user_too_when_they_click_safari_in_the_dock(self):
+    def test_brings_the_window_of_its_page_to_the_user_when_they_click_safari_in_the_dock(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
         proxy.safari(op="away")
-        proxy.report(event="dock", app="Safari", front=False, inSight=True)
-        proxy.wait_until(lambda: proxy.safari_calls("show_tab"))
-        first, theirs = proxy.safari_calls("open_tab")
-        self.assertEqual(theirs["url"], "https://a.test")
-        self.assertNotEqual(theirs["mark"], first["mark"])
-        self.assertEqual(proxy.safari_calls("show_tab")[0]["own"]["mark"], theirs["mark"])  # in front, in their window
+        proxy.report(came="dock", app="Safari", front=False, inSight=False)
+        proxy.wait_until(lambda: proxy.safari_calls("adopt"))
+        mine = proxy.safari_calls("open_tab")[0]
+        self.assertEqual((proxy.safari_calls("adopt")[0]["window_id"], proxy.safari_calls("adopt")[0]["mark"]),
+                         (900, mine["mark"]))
         self.assertIn("Safari", [command["allow"] for command in proxy.commands("allow")])
-        self.assertEqual(proxy.safari_calls("close_window"), [])  # the chat's own stays where it was
         said = proxy.safari(op="read")
-        self.assertIn("clicked Safari's Dock icon", texts(said))
-        self.assertEqual(proxy.safari_calls("read")[-1]["window_id"], 900)
+        self.assertIn("asked for Safari", texts(said))
+        self.assertEqual(proxy.safari_calls("read")[-1]["own"]["mark"], mine["mark"])  # a tab among theirs now
+        self.assertNotIn("away", proxy.safari_calls("read")[-1])
+        proxy.report(came="dock", app="Safari", front=True, inSight=True)  # it is with them: nothing more comes
+        proxy.end_turn()
+        time.sleep(0.6)
+        self.assertEqual((len(proxy.safari_calls("adopt")), len(proxy.safari_calls("open_tab"))), (1, 1))
+        self.assertEqual(proxy.safari_calls("close_window"), [])  # and stays where they have it
 
-    def test_opens_one_tab_however_often_they_click(self):
+    def test_brings_it_at_once_during_a_long_step_of_the_agents(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
         proxy.safari(op="away")
-        proxy.report(event="dock", app="Safari", front=False, inSight=True)
-        proxy.wait_until(lambda: proxy.safari_calls("show_tab"))
-        proxy.report(event="dock", app="Safari", front=False, inSight=True)  # they have it, and came from elsewhere
+        (Path(proxy.home.name) / "slow-step").touch()  # the next wait takes three seconds
+        waiting = next(proxy.ids)
+        proxy.send({"id": waiting, "method": "tools/call",
+                    "params": {"name": "safari", "arguments": {"op": "wait", "text": "x"}}})
+        proxy.wait_until(lambda: proxy.safari_calls("wait_for"))
+        asked = time.monotonic()
+        proxy.report(came="dock", app="Safari", front=False, inSight=False)
+        proxy.wait_until(lambda: proxy.safari_calls("adopt"))
+        self.assertLess(time.monotonic() - asked, 1.5)
+        reply = proxy.receive()
+        while reply.get("id") != waiting:
+            reply = proxy.receive()
+        self.assertEqual(proxy.safari_calls("read"), [])
+        proxy.safari(op="read")  # and the agent goes on in the tab the user has now
+        self.assertIn("own", proxy.safari_calls("read")[-1])
+
+    def test_leaves_a_click_that_brings_the_user_their_own_window_alone(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="away")
+        proxy.report(came="dock", app="Safari", front=False, inSight=True)
+        proxy.report(came="dock", app="Safari", front=True, inSight=True)  # nor when they click it again
         time.sleep(0.6)
-        self.assertEqual((len(proxy.safari_calls("open_tab")), len(proxy.safari_calls("show_tab"))), (2, 1))
-        proxy.report(event="dock", app="Safari", front=True, inSight=True)  # with Safari in front, they ask for it
-        proxy.wait_until(lambda: len(proxy.safari_calls("show_tab")) == 2)
+        self.assertEqual((proxy.safari_calls("adopt"), len(proxy.safari_calls("open_tab"))), ([], 1))
+        proxy.end_turn()  # and the page is a tab in their window again when the turn ends, as before
+        proxy.wait_until(lambda: len(proxy.safari_calls("open_tab")) == 2)
+
+    def test_brings_back_the_users_own_window_from_the_dock_and_not_the_chats(self):
+        for browser, came in (("safari", "adopt"), ("chrome", "show_to_user")):
+            with self.subTest(browser=browser):
+                proxy = WatchingProxy(self)
+                (Path(proxy.home.name) / "users-window-docked").touch()
+                proxy.call(browser, op="open", url="https://a.test")
+                if browser == "safari":
+                    proxy.safari(op="away")
+                app = "Safari" if browser == "safari" else "Google Chrome"
+                proxy.report(came="dock", app=app, front=False, inSight=False)
+                proxy.wait_until(lambda: proxy.browser_calls(browser, "restore_users_window"))
+                time.sleep(0.6)
+                self.assertEqual(proxy.browser_calls(browser, came), [])
+                proxy.report(came="notch", app=app, front=False, inSight=False)  # the notch asks for it
+                proxy.wait_until(lambda: proxy.browser_calls(browser, came))
+                self.assertEqual(len(proxy.browser_calls(browser, "restore_users_window")), 1)
+
+    def test_brings_its_window_for_a_click_at_the_notch_while_the_user_has_none(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="away")
+        proxy.report(came="notch", app="Safari", front=False, inSight=False)
+        proxy.wait_until(lambda: proxy.safari_calls("adopt"))
+
+    def test_joins_the_users_window_as_a_tab_for_a_click_at_the_notch(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.safari(op="away")
+        proxy.report(came="notch", app="Safari", front=False, inSight=True)
+        proxy.wait_until(lambda: proxy.safari_calls("show_tab"))
+        mine, theirs = proxy.safari_calls("open_tab")
+        self.assertEqual(theirs["url"], "https://a.test")
+        self.assertNotEqual(theirs["mark"], mine["mark"])
+        self.assertEqual(proxy.safari_calls("show_tab")[0]["own"]["mark"], theirs["mark"])  # in front, in their window
+        self.assertEqual(proxy.safari_calls("adopt"), [])  # no second window comes
+        said = proxy.safari(op="read")
+        self.assertIn("preview at the notch", texts(said))
+        self.assertEqual(proxy.safari_calls("read")[-1]["own"]["mark"], theirs["mark"])  # one page from here on
+        self.assertEqual(len(proxy.safari_calls("close_window")), 1)  # and the one on the agent's desktop is gone
+        proxy.end_turn()
+        time.sleep(0.6)
         self.assertEqual(len(proxy.safari_calls("open_tab")), 2)
-        proxy.end_turn()  # and the chat's page comes back into that tab, not into a third
-        proxy.wait_until(lambda: proxy.safari_calls("close_window"))
-        self.assertEqual(len(proxy.safari_calls("open_tab")), 2)
+
+    def test_shows_its_tab_in_the_users_window_for_a_click_at_the_notch(self):
+        proxy = WatchingProxy(self)
+        proxy.safari(op="open", url="https://a.test")
+        proxy.report(came="notch", app="Safari", front=False, inSight=True)
+        proxy.wait_until(lambda: proxy.safari_calls("show_tab"))
+        self.assertEqual(proxy.safari_calls("show_tab")[0]["own"]["mark"], proxy.safari_calls("open_tab")[0]["mark"])
+        self.assertEqual(proxy.safari_calls("adopt"), [])
+        self.assertIn("preview at the notch", texts(proxy.safari(op="read")))
 
     def test_does_nothing_while_the_chats_tab_is_in_the_users_window(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
-        proxy.report(event="dock", app="Safari", front=True, inSight=True)
+        proxy.report(came="dock", app="Safari", front=True, inSight=True)
         time.sleep(0.6)
         self.assertEqual((len(proxy.safari_calls("open_tab")), proxy.safari_calls("show_tab")), (1, []))
+        self.assertEqual(proxy.safari_calls("adopt"), [])
         self.assertNotIn("Dock icon", texts(proxy.safari(op="read")))
 
     def test_does_nothing_in_a_browser_the_chat_doesnt_work_in(self):
         proxy = WatchingProxy(self)
         proxy.safari(op="open", url="https://a.test")
-        proxy.report(event="dock", app="Google Chrome", front=True, inSight=False)
+        proxy.report(came="dock", app="Google Chrome", front=True, inSight=False)
         time.sleep(0.6)
         self.assertEqual(proxy.chrome_calls(), [])
 
     def test_brings_its_chrome_window_to_the_user(self):
         proxy = WatchingProxy(self)
         proxy.chrome(op="open", url="https://a.test")
-        proxy.report(event="dock", app="Google Chrome", front=False, inSight=True)
+        proxy.report(came="dock", app="Google Chrome", front=False, inSight=False)
         proxy.wait_until(lambda: proxy.chrome_calls("show_to_user"))
         self.assertEqual(proxy.chrome_calls("show_to_user")[0]["window_id"], 901)
         self.assertIn("Google Chrome", [command["allow"] for command in proxy.commands("allow")])
         said = proxy.chrome(op="read")
-        self.assertIn("clicked Google Chrome's Dock icon", texts(said))
+        self.assertIn("asked for Google Chrome", texts(said))
         self.assertEqual(proxy.chrome_calls("show_window"), [])  # it stays where the user has it
-        proxy.report(event="dock", app="Google Chrome", front=True, inSight=True)  # it is with them already
+        proxy.report(came="dock", app="Google Chrome", front=True, inSight=True)  # it is with them already
         time.sleep(0.6)
         self.assertEqual(len(proxy.chrome_calls("show_to_user")), 1)
+        proxy.report(came="notch", app="Google Chrome", front=False, inSight=True)  # to the front again
+        proxy.wait_until(lambda: proxy.chrome_calls("show_tab"))
         proxy.end_turn()
         time.sleep(0.5)
         self.assertEqual(proxy.chrome_calls("hide_window"), [])  # and theirs to close
+
+    def test_leaves_chrome_to_bring_the_user_their_own_window(self):
+        proxy = WatchingProxy(self)
+        proxy.chrome(op="open", url="https://a.test")
+        proxy.report(came="dock", app="Google Chrome", front=False, inSight=True)
+        time.sleep(0.6)
+        self.assertEqual(proxy.chrome_calls("show_to_user"), [])
 
     def test_keeps_an_empty_chrome_window_to_itself_while_the_user_has_one_of_their_own(self):
         proxy = WatchingProxy(self)
         proxy.chrome(op="open", url="https://a.test")
         proxy.chrome(op="close")
-        proxy.report(event="dock", app="Google Chrome", front=False, inSight=True)
+        proxy.report(came="dock", app="Google Chrome", front=True, inSight=True)
         time.sleep(0.6)
         self.assertEqual(proxy.chrome_calls("show_to_user"), [])
-        proxy.report(event="dock", app="Google Chrome", front=False, inSight=False)  # with none, they get that one
+        proxy.report(came="dock", app="Google Chrome", front=False, inSight=False)  # with none, they get that one
         proxy.wait_until(lambda: proxy.chrome_calls("show_to_user"))
 
 

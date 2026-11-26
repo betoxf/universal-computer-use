@@ -824,9 +824,11 @@ final class AskLabel: NSObject {
 // action started or drives came to the front by itself and the user's app was put back, or, with "window": true, when
 // it gave one of its windows out of sight the keyboard, while the user was in that app, and their window got it back.
 // {"event": "taken", ...} says the user came to an app ucu kept out of their sight, which is on their screen now.
-// {"event": "dock", ...} says the user clicked the Dock icon of an app where the agent works in a window of its own,
-// with "front" when the app was in front already and "inSight" when a window of it is in their sight. The server
-// then brings them what the chat has of it out of their sight.
+// {"came": "dock", ...} says the user clicked the Dock icon of an app where the agent works in a window of its own,
+// with "front" when the app was in front already and "inSight" when a window of it is before them. The server
+// then brings them a window. "switch" says they came to it another way, and "notch" that they clicked the chat's
+// preview at the notch, which asks for the chat's own whatever they can see. It carries no "event", so that a
+// server from before it existed says nothing of it to its agent.
 // {"event": "done", ...} says the user clicked Done on what the agent asked of them in an app.
 final class Watcher {
     static let dialogOwners: Set<String> = ["SecurityAgent", "UserNotificationCenter", "CoreServicesUIAgent",
@@ -870,6 +872,8 @@ final class Watcher {
     var who = "?"
     var usersWindows = [Int: CGPoint]()  // the windows on the user's screens as the desktop was made, and where
     var dockClick: (at: Date, app: URL)?  // the user's last click, when it was on an app's icon in the Dock
+    var cameTo: (pid: pid_t, at: Date)?   // the app the user last came to themselves, and when
+    static let cameGrace = 3.0
 
     func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
@@ -887,6 +891,14 @@ final class Watcher {
             launchedHidden.remove($0.processIdentifier)
             launchedFresh.remove($0.processIdentifier)
             if resting { restIfDone() }
+        }
+        // The notch app says which chat's preview the user clicked, as "<the chat's process> <the app in it>".
+        DistributedNotificationCenter.default().addObserver(forName: Self.askedAtNotch, object: nil,
+                                                            queue: .main) { [self] note in
+            let said = (note.object as? String ?? "").split(separator: " ", maxSplits: 1).map(String.init)
+            guard said.count == 2, said[0] == String(getppid()), let app = running(said[1]), !app.isTerminated
+            else { return }
+            clickedDock(app, front: app.isActive, inSight: isOwn(app) && seesWindow(of: app), how: "notch")
         }
         // Another chat's desktop coming or going has macOS arrange the displays again, and move windows with them.
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
@@ -2281,7 +2293,7 @@ final class Watcher {
                   $0.bundleURL?.standardizedFileURL == url.standardizedFileURL && !$0.isTerminated
               }), isOwn(app) || parked[app.processIdentifier] != nil || launchedHidden.contains(app.processIdentifier)
         else { return }
-        let front = app.isActive, inSight = isOwn(app) && hasWindowInSight(app)
+        let front = app.isActive, inSight = isOwn(app) && seesWindow(of: app)
         whenReleased(at: click.location) { [self] in clickedDock(app, front: front, inSight: inSight) }
     }
 
@@ -2301,17 +2313,41 @@ final class Watcher {
     // the agent works there in a window of its own, since a browser opens no window while it has one. Windows that
     // ucu keeps on the agent's desktop come back to the user here. What a chat has in a window of its own only its
     // server can bring, so that hears of the click, with what the user could see of the app as they clicked.
-    func clickedDock(_ app: NSRunningApplication, front: Bool, inSight: Bool) {
-        let pid = app.processIdentifier, name = app.localizedName ?? "?"
-        if isOwn(app) { return emit(["event": "dock", "app": name, "front": front, "inSight": inSight]) }
-        guard front, !app.isTerminated, parked[pid] != nil || launchedHidden.contains(pid) else { return }
-        let names = known.filter { $0.value.processIdentifier == pid }.map(\.key)
-        keptHidden.remove(pid)
-        bringBack(app)
-        rescueStranded(of: app)
-        emit(["event": "taken", "app": name, "names": names])
-        log("the user clicked the Dock icon of \(name), which was in front with its windows out of their sight: "
-            + "they are on the user's screen now")
+    // A click on a chat's preview at the notch asks for the same, of that chat alone and whatever is in front. The
+    // app isn't in front then, as it is after a click in the Dock, so it comes forward here.
+    static let askedAtNotch = Notification.Name("com.ucu.asked-at-notch")
+
+    func clickedDock(_ app: NSRunningApplication, front: Bool, inSight: Bool, how: String = "dock") {
+        let pid = app.processIdentifier, name = app.localizedName ?? "?", atNotch = how == "notch"
+        if isOwn(app) {
+            let did = ["dock": "clicked the Dock icon of \(name)", "notch": "clicked the chat's preview of \(name) "
+                + "at the notch"][how] ?? "switched to \(name)"
+            log("the user \(did), where the chat works in a window of its own, with \(inSight ? "a" : "no") window "
+                + "of it before them: the chat's server is told")
+            return emit(["came": how, "app": name, "front": front, "inSight": inSight])
+        }
+        guard !app.isTerminated else { return }
+        let kept = parked[pid] != nil || launchedHidden.contains(pid)
+        guard kept ? front || atNotch : atNotch else { return }
+        if atNotch {
+            allowed = pid
+            allowedUntil = Date() + Self.allowGrace
+            if app.isHidden { app.unhide() }
+        }
+        if kept {
+            let names = known.filter { $0.value.processIdentifier == pid }.map(\.key)
+            keptHidden.remove(pid)
+            bringBack(app)
+            rescueStranded(of: app)
+            emit(["event": "taken", "app": name, "names": names])
+        }
+        if atNotch {
+            AXUIElementSetAttributeValue(appElement(pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        }
+        log(atNotch ? "the user clicked the chat's preview of \(name) at the notch: it is in front of them"
+                + (kept ? ", with the windows it had out of their sight" : "")
+            : "the user clicked the Dock icon of \(name), which was in front with its windows out of their sight: "
+                + "they are on the user's screen now")
     }
 
     // Whether the user's last click, seconds ago at most, was on this app's icon in the Dock. It says which app they
@@ -2389,7 +2425,13 @@ final class Watcher {
             return log("\(over): left in front, as no step of the agent's was bringing it forward")
         }
         if theirs {
+            cameTo = (app.processIdentifier, Date())
             giveKeyboardBack(in: app)
+            // Coming to the app another way than by its Dock icon asks for it as much, and gets the user as little
+            // while all it has is the chat's window out of their sight.
+            if !onDock, isOwn(app), !seesWindow(of: app) {
+                clickedDock(app, front: false, inSight: false, how: "switch")
+            }
             return log("\(over): left in front, as the user clicked \(onDock ? "its Dock icon" : "or switched apps")")
         }
         if isGone(previous) {
@@ -2405,6 +2447,19 @@ final class Watcher {
 
     func isOwn(_ app: NSRunningApplication) -> Bool {
         [app.localizedName, app.bundleIdentifier].contains { $0.map { own.contains(key($0)) } ?? false }
+    }
+
+    // Whether the user has a window of an app before them: an ordinary one on a screen of theirs, in the Space they
+    // are in. The window server says so also while the app is too busy to answer, as a browser is during a step.
+    func seesWindow(of app: NSRunningApplication) -> Bool {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return list.contains { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier),
+                  (window[kCGWindowLayer as String] as? Int) == 0 else { return false }
+            let frame = bounds(of: window)
+            return frame.height > 60 && !AgentDesktop.isOutOfSight(CGPoint(x: frame.midX, y: frame.minY + 10))
+        }
     }
 
     func hasWindowInSight(_ app: NSRunningApplication) -> Bool {
@@ -2529,9 +2584,24 @@ final class Watcher {
         // On no screen, it may be a window the user is moving. On an agent's desktop it is never theirs.
         if !Self.isOnAgentDesktop(current), Self.userSwitched() { return }
         let windows: [AXUIElement] = attribute(element, kAXWindowsAttribute) ?? []
-        let known = userWindows[pid].flatMap { mine in windows.first { CFEqual($0, mine) } }
-        let inSight = windows.first { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
-        guard let theirs = known ?? inSight else { return }
+        // A window the user put in the Dock stays there: the keyboard would bring it out again.
+        let before = windows.filter { !Self.isOutOfSight($0) && !flag($0, kAXMinimizedAttribute) }
+        let known = userWindows[pid].flatMap { mine in before.first { CFEqual($0, mine) } }
+        guard let theirs = known ?? before.first else {
+            // They put their last window of the app away, so they left it, and their typing belongs to the app
+            // whose window they see now, not to the agent's page. Not when they have just come to the app: then
+            // they asked for it, and a window is on its way to them.
+            if let came = cameTo, came.pid == pid, -came.at.timeIntervalSinceNow < Self.cameGrace { return }
+            // Nor while ucu itself has the app in front, as for a touch, and only when the window server too says
+            // that nothing of the app is before them: an app too busy to list its windows has not lost them.
+            guard !(pid == allowed && Date() < allowedUntil), !seesWindow(of: app), !clickedDockIcon(of: app),
+                  let next = appInSight(besides: [pid]) else { return }
+            front = next
+            AXUIElementSetAttributeValue(appElement(next.processIdentifier), kAXFrontmostAttribute as CFString,
+                                         kCFBooleanTrue)
+            return log("\(app.localizedName ?? "?") has no window before the user any more, and gave one out of "
+                + "sight the keyboard: \(next.localizedName ?? "?"), whose window they see, has it now")
+        }
         AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
         log("\(app.localizedName ?? "?") gave a window out of sight the keyboard: the user's window got it back")

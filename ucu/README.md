@@ -304,7 +304,7 @@ its windows come back to your screen, where you can watch the agent work in it, 
 goes by the icon you clicked and not by how long ago you clicked: a busy app comes forward more than a second after the
 click, and an agent's step in between changes nothing. The agent is told the app is on your screen and to leave it
 there. The same click brings the windows back when the app is in front already with its windows out of your sight,
-where nothing comes forward for it. If virtual displays are not available, apps are
+where nothing comes forward for it, and so does a click on the agent's preview of the app at the notch. If virtual displays are not available, apps are
 shown behind your windows instead. A window of an agent's own left there when the desktop goes, such as its browser
 window after a crash, goes to the Dock rather than onto your screen.
 
@@ -365,19 +365,32 @@ your window at the agent's next step.
 
 A tab you may be looking at is never closed under you. When the agent takes away the tab your window shows, in a
 window with tabs of yours or after it showed you that tab, the tab stays open, and the agent goes on in a copy of its
-page. And a click on Safari's Dock icon never gets you nothing:
-while a page is away, Safari opens no window for that click, because it has one, where you can't see it. So UCU opens
-the page for you too, in a tab of your own window, in front, and the agent keeps its own. Clicking again opens no
-second tab, and brings that one to the front only if Safari was in front already or you had no window of it in sight.
-When the agent's page comes back, at `show` or when the turn ends, it comes into the tab that stayed open for you if
-that is still at its address. It comes into a new tab if you went on in yours, or if you are looking at yours and the
+page. When the agent's page comes back, at `show` or when the turn ends, it comes into the tab that stayed open for you
+if that is still at its address. It comes into a new tab if you went on in yours, or if you are looking at yours and the
 agent's page has moved on, so that nothing changes under your eyes unless the agent shows it to you.
+
+**Coming to Safari always gets you a window.** While a page is away, Safari has a window you can't see, so it opens
+none when you click its Dock icon or switch to it. With no window of your own on screen that would get you nothing.
+UCU answers the click at once, also in the middle of a long step of the agent's:
+
+- With a window of yours on screen, that window comes forward as always, and nothing of the agent's moves.
+- With a window of yours in the Dock or in another Space, that window comes back to you.
+- With no window of yours at all, the agent's window comes to your screen, in front, with its page as it is. It is
+  yours from then on: the agent keeps working in its tab there, and the tabs you open beside it are left alone.
+
+A click on the agent's preview at the notch asks for its page itself. With a window of yours on screen the page opens
+in a tab of that window, in front, and the agent moves into that tab at its next step, where the page loads again. With
+none, the agent's window comes as above. A page that is in a tab of your window already comes to the front there.
+
+You can put your own Safari window in the Dock while a page is away. It stays there, and the keyboard goes to the app
+whose window you see, not to the agent's page.
 
 **In Chrome each chat works in a window of its own**, on the private desktop whenever the agent works in it, where pages
 behave as on a screen and `look` and `act` reach it by its title, which is how an agent handles Chrome's own controls.
-It is hidden when the turn ends, stays for the next page when its tabs close, and closes when the chat ends. A click
-on Chrome's Dock icon while that window is out of your sight brings it to your screen, in front, as `show` does, and
-you use it there while the agent keeps working in it.
+It is hidden when the turn ends, stays for the next page when its tabs close, and closes when the chat ends. When you
+click Chrome's Dock icon, or switch to Chrome, with no window of your own on screen, a window of yours in the Dock comes
+back. If you have none, the chat's window comes to your screen, in front, as `show` does, and you use it there while
+the agent keeps working in it. A click on the agent's preview at the notch brings that window too.
 
 - `show` brings that window to your screen, in front, when you ask to see it or have to do something in it, such as
   sign in. It is a normal window that you use, and the agent keeps working in the same one, so there is one page and no

@@ -132,6 +132,10 @@ def answer_safari(request, state, reply):
                 "title": "T", "loaded": True, **hints}
     if "own" not in request:  # a window of the chat's own, on the agent's desktop: a copy of a page, or one away
         window = next((window for window in state["windows"] if window["window_id"] == request.get("window_id")), None)
+        if window and op == "adopt":  # it comes to the user's screen, and its tab carries the chat's mark
+            window["visible"] = True
+            window["tabs"][0]["mark"] = request["mark"]
+            return where(window, window["tabs"][0], None)
         if window and op == "navigate":
             window["tabs"] = [{"url": request["url"]}]
             return {"window_id": window["window_id"], "tab_index": 1, "url": request["url"], "title": "T",
@@ -295,6 +299,8 @@ def answer(request, state, reply):
         return "text"
     if op == "wait_for":  # a page that isn't in sight stands still, so what it waits for never comes
         return {"found": not os.path.exists(os.path.join(os.environ["HOME"], "page-asleep"))}
+    if op == "restore_users_window":  # whether the user had a window of their own in the Dock
+        return {"restored": os.path.exists(os.path.join(os.environ["HOME"], "users-window-docked"))}
     if op == "hide_window" and os.path.exists(os.path.join(os.environ["HOME"], "window-moved")):
         return {"hidden": False, "moved": True}
     return {"op": op}
@@ -305,6 +311,8 @@ def main():
     request = json.loads(sys.stdin.read() if via_stdin else sys.argv[-1])
     with open(LOG, "a") as handle:
         handle.write(json.dumps({"at": time.time(), "osascript": request, "via_stdin": via_stdin}) + "\n")
+    if request.get("op") == "wait_for" and os.path.exists(os.path.join(os.environ["HOME"], "slow-step")):
+        time.sleep(3)  # a long step of the agent's, during which the user may ask for what it has out of sight
     state = load()
     reply = {"ok": True}
     if request.get("vigil") and os.path.exists(os.path.join(os.environ["HOME"], "page-asleep")):
