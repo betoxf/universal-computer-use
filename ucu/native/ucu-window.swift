@@ -1498,6 +1498,7 @@ final class Watcher {
         let app: NSRunningApplication, window: AXUIElement, number: Int
         var known = Set<Int>()  // the app's windows from before the press, which the sheet isn't one of
         var previous: NSRunningApplication?, userWindow: AXUIElement?
+        var previousWindow: Int?  // the window of their app that was in front, by the window server's number
         var armedAt: Date?, cameForward = false, nudged = false, since = Date(), how = ""
         var mistaken = 0, failed = 0, held = 0.0
         var asked: (id: Any, until: Date)?  // the server waits for the app to have the front, to press in it
@@ -1539,6 +1540,17 @@ final class Watcher {
             var found = CGWindowID(0)
             return Self.windowNumber?(window, &found) == .success && Int(found) == number
         }
+    }
+
+    // The window of an app that is in front of its others, where the user sees it.
+    static func frontWindow(of pid: pid_t) -> Int? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let first = list.first {
+            ($0[kCGWindowOwnerPID as String] as? Int) == Int(pid) && ($0[kCGWindowLayer as String] as? Int) == 0
+                && !AgentDesktop.isOutOfSight(bounds(of: $0).origin)
+        }
+        return first?[kCGWindowNumber as String] as? Int
     }
 
     static func windowNumbers(of pid: pid_t) -> Set<Int> {
@@ -1641,6 +1653,7 @@ final class Watcher {
             touch.userWindow = theirs.flatMap { CFEqual($0, touch.window) ? nil : $0 }
         } else {
             (touch.previous, touch.userWindow) = (current, nil)
+            touch.previousWindow = current.flatMap { Self.frontWindow(of: $0.processIdentifier) }
         }
         (touch.armedAt, touch.cameForward, touch.nudged) = (Date(), false, false)
         allowed = pid
@@ -1705,9 +1718,12 @@ final class Watcher {
                 AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
             } else if let previous = touch.previous, !previous.isTerminated {
                 front = previous
-                previous.activate()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {  // an app macOS doesn't activate is asked itself
-                    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                // Their app comes back by the window they were in, at once and with nothing else of it moving.
+                if !(touch.previousWindow.map { Self.bringForward(previous, window: $0) } ?? false) { previous.activate() }
+                // An app that didn't come is asked itself, unless the browser has the front again for a new pause.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    guard touch.armedAt == nil,
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
                     AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
                                                  kCFBooleanTrue)
                 }
@@ -1731,13 +1747,18 @@ final class Watcher {
             } else if !found.open, touch.sheet {
                 return endTouch("closed")
             }
-            if found.open, !touch.done, let element = found.element {
+            if found.open, let element = found.element {
+                let live: [Bool?] = touch.buttons.map { attribute($0, kAXEnabledAttribute) }
                 if touch.buttons.isEmpty {
                     touch.buttons = Self.liveButtons(in: element)
-                } else if touch.buttons.contains(where: { (attribute($0, kAXEnabledAttribute) as Bool?) == false }) {
+                } else if !touch.done, live.contains(false) {
                     touch.done = true
                     disarm(touch, why: "the sheet has the touch, and their app is back while it closes", telling: false)
                     emit(["event": "touch", "done": true])
+                } else if touch.done, live.allSatisfy({ $0 == true }) {
+                    // Its buttons can be pressed again: it didn't take that finger, and waits for another.
+                    touch.done = false
+                    emit(["event": "touch", "sheet": true, "armed": false, "text": contents(of: element).text])
                 }
             }
         }
@@ -1754,7 +1775,9 @@ final class Watcher {
                         emit(["id": asked.id, "state": "armed"])
                     }
                     emit(["event": "touch", "armed": true])
-                } else if held > Self.touchNudge, !touch.nudged {
+                } else if held > Self.touchNudge, !touch.nudged, !touch.sheet {
+                    // Only before the sheet is open: with it open, an app asked itself brought a window of the user's
+                    // over their app. Then this arming fails instead.
                     touch.nudged = true
                     raise(touch)
                     AXUIElementSetAttributeValue(appElement(pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
