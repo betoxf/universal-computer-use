@@ -285,17 +285,19 @@ class IslandApprovalAndPasskeyTest(unittest.TestCase):
         self.assertEqual(proxy.passkey_events[-1]["prompt"], "Please touch the key")
         self.assertIn("Sign in with Passkey", proxy.passkey_events[-1]["detail"])
         notes = proxy.notes(proxy.look())
-        self.assertTrue(any("Please touch the key" in n for n in notes), notes)
+        self.assertTrue(any("macOS is asking for Touch ID or a password" in n for n in notes), notes)
 
         proxy.report(event="auth_prompt", active=False)
         proxy.wait_until(lambda: any(e.get("active") is False for e in proxy.passkey_events))
 
-    def test_explicit_passkey_kind_toggles_touch_id_notch(self):
+    def test_the_passkey_kind_lights_nothing_by_itself(self):
         proxy = FakeIslandProxy(self)
-        on = json.loads(proxy.text(proxy.call("ask_user", title="Please touch the key", kind="passkey",
-                                              domain="github.com", active=True)))
+        refused = proxy.call("ask_user", title="Please touch the key", kind="passkey", domain="github.com")
+        self.assertTrue(refused["result"]["isError"])
+        self.assertIn("Pass `browser`", proxy.text(refused))
         off = json.loads(proxy.text(proxy.call("ask_user", title="done", kind="passkey", active=False)))
-        self.assertEqual((on["active"], off["active"]), (True, False))
+        self.assertIs(off["active"], False)
+        self.assertEqual(proxy.passkey_events, [])  # the banner comes with a sheet that is open, and goes with it
 
     def test_publishes_active_agent_cursor_state_and_clears_when_turn_ends(self):
         proxy = FakeIslandProxy(self)
@@ -319,7 +321,8 @@ class IslandApprovalAndPasskeyTest(unittest.TestCase):
         self.assertNotIn("passkey", body)
         self.assertIn("UCU Vault has a saved login for a.test", note)
         self.assertIn("Sign in with Google", note)
-        self.assertIn("Passkey / Touch ID", note)
+        self.assertIn("sign-in with a passkey", note)
+        self.assertIn("A click of yours opens no sheet", note)
 
     def test_prefers_on_screen_quick_login_over_password_prompt(self):
         proxy = FakeIslandProxy(self)
@@ -336,6 +339,100 @@ class IslandApprovalAndPasskeyTest(unittest.TestCase):
         forced = proxy.vault(op="fill", browser="safari", force_prompt=True)
         self.assertFalse(forced["result"]["isError"])
         self.assertEqual(len([r for r in proxy.island_requests if r["op"] == "vault_request"]), 1)
+
+
+class PasskeyTouchTest(unittest.TestCase):
+    """A passkey sign-in in Safari: the sheet opens, and waits for the touch, where the user doesn't see it."""
+
+    def at_sign_in(self, plan=""):
+        proxy = FakeIslandProxy(self)
+        (Path(proxy.home.name) / "page-in-sight").touch()
+        if plan:
+            (Path(proxy.home.name) / "touch").write_text(plan)
+        proxy.safari(op="open", url="https://a.test/signin?passkey=1")
+        return proxy
+
+    @staticmethod
+    def lit(proxy):
+        return [event.get("prompt") for event in proxy.passkey_events if event.get("active")]
+
+    @staticmethod
+    def presses(proxy):
+        return [entry["args"] for entry in proxy.batched() if entry["command"] == "mouse-click"]
+
+    def cleared(self, proxy):
+        """Whatever happened, the helper is told it is over, which gives the front back, and the notch is clear."""
+        self.assertEqual(len(proxy.commands("touchEnd")), 1)
+        proxy.wait_until(lambda: proxy.passkey_events and proxy.passkey_events[-1].get("active") is False)
+
+    def test_presses_the_passkey_button_out_of_sight_and_waits_for_the_touch(self):
+        proxy = self.at_sign_in()
+        allowed = len(proxy.commands("allow"))
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual((said["method"], said["sheet"], said["clicked"]), ("passkey", "closed", "Sign in with Passkey"))
+        self.assertIn("read the page", said["note"])
+        self.assertEqual(proxy.safari_calls("show_tab"), [])  # nothing came to the user,
+        self.assertEqual(len(proxy.commands("allow")), allowed)  # and nothing was allowed to
+        found = proxy.safari_calls("click_auth_option")[-1]  # the page only finds its button, in the chat's window
+        self.assertEqual((found["real"], found["away"]), (True, True))
+        self.assertEqual(self.presses(proxy), [{"xy": "640,480", "app": "Safari", "window_id": f"w-{found['window_id']}"}])
+        self.assertEqual(proxy.commands("touch")[-1]["window"], found["window_id"])
+        self.assertEqual(len(proxy.commands("touchWatch")), 1)
+        self.cleared(proxy)
+        self.assertEqual(self.lit(proxy), ["Sign in to a.test"])  # the notch names the site, once the sheet is there
+
+    def test_lights_the_notch_only_for_a_sheet_that_opened(self):
+        proxy = self.at_sign_in("none")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual(said["sheet"], "none")
+        self.assertIn("no sheet opened", said["note"])
+        self.assertEqual(len(self.presses(proxy)), 1)
+        self.cleared(proxy)
+        self.assertEqual(self.lit(proxy), [])
+
+    def test_says_at_the_notch_whether_the_finger_is_read(self):
+        proxy = self.at_sign_in("typing")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual(said["sheet"], "closed")
+        self.cleared(proxy)
+        self.assertEqual(self.lit(proxy), ["Pause, then touch", "Sign in to a.test"])
+
+    def test_presses_again_when_the_user_got_in_before_the_press(self):
+        proxy = self.at_sign_in("interrupted")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual(said["sheet"], "closed")
+        self.assertEqual((len(proxy.commands("touch")), len(self.presses(proxy))), (2, 2))
+        self.cleared(proxy)
+
+    def test_gives_up_when_nobody_touches(self):
+        proxy = self.at_sign_in("timeout")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual(said["sheet"], "timed out")
+        self.assertIn("It was cancelled.", said["note"])
+        self.cleared(proxy)
+
+    def test_presses_nothing_while_the_user_is_busy(self):
+        proxy = self.at_sign_in("busy")
+        refused = proxy.vault(op="fill", browser="safari")
+        self.assertTrue(refused["result"]["isError"])
+        self.assertIn("opens only in a pause of theirs", proxy.text(refused))
+        self.assertEqual(self.presses(proxy), [])
+        self.assertEqual(len(proxy.commands("touchEnd")), 1)
+        self.assertEqual(self.lit(proxy), [])
+
+    def test_waits_at_a_sheet_that_is_open_already(self):
+        proxy = self.at_sign_in("left")
+        said = json.loads(proxy.text(proxy.vault(op="fill", browser="safari")))
+        self.assertEqual(said["sheet"], "closed")
+        self.assertEqual(self.presses(proxy), [])  # it is there: nothing is pressed again
+        self.cleared(proxy)
+
+    def test_the_notch_tool_takes_the_same_way(self):
+        proxy = self.at_sign_in()
+        said = json.loads(proxy.text(proxy.call("ask_user", title="Sign in", kind="passkey", browser="safari")))
+        self.assertEqual((said["method"], said["sheet"], said["host"]), ("passkey", "closed", "a.test"))
+        self.assertEqual(proxy.safari_calls("show_tab"), [])
+        self.cleared(proxy)
 
 
 class VaultAutofillAndSecretRelayTest(unittest.TestCase):
@@ -422,12 +519,13 @@ class VaultAutofillAndSecretRelayTest(unittest.TestCase):
         self.assertEqual((second["method"], second["provider"], second["auto"]), ("oauth", "Google", True))
         self.assertEqual(sum(1 for r in proxy.island_requests if r["op"] == "vault_request"), before_req)
 
-        # 3) Passkey available on a site (e.g. apple.test): auto-clicks Passkey immediately & lights Touch ID notch!
+        # 3) Passkey available on a site (e.g. apple.test): the passkey is used at once. In Chrome, where a sheet
+        #    out of sight isn't measured, the user gets the window and touches there, and the notch says nothing.
         proxy.chrome(op="open", url="https://apple.test/signin?passkey=1")
         pk = json.loads(proxy.text(proxy.vault(op="fill", browser="chrome")))
-        self.assertEqual((pk["method"], pk["auto"]), ("passkey", True))
-        self.assertTrue(any(e.get("active") is True and e.get("prompt") == "Please touch the key"
-                            for e in proxy.passkey_events))
+        self.assertEqual((pk["method"], pk["auto"], pk["shown"]), ("passkey", True, True))
+        self.assertEqual(proxy.asks()[-1], ("Touch ID to sign in to apple.test", "Google Chrome"))
+        self.assertEqual([e for e in proxy.passkey_events if e.get("active")], [])
 
         # 4) Account-aware vault selection: picks work@co.test over personal@me.test when requested!
         proxy.seed_vault("gh-personal", kind="login", domains=["multi.test"], username="personal@me.test", secret="pw-personal-11")

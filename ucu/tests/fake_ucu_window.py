@@ -13,6 +13,11 @@ An app whose name starts with "Under" has a sheet over its window, which can't b
 name starts with "Elsewhere" comes to the front with the user in another of its windows.
 In an app whose name starts with "Keys" the user presses a key once its first step is made. While $HOME/user-typing
 exists, the user is typing and doesn't pause.
+A passkey sheet on a window out of sight goes as $HOME/touch says: "busy" (the user never pauses), "old" (a helper
+from before it could hold one, which says nothing), "left" (an earlier call's sheet is still open), "none" (the press
+opens nothing), "interrupted" (the user got in before the first press, and the second opens it), "typing" (the sheet
+opens while the user types, and the finger is read once they pause) or "timeout" (nobody touches). Otherwise the sheet
+opens, the finger is read, and it closes.
 Each line added to $FAKE_WINDOW_REPORTS goes out as a report. Run without `watch`, it logs its arguments like the
 other commands.
 """
@@ -30,6 +35,7 @@ lent = []  # the app that is in front for an agent's steps
 modes = {}  # how each app was last lent: "borrowed", "front" or "pointer"
 fronts = []  # each time the server asked who is in front since an app was lent
 opened = set()  # apps it opened, which keep it running after `rest`
+watched = []  # each time the server waited at a passkey sheet
 writing = threading.Lock()
 
 
@@ -50,6 +56,11 @@ def relay_reports():
                     os._exit(0)
             else:
                 time.sleep(0.02)
+
+
+def touch_plan():
+    said = os.path.join(os.environ["HOME"], "touch")
+    return open(said).read().strip() if os.path.exists(said) else ""
 
 
 def answer(command):
@@ -107,6 +118,30 @@ def answer(command):
         fronts.append(command)  # a click at a place asks twice: for the step, then for the place
         typed = {"typed": True} if name.startswith("Keys") and len(fronts) > 2 else {}
         send({"id": command["id"], "front": "Mail" if elsewhere else name, **covered, **typed})
+    elif "touch" in command:
+        plan = touch_plan()
+        if plan == "old":
+            return
+        if plan == "busy":
+            return send({"id": command["id"], "state": "busy", "front": "Mail"})
+        if plan == "left":
+            return send({"id": command["id"], "state": "sheet"})
+        send({"id": command["id"], "state": "armed"})
+        send({"event": "touch", "armed": True})
+    elif "touchWatch" in command:
+        plan = touch_plan()
+        watched.append(command)
+        if plan == "none" or (plan == "interrupted" and len(watched) == 1):
+            send({"event": "touch", "armed": False})
+            return send({"id": command["id"], "state": "none", "sheet": False, "interrupted": int(plan != "none")})
+        send({"event": "touch", "sheet": True, "armed": plan != "typing", "text": "Sign in with your passkey?"})
+        if plan == "typing":
+            time.sleep(0.3)
+            send({"event": "touch", "armed": True})
+        time.sleep(0.3)
+        state = "timeout" if plan == "timeout" else "closed"
+        send({"id": command["id"], "state": state, "sheet": True, "cancelled": plan == "timeout", "interrupted": 0})
+        send({"event": "touch", "sheet": False, "state": state})
     elif "quiet" in command:
         send({"id": command["id"], "quiet": not os.path.exists(os.path.join(os.environ["HOME"], "user-typing"))})
     elif "atWork" in command:

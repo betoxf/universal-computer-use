@@ -134,9 +134,8 @@ The first use of each app by a chat, and every refusal, goes to `~/Library/Logs/
 - `safari {op, ...}` and `chrome {op, ...}`: work in Safari and Google Chrome in the agent's own tabs.
 - `ask_user {title, detail?, kind?, browser?, app?, window?, domain?, touch_id?, remember_key?}`: drops a non-activating
   black pill out of the MacBook notch so you can approve sensitive clicks (like "Continue with Google" or creating an API
-  key) without switching apps or stopping the agent's turn. With `kind: "passkey"` (or automatically whenever macOS opens
-  a Touch ID / passkey prompt during agent work), the notch shows the Touch ID icon on the left and `"Please touch the key"`
-  on the right.
+  key) without switching apps or stopping the agent's turn. With `kind: "passkey"` and `browser`, it signs in with your
+  passkey the way `vault` `fill` does: see "Passkey sign-in without the page" below.
 - `vault {op, ...}`: encrypted Keychain-backed credential and secret vault whose raw values never enter chat or process
   arguments. `list` returns metadata only; `fill` autofills saved logins autonomously on matching domains or drops a
   compact notch form where you can enter a login and remember it for future times; `capture` blindly captures a newly
@@ -411,9 +410,15 @@ Sensitive actions don't need to interrupt your window or put passwords and API k
   pile tightly onto the left side of the notch (right side untouched). Hover any cursor in the pile to peek at a compact
   live mini-preview of what that agent is currently seeing, where its cursor is, and what it's doing; click the preview
   to jump to that app, or move away to collapse back into the notch.
-- **Passkey / Touch ID indicator:** when a page or macOS opens a Touch ID / passkey prompt (`coreautha`,
-  `AuthenticationServicesAgent`, `SecurityAgent`) during agent work, the MacBook notch expands with only the Touch ID
-  icon on the left and `"Please touch the key"` on the right, and collapses as soon as authentication finishes.
+- **Passkey sign-in without the page:** when a page offers a passkey, `vault` `fill` moves the agent's Safari tab to
+  its private desktop and presses the page's passkey button there, as a user would, so the Touch ID sheet opens where
+  you don't see it. The notch then shows the Touch ID icon and the site, such as `"Sign in to example.com"`, and you
+  touch the sensor. Safari reads a finger only while it is the active app, so ucu makes it the active app, with
+  nothing on your screen moving, only while you aren't typing, clicking or moving the pointer, and gives your app back
+  the moment you do, or the sheet closes. While you are busy the notch says `"Pause, then touch"`. Nobody touching for
+  90 seconds cancels the sheet. In Chrome, where this isn't measured, the agent's window comes to you and you touch
+  there. A system Touch ID or password dialog (`coreautha`, `AuthenticationServicesAgent`, `SecurityAgent`) that opens
+  during agent work lights the notch too, with `"Please touch the key"`.
 - **Quick notch approvals:** for actions such as clicking `"Continue with Google"` or pasting a secret to a new target,
   the notch expands quietly without stealing focus (`Approve` / `Show` / `Deny`, or `⌃⌥↵` / `⌃⌥⎋`).
 - **Remembered logins & blind API keys:** logins and captured secrets live in an AES-256-GCM encrypted vault

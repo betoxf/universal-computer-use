@@ -256,7 +256,11 @@ def answer(request, state, reply):
         host = tab["url"].split("://", 1)[-1].split("/", 1)[0].lower()
         lbl = f"Continue with {request.get('provider')}" if request.get("method") == "oauth" else (
             "Sign in with Passkey" if request.get("method") == "passkey" else str(request.get("label") or request.get("account")))
-        return {"clicked": lbl, "method": request.get("method"), "host": host}
+        found = {"clicked": lbl, "method": request.get("method"), "host": host}
+        if request.get("real"):  # the button is only found: where it is on screen, while the page is in sight
+            in_sight = os.path.exists(os.path.join(os.environ["HOME"], "page-in-sight"))
+            found["point"] = [640, 480] if in_sight else None
+        return found
     if op == "fill_login":
         window = next(window for window in state["windows"] if window["window_id"] == request["window_id"])
         tab = window["tabs"][request["tab_index"] - 1]

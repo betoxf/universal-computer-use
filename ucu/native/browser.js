@@ -1102,19 +1102,28 @@ const OPS = {
       try { view.focus(); target.focus(); } catch (e) {}
       const r = target.getBoundingClientRect();
       const at = { bubbles: true, cancelable: true, view: view, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      // A click made here is one the page can tell from the user's, and a passkey sheet opens for the user's only.
+      // With `real` the button is only found: ucu presses it where it is on the screen.
+      for (const type of a.real ? [] : ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
         target.dispatchEvent(type.startsWith("pointer") ? new view.PointerEvent(type, at) : new view.MouseEvent(type, at));
       }
-      target.click();
+      if (!a.real) target.click();
+      // Where that is in the window. A button in a frame is where its frame is, plus where it is in the frame.
+      let left = r.x + r.width / 2, top = r.y + r.height / 2;
+      for (let frame = view.frameElement; frame; frame = frame.ownerDocument.defaultView.frameElement) {
+        const box = frame.getBoundingClientRect();
+        left += box.x + frame.clientLeft;
+        top += box.y + frame.clientTop;
+      }
       const spot = document.visibilityState !== "visible" ? null
-        : [Math.max(0, window.outerWidth - window.innerWidth) + r.x + r.width / 2,
-           window.outerHeight - window.innerHeight + r.y + r.height / 2];
+        : [Math.max(0, window.outerWidth - window.innerWidth) + left, window.outerHeight - window.innerHeight + top];
       return { clicked: labelOf(target).slice(0, 80), method: a.method, host: (location.hostname || "").toLowerCase(), spot };
     }, {
       method: req.method || null,
       provider: req.provider || null,
       label: req.label || null,
       account: req.account || null,
+      real: !!req.real,
     }));
   },
 

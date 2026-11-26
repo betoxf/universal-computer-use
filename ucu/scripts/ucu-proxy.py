@@ -113,6 +113,27 @@ ASK_LIMIT = 120       # characters of what an agent asks of the user that show o
 FRONT_LOCK = Path.home() / "Library/Application Support/ucu/front.lock"  # held by the chat whose app is in front
 FRONT_TAKEN = "Another agent's steps have the front of the user's screen right now. Try again in a moment."
 BORROW_WAIT = 8       # seconds a step that needs the app in front waits for the user to do nothing for a moment
+TOUCH_OPEN = 3        # seconds a sheet has to open after the press: Safari took 0.35 to 0.7
+TOUCH_LIMIT = 90      # seconds the user has to touch before the sheet is cancelled
+TOUCH_TRIES = 2       # presses, when the user did something just as the first was made
+TOUCH_READY = "Sign in to {}"      # what the notch says while the finger is read,
+TOUCH_PAUSE = "Pause, then touch"  # and while the user types or moves the pointer, when it isn't
+TOUCH_BUSY = ("The user is working in {}, and the passkey sheet opens only in a pause of theirs: their keyboard goes "
+              "to it for a moment. Nothing was pressed. Try again in a while.")
+NO_TOUCH = ("This Mac's ucu-window can't hold a passkey sheet for the user's touch: it is older than this server. "
+            "`ucu update` builds one that can. Until then `show` them the tab and ask them to sign in there.")
+TOUCH_FAILED = "{} couldn't take the user's touch out of their sight ({}). `show` them the tab and ask them there."
+TOUCH_CLOSED = ("The passkey sheet opened where the user doesn't see it, the notch asked them for their touch, and "
+                "the sheet closed. It closes the same way when a sign-in is refused, so read the page to see "
+                "whether you are signed in.")
+TOUCH_NONE = ("The page's passkey button was pressed as a user would press it, and no sheet opened. The page may "
+              "need another step first, or offer the passkey elsewhere: read it.")
+TOUCH_TIMEOUT = ("The notch asked the user for their touch for {} seconds and they didn't give it, so nothing was "
+                 "signed in. {} Say in the chat what you need, or try again when they are there.")
+TOUCH_SHOWN = ("A passkey sheet is held out of the user's sight only in Safari, on your private desktop, which is "
+               "what was measured to work. So your tab is in front of the user with the passkey button pressed: "
+               "they touch there. Wait for them, then go on.")
+TOUCH_ASK = "Touch ID to sign in to {}"
 USER_BUSY = ("The user is working in {}, and these steps take their pointer, and may bring {} to the front. Do what "
              "can be done behind, try again in a while, or ask them.")
 USER_TYPED = ("The user started typing while {} was in front for your steps, so the rest of them were not made, and "
@@ -155,10 +176,12 @@ QUICK_LOGIN_NOTE = ("[ucu: This page already has a saved account / one-click sig
                     "password is still needed afterwards.]")
 OAUTH_NOTE = ("[ucu: This page offers Sign in with {}. Call `ask_user` before clicking it so the user can approve "
               "from the notch without switching apps.]")
-PASSKEY_HINT_NOTE = ("[ucu: This page offers Passkey / Touch ID sign-in. Clicking it lights up the notch Touch ID "
-                     "prompt automatically.]")
-AUTH_PROMPT_NOTE = ("[ucu: macOS is asking for Touch ID / authentication ({}). The notch is showing \"Please touch "
-                    "the key\" so the user can tap Touch ID without switching windows.]")
+PASSKEY_HINT_NOTE = ("[ucu: This page offers sign-in with a passkey. A click of yours opens no sheet: call `vault` "
+                     "(op: \"fill\") on it, which presses the button as a user would on your private desktop, and "
+                     "the notch asks the user for their touch.]")
+AUTH_PROMPT_NOTE = ("[ucu: macOS is asking for Touch ID or a password ({}), and the notch says so. Whether the user "
+                    "can answer it from where they are hasn't been measured: if nothing happens, `show` them the "
+                    "window.]")
 ISLAND_HELPER = Path.home() / ".local/bin/ucu-island"
 ISLAND_SOCKET = Path.home() / "Library/Application Support/ucu/island.sock"
 VAULT_FILE = Path.home() / "Library/Application Support/ucu/vault.enc"
@@ -222,8 +245,8 @@ site the user asked you to use. Only call `vault` (op: "fill") to prompt the use
 sign-in works and a password is truly needed.
 - For sensitive clicks (such as "Continue with Google", creating an API key, or risky submits), call `ask_user` \
 first: it drops a quiet prompt at the MacBook notch so the user can approve without switching apps and you keep \
-working without stopping your turn. Pass `kind: "passkey"` only if a page waits for Touch ID and macOS didn't pop \
-a system prompt on its own.
+working without stopping your turn. For a passkey, call `vault` (op: "fill") on the page instead: ucu presses its \
+passkey button out of the user's sight, and the notch asks for their touch only while the sheet is really open.
 - For logins, passwords, API keys and tokens, use `vault` so raw secrets never enter chat: `vault` (op: "fill") \
 autofills saved logins autonomously on matching domains or asks the user right in the notch (with "Remember for \
 future times"); `vault` (op: "capture") reads a newly created API key blindly (or intercepts a Copy button without \
@@ -327,8 +350,9 @@ WINDOW_TOOLS.extend([
     {"name": "ask_user",
      "description": "Ask at the MacBook notch without stealing focus or stopping your turn (e.g. \"Continue with "
                     "Google\" or creating an API key). `kind`: `approve` (default, Approve/Show/Deny), `passkey` "
-                    "(Touch ID notch split; `active`: true/false), or `touch_id`. Pass `browser` or `app`+`window` "
-                    "for Show; `remember_key` offers session remember.",
+                    "(with `browser`: presses the page's passkey button out of the user's sight and waits for their "
+                    "touch), or `touch_id`. Pass `browser` or `app`+`window` for Show; `remember_key` offers session "
+                    "remember.",
      "inputSchema": {"type": "object", "required": ["title"], "properties": {
          "title": {"type": "string"}, "detail": {"type": "string"},
          "kind": {"enum": ["approve", "passkey", "touch_id"]}, "active": {"type": "boolean"},
@@ -530,6 +554,7 @@ class IslandClient:
         self.identity = identity or (lambda: {})
         self.lock = threading.Lock()
         self.may_have_secrets = None
+        self.banners, self.sending = collections.deque(), threading.Lock()
 
     def _connect_and_send(self, payload, timeout):
         with socket.socket(socket.AF_UNIX) as link:
@@ -634,10 +659,19 @@ class IslandClient:
         return text
 
     def passkey(self, active, prompt=None, detail="", timeout=60):
+        """Show or clear the Touch ID banner, without waiting for the notch. What is asked goes out in the order it
+        was asked: a banner cleared just after it was lit would otherwise stay lit when the two overtake each other."""
         payload = {"op": "passkey", "active": bool(active), "detail": detail, "timeout_seconds": timeout}
         if prompt:
             payload["prompt"] = prompt
-        threading.Thread(target=self.try_call, args=(payload, 2.0, bool(active)), daemon=True).start()
+        self.banners.append(payload)
+        threading.Thread(target=self.send_banners, daemon=True).start()
+
+    def send_banners(self):
+        with self.sending:
+            while self.banners:
+                payload = self.banners.popleft()
+                self.try_call(payload, 2.0, bool(payload["active"]))
 
     def toast(self, text, icon="key.fill"):
         threading.Thread(target=self.try_call, args=({"op": "toast", "text": text, "icon": icon}, 2.0, True),
@@ -1359,6 +1393,17 @@ class SafariWorkspace(BrowserWorkspace):
         page.update(self.reply.get("own") or {})
         return result
 
+    def away_spot(self, request, arguments):
+        """Take the chat's own tab to its private desktop, find there what `request` names without pressing it, and
+        return the page and what was found, with where it is on the screen."""
+        self.check_allowed()
+        with self.lock:
+            page, _theirs = self.aim(arguments)
+            if page is None:
+                raise RuntimeError("A passkey sign-in works in your own tab: open the page in one first.")
+            self.send_away(page, "tab_index" in arguments)
+            return page, self.in_tab({**request, "real": True}, page, "tab_index" in arguments)
+
     def tab_op(self, request, arguments, mutating=True, secret=False, timeout=SAFARI_TIMEOUT):
         """Run one internal browser.js operation on the addressed Safari tab (used by vault fill/capture/paste)."""
         self.check_allowed()
@@ -1576,11 +1621,12 @@ class WindowWatcher:
     """Runs `ucu-window watch` while the chat works. Without the helper, or with one from before it could watch,
     everything here does nothing, and the agent just doesn't get what it adds."""
 
-    def __init__(self, color, who, taken, auth_prompt=None):
+    def __init__(self, color, who, taken, auth_prompt=None, touch=None):
         self.color = color     # gives this chat's cursor color
         self.who = who         # gives who the chat is, for the focus log
         self.taken = taken     # hears which apps ucu kept out of sight the user came to
         self.auth_prompt = auth_prompt  # hears macOS Touch ID / passkey system dialogs appear & disappear
+        self.touch = touch     # hears of the passkey sheet the chat waits at: there or not, and read right now or not
         self.process = None
         self.unusable = False  # it exited by itself, so it isn't started again
         self.lock = threading.Lock()
@@ -1616,6 +1662,9 @@ class WindowWatcher:
                 if slot:
                     slot[1] = message
                     slot[0].set()
+            elif message.get("event") == "touch":
+                if self.touch:
+                    self.touch(message)
             elif message.get("event") == "auth_prompt":
                 if self.auth_prompt:
                     self.auth_prompt(message)
@@ -2010,7 +2059,7 @@ class Server:
         self.sessions = Sessions()
         self.island = IslandClient(self.asker, lambda: self.sessions.cursor_color(self.folder), self.harness_info)
         self.windows = WindowWatcher(lambda: self.sessions.cursor_color(self.folder), self.asker, self.user_took,
-                                     self.on_auth_prompt)
+                                     self.on_auth_prompt, self.on_touch)
         self.browsers = {tool: (SafariWorkspace if tool == "safari" else BrowserWorkspace)(self, tool)
                          for tool in BROWSERS}
         self.used_apps = set()              # apps this chat has driven, as app_key names
@@ -2020,7 +2069,7 @@ class Server:
         self.logged_apps = set()            # apps already in the approval log for this chat
         self.hidden_apps = {}               # apps ucu opened and still keeps out of sight, app_key -> name
         self.parked_apps = set()            # those of them on the agent's desktop, as app_key names
-        self._passkey_take_back = None      # browser workspace temporarily surfaced for Touch ID WebAuthn
+        self.touching = None                # the passkey sheet the chat waits at: what the notch says of it
         self.views = {}                     # (app, window) -> the last View
         self.running = 0                    # tool calls in flight
         self.last_end = 0
@@ -2227,31 +2276,32 @@ class Server:
             self.island.publish_agent_state(True, app=app, window_title=title, window_id=wid, action=action)
 
     def on_auth_prompt(self, message):
-        """Mirror macOS biometric/passkey dialogs onto the notch Touch ID split pill, and tuck any temporarily surfaced
-        agent browser window back out of sight the instant Touch ID finishes."""
+        """Mirror a system Touch ID or password dialog onto the notch's Touch ID banner while it is on screen."""
         active = bool(message.get("active"))
         detail = " · ".join(part for part in (message.get("title"), message.get("text")) if part)[:90]
         if not detail and message.get("app"):
             detail = f"Passkey · {message['app']}"
         self.island.passkey(active=active, prompt="Please touch the key", detail=detail)
-        if not active:
-            with self.lock:
-                restore = self._passkey_take_back
-                self._passkey_take_back = None
-            if restore is not None:
-                def _rehide():
-                    time.sleep(0.18)
-                    try:
-                        if isinstance(restore, dict):
-                            ws = restore["workspace"]
-                            ws.call({"op": "select_tab", "window_id": restore["window_id"],
-                                     "tab_index": restore["prev_tab"]}, timeout=10)
-                        else:
-                            restore.take_back()
-                            restore.reveal_quietly()
-                    except Exception:
-                        pass
-                threading.Thread(target=_rehide, daemon=True).start()
+
+    def on_touch(self, message):
+        """What the helper says of the passkey sheet the chat waits at. The notch asks for the touch only while a real
+        sheet is open, and says whether the finger is read right now: it is only while the browser has the front,
+        which it has in a pause of the user's."""
+        touching = self.touching
+        if touching is None:
+            return
+        if message.get("sheet") is False:
+            touching["lit"] = False
+            self.island.passkey(active=False)
+            return
+        if message.get("sheet"):
+            touching["lit"], touching["text"] = True, str(message.get("text") or "")
+        if "armed" in message:
+            touching["armed"] = bool(message["armed"])
+        if touching.get("lit"):
+            prompt = TOUCH_READY.format(touching["host"]) if touching.get("armed") else TOUCH_PAUSE
+            self.island.passkey(active=True, prompt=prompt, detail=touching.get("text", "")[:90],
+                                timeout=touching["limit"])
 
     def show_context(self, arguments):
         """Bring the referenced browser tab or app window forward when the user clicks Show in the notch."""
@@ -2283,16 +2333,15 @@ class Server:
         domain = host_of(arguments.get("domain"))
         badge = domain or (BROWSERS[browser][0] if browser in BROWSERS else None) or app or "UCU"
         if kind == "passkey":
-            active = arguments.get("active", True)
-            prompt = title if title.lower() != "passkey" else "Please touch the key"
-            reply = self.island.call({
-                "op": "passkey",
-                "active": bool(active),
-                "prompt": prompt,
-                "detail": detail or (f"Passkey · {badge}" if badge != "UCU" else ""),
-                "timeout_seconds": timeout,
-            }, timeout=10)
-            return [{"type": "text", "text": json.dumps({"ok": True, "kind": "passkey", "active": bool(reply.get("active"))})}]
+            if arguments.get("active") is False:  # there is nothing to turn off: the banner goes with its sheet
+                return [{"type": "text", "text": json.dumps({"ok": True, "kind": "passkey", "active": False})}]
+            if browser not in self.browsers:
+                raise ToolError("Pass `browser`: the notch asks for a touch only for a passkey sheet that is open "
+                                "on your own tab, which this opens with the page's passkey button.")
+            workspace = self.browsers[browser]
+            located = workspace.tab_op({"op": "locate"}, arguments, mutating=False)
+            return self.passkey_sign_in(workspace, arguments, host_of(located.get("url")) or domain or badge, "asked",
+                                        limit=timeout)
 
         can_show = (browser in self.browsers) or bool(app and arguments.get("window"))
         req = {
@@ -2446,11 +2495,11 @@ class Server:
                         out["account"] = plan.get("account") or account
                     return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
                 if plan_action == "passkey" and plan.get("auto"):
-                    return self._trigger_passkey_auth(workspace, arguments, host, plan.get("source"))
+                    return self.passkey_sign_in(workspace, arguments, host, plan.get("source"))
                 # Passkey available on the page (and no site preference / saved login / quick session took priority):
                 # auto-click Passkey immediately so the user only taps Touch ID!
                 if has_passkey and plan_action not in ("password", "oauth", "quick_login"):
-                    return self._trigger_passkey_auth(workspace, arguments, host, "passkey_auto")
+                    return self.passkey_sign_in(workspace, arguments, host, "passkey_auto")
 
             resolved = self.island.call({
                 "op": "vault_resolve",
@@ -2502,7 +2551,7 @@ class Server:
                 method = resolved.get("method") or "oauth"
                 provider = resolved.get("provider")
                 if method == "passkey":
-                    return self._trigger_passkey_auth(workspace, arguments, host, "chosen", remembered=remembered)
+                    return self.passkey_sign_in(workspace, arguments, host, "chosen", remembered=remembered)
                 clicked = workspace.tab_op({"op": "click_auth_option", "method": method, "provider": provider},
                                            arguments, mutating=True)
                 return [{"type": "text", "text": json.dumps({
@@ -2598,55 +2647,91 @@ class Server:
 
         raise ToolError("Pass `browser` ('safari' or 'chrome') or `app` for vault `fill`.")
 
-    def _trigger_passkey_auth(self, workspace, arguments, host, source, remembered=False):
-        """W3C WebAuthn + macOS WebKit strictly require an on-screen focused browsing context (`document.hasFocus()`).
-        Light up the minimal Touch ID notch immediately, surface the tab only for the Touch ID tap, and automatically
-        restore the previous tab / tuck the agent window back out of sight and return focus once Touch ID finishes."""
-        self.island.passkey(active=True, prompt="Please touch the key", detail="", timeout=45)
-        self.windows.send({"allow": workspace.app, "front": True, "return_after_auth": True})
-        if workspace.tool == "chrome" and not workspace.shared and workspace.window is not None:
-            with self.lock:
-                self._passkey_take_back = workspace
-            try:
-                workspace.run({"op": "show", **{k: arguments[k] for k in ("window_id", "tab_index")
-                                                if k in arguments}})
-            except Exception:
-                pass
-        elif workspace.tool == "safari":
-            try:
-                wins = workspace.call({"op": "list"}, timeout=10)
-                if isinstance(wins, list):
-                    target_wid = arguments.get("window_id")
-                    page_rec = workspace.pages[-1] if getattr(workspace, "pages", None) else None
-                    if target_wid is None and page_rec:
-                        target_wid = page_rec.get("window_id")
-                    win_info = next((w for w in wins if w.get("window_id") == target_wid), None)
-                    prev_tab = win_info.get("current_tab_index") if win_info else None
-                    workspace.run({"op": "show", **{k: arguments[k] for k in ("window_id", "tab_index")
-                                                    if k in arguments}})
-                    if prev_tab and win_info:
-                        with self.lock:
-                            self._passkey_take_back = {
-                                "workspace": workspace,
-                                "window_id": win_info["window_id"],
-                                "prev_tab": prev_tab,
-                            }
-            except Exception:
-                pass
-        time.sleep(0.25)
-        clicked = workspace.tab_op({"op": "click_auth_option", "method": "passkey"}, arguments, mutating=True)
-        out = {
-            "method": "passkey",
-            "clicked": clicked.get("clicked"),
-            "host": host,
-            "auto": True,
-            "source": source,
-            "note": "Triggered WebAuthn Passkey with the notch showing 'Please touch the key'. macOS requires the "
-                    "browser window on screen during Touch ID; focus and window/tab placement restore automatically as "
-                    "soon as Touch ID completes.",
-        }
+    def passkey_sign_in(self, workspace, arguments, host, source, remembered=False, limit=TOUCH_LIMIT):
+        """Sign in with the user's passkey without bringing them the page. Its passkey button is pressed as a user
+        would press it, in the chat's tab on its private desktop, and the notch asks for their touch while the sheet
+        is open there. Where that can't be done, they get the tab instead and touch there."""
+        out = {"method": "passkey", "host": host, "auto": True, "source": source}
         if remembered:
             out["remembered"] = True
+        limit = max(10, min(float(limit or TOUCH_LIMIT), TOUCH_LIMIT))
+        if workspace.tool != "safari" or not workspace.desktop_place():
+            return self.passkey_in_sight(workspace, arguments, host, out)
+        page, found = workspace.away_spot({"op": "click_auth_option", "method": "passkey"}, arguments)
+        out["clicked"] = found.get("clicked")
+        ended = self.touch_sheet(workspace, page, found, host, limit)
+        state = ended.get("state")
+        out["sheet"] = {"timeout": "timed out"}.get(state, state)
+        if state == "closed":
+            out["note"] = TOUCH_CLOSED
+        elif state == "none":
+            out["note"] = TOUCH_NONE
+        elif state == "timeout":
+            left = ("It was cancelled." if ended.get("cancelled")
+                    else "The sheet is still open on your tab: closing the tab ends it.")
+            out["note"] = TOUCH_TIMEOUT.format(round(limit), left)
+        else:
+            raise ToolError(TOUCH_FAILED.format(workspace.app, state or "no answer"))
+        try:
+            out["url"] = workspace.tab_op({"op": "locate"}, arguments, mutating=False).get("url")
+        except (RuntimeError, ToolError):
+            pass
+        return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
+
+    def touch_sheet(self, workspace, page, found, host, limit):
+        """Open a passkey sheet with a real press in the chat's window on its private desktop, and wait there for the
+        user's touch. Safari opens the sheet only for a press made while it is the active app, and reads the finger
+        only while it is: so the helper gives it the front in a pause of the user's, with that window as its main one,
+        which moves nothing on their screen, and gives their app back at whatever they do. The notch says so from the
+        helper's word alone. Every way out of here gives the front back and clears the notch. Return what the helper
+        said at the end."""
+        self.windows.start()
+        number, turn = page["window_id"], self.front_turn()
+        self.touching = {"host": host, "limit": limit}
+        try:
+            for last in (attempt + 1 == TOUCH_TRIES for attempt in range(TOUCH_TRIES)):
+                begun = self.windows.ask({"touch": workspace.app, "window": number, "wait": BORROW_WAIT},
+                                         BORROW_WAIT + 5)
+                if begun is None:
+                    raise ToolError(NO_TOUCH)
+                state = begun.get("state")
+                if state == "busy":
+                    raise ToolError(TOUCH_BUSY.format(begun.get("front") or "another app"))
+                if state == "lent":
+                    raise ToolError(FRONT_TAKEN)
+                if state not in ("armed", "sheet"):
+                    raise ToolError(TOUCH_FAILED.format(workspace.app, state or "no answer"))
+                if state == "armed":  # no sheet is open yet: the press opens it
+                    point = found.get("point")
+                    if not point:
+                        raise ToolError("That page isn't in sight on your private desktop, so there is nowhere to "
+                                        "press.")
+                    self.windows.send({"ours": workspace.app})
+                    self.point_click(workspace.app, point, {"do": "click"}, f"w-{number}")
+                ended = self.windows.ask({"touchWatch": True, "opens": TOUCH_OPEN, "limit": limit},
+                                         limit + TOUCH_OPEN + 10) or {}
+                # A press the user's own typing or click got in before reaches a page that isn't the active one, which
+                # opens nothing: it is made once more, in their next pause.
+                if last or not (ended.get("state") == "none" and ended.get("interrupted")):
+                    return ended
+            return {}
+        finally:
+            self.windows.send({"touchEnd": True})
+            self.touching = None
+            self.island.passkey(active=False)
+            turn.close()
+
+    def passkey_in_sight(self, workspace, arguments, host, out):
+        """Where a sheet can't be held out of sight, the user gets the tab with its passkey button pressed, and what
+        to do there is said on the window."""
+        where = {key: arguments[key] for key in ("window_id", "tab_index") if key in arguments}
+        workspace.run({"op": "show", "text": TOUCH_ASK.format(host), **where})
+        real = workspace.tool == "safari"  # there a click made by script opens no sheet
+        found = workspace.tab_op({"op": "click_auth_option", "method": "passkey", "real": real}, arguments,
+                                 mutating=True)
+        if real:
+            workspace.press(found)
+        out.update(clicked=found.get("clicked"), shown=True, note=TOUCH_SHOWN)
         return [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]
 
     def _browser_passwords_autofill(self, workspace, arguments, host, timeout):

@@ -843,8 +843,6 @@ final class Watcher {
     var seenWindows = [pid_t: [AXUIElement]]()
     var seenDialogs = Set<Int>()
     var activeAuthDialogs = Set<Int>()  // on-screen biometric/passkey system dialogs driving the notch indicator
-    var returnAfterAuthApp: NSRunningApplication?  // restored automatically when a passkey Touch ID sheet dismisses
-    var returnAfterAuthUntil = Date.distantPast
     var known = [String: NSRunningApplication]()  // finding a running app takes ~15 ms, and agents get apps often
     var keptHidden = Set<pid_t>()
     let desktop = AgentDesktop()
@@ -899,9 +897,7 @@ final class Watcher {
         scanDialogs(reporting: false)
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [self] _ in
             if Date() < busyUntil { scan() }
-            else if Date() < guardUntil || !activeAuthDialogs.isEmpty || Date() < returnAfterAuthUntil {
-                scanDialogs(reporting: Date() < guardUntil || Date() < returnAfterAuthUntil)
-            }
+            else if Date() < guardUntil || !activeAuthDialogs.isEmpty { scanDialogs(reporting: Date() < guardUntil) }
         }
         Timer.scheduledTimer(withTimeInterval: Self.focusTick, repeats: true) { [self] _ in
             if Date() < guardUntil { guardWindow() }
@@ -938,6 +934,7 @@ final class Watcher {
     // desktop, macOS moves its windows back to the user's screens, so they are hidden first.
     func finish() {
         giveBack(id: nil)
+        endTouch("ended")
         let leaving = keptApps(), started = Date()
         leaving.forEach { $0.terminate() }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [self] timer in
@@ -1098,37 +1095,10 @@ final class Watcher {
             oursUntil[app.processIdentifier] = Date() + Self.oursGrace
         }
         if let name = command["allow"] as? String, let app = running(name) {
-            let pid = app.processIdentifier
-            if command["return_after_auth"] as? Bool == true {
-                let prev = NSWorkspace.shared.frontmostApplication
-                if let prev, prev.processIdentifier != pid, prev.localizedName != "ucu-island" {
-                    returnAfterAuthApp = prev
-                } else if let f = front, f.processIdentifier != pid, f.localizedName != "ucu-island" {
-                    returnAfterAuthApp = f
-                }
-                returnAfterAuthUntil = Date() + 45.0
-            }
-            allowed = pid
-            allowedUntil = Date() + max(Self.allowGrace, 8.0)  // only for the call that asked: later it can't come forward again
-            oursUntil[pid] = nil
-            keptHidden.remove(pid)
+            allowed = app.processIdentifier
+            allowedUntil = Date() + Self.allowGrace  // only for the call that asked: later it can't come forward again
+            keptHidden.remove(app.processIdentifier)
             bringBack(app)
-            if command["front"] as? Bool == true {
-                let raiseFront = {
-                    app.unhide()
-                    let el = appElement(pid)
-                    if let main: AXUIElement = attribute(el, kAXMainWindowAttribute) {
-                        AXUIElementPerformAction(main, kAXRaiseAction as CFString)
-                    } else if let first = (attribute(el, kAXWindowsAttribute) as [AXUIElement]?)?.first {
-                        AXUIElementSetAttributeValue(first, kAXMainAttribute as CFString, kCFBooleanTrue)
-                        AXUIElementPerformAction(first, kAXRaiseAction as CFString)
-                    }
-                    AXUIElementSetAttributeValue(el, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-                    app.activate()
-                }
-                raiseFront()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: raiseFront)
-            }
             log("\(app.localizedName ?? "?") came to the user at the agent's request")
         }
         if let busy = command["busy"] as? Bool {
@@ -1207,7 +1177,17 @@ final class Watcher {
             let inIt = running(name).map { $0.processIdentifier == front } ?? false
             emit(["id": id, "atWork": inIt && Self.userIsActive(within: Self.lendIdle)])
         }
-        if command["rest"] != nil { giveBack(id: nil) }  // a turn never ends with the user's screen still lent
+        if command["rest"] != nil {  // a turn never ends with the user's screen still lent, or their keyboard
+            giveBack(id: nil)
+            endTouch("ended")
+        }
+        if let name = command["touch"] as? String, let id = command["id"] {
+            beginTouch(name, number: command["window"] as? Int ?? 0, wait: command["wait"] as? Double ?? 8, id: id)
+        }
+        if command["touchWatch"] != nil, let id = command["id"] {
+            watchTouch(open: command["opens"] as? Double ?? 3, limit: command["limit"] as? Double ?? 90, id: id)
+        }
+        if command["touchEnd"] != nil { endTouch("ended") }
         if let text = command["ask"] as? String {
             // The window is the one named, or the one the agent has just brought to the user, which the app is in.
             let app = (command["app"] as? String).flatMap(running)
@@ -1279,6 +1259,9 @@ final class Watcher {
     func borrow(_ query: String, window named: String, wait: Double, pointerOnly: Bool, id: Any) {
         guard let app = running(query) else { return emit(["id": id, "state": "unknown"]) }
         let pid = app.processIdentifier
+        if let touch {  // its app has the front in every pause of the user's, until its sheet closes
+            return emit(["id": id, "state": "lent", "front": touch.app.localizedName ?? "?"])
+        }
         if let lent {  // one app at a time: a second would forget whose turn it is to come back
             if lent.app.processIdentifier != pid {
                 return emit(["id": id, "state": "lent", "front": lent.app.localizedName ?? "?"])
@@ -1501,6 +1484,256 @@ final class Watcher {
         DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
             emit(["id": id, "state": "returned", "taken": was.userTookIt])
         }
+    }
+
+    // MARK: a touch for a sheet the user can't see
+
+    // A page opens a passkey sheet only for a press made while its app is the active one, and the sheet reads the
+    // finger only while its app is the active one. Where the window is matters to neither. So it stays on the agent's
+    // desktop and nothing on the user's screen moves: the app is activated with that window as its main one, which
+    // leaves its other windows behind the user's app. Their keyboard goes with the front all the same, to a window
+    // they can't see. So the app has the front only in a pause of theirs, and whatever they do gives it back at once.
+    // Measured on Safari, 25 November 2026.
+    final class Touch {
+        let app: NSRunningApplication, window: AXUIElement, number: Int
+        var known = Set<Int>()  // the app's windows from before the press, which the sheet isn't one of
+        var previous: NSRunningApplication?, userWindow: AXUIElement?
+        var armedAt: Date?, cameForward = false, since = Date()
+        var mistaken = 0, failed = 0, held = 0.0
+        var asked: (id: Any, until: Date)?  // the server waits for the app to have the front, to press in it
+        var pressBy: Date?  // and has it only this long to say that it pressed
+        var watch: (id: Any, opensBy: Date, until: Date)?  // then it waits for the sheet to open, and to close
+        var sheet = false, sheetNumber: Int?, timer: Timer?, ticks = 0
+        init(app: NSRunningApplication, window: AXUIElement, number: Int) {
+            (self.app, self.window, self.number) = (app, window, number)
+        }
+    }
+
+    // The keyboard leaves the user's window only after a pause in their typing, and after a longer one once they have
+    // typed into a pause of that length: the key that ended it went to the sheet, and nothing here can catch a key or
+    // send it on to their app, which takes a permission to read the keyboard that ucu doesn't ask for. The rest of
+    // what their hands do stops for less, as none of it is lost. A touch on the sensor is none of these.
+    static let touchQuiet = 1.2, touchBackOff = 4.0, touchIdle = 0.7, touchSettle = 1.0
+    // What the user does is looked for a hundred times a second, so that a shortcut's key finds their app in front
+    // again, and the sheet a third as often: it is the app that answers that.
+    static let touchTick = 0.01, touchSheetTicks = 3
+    static let touchTries = 3, touchPress = 5.0
+    static let touchInput: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                                            .mouseMoved, .leftMouseDragged, .scrollWheel]
+    static let windowNumber = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow").map {
+        unsafeBitCast($0, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError).self)
+    }
+    var touch: Touch?
+
+    // The app's window with that number at the window server, which is how the server knows a browser's window.
+    func window(of app: NSRunningApplication, numbered number: Int) -> AXUIElement? {
+        let windows: [AXUIElement] = attribute(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+        return windows.first { window in
+            var found = CGWindowID(0)
+            return Self.windowNumber?(window, &found) == .success && Int(found) == number
+        }
+    }
+
+    static func windowNumbers(of pid: pid_t) -> Set<Int> {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return Set(list.filter { ($0[kCGWindowOwnerPID as String] as? Int) == Int(pid) }
+            .compactMap { $0[kCGWindowNumber as String] as? Int })
+    }
+
+    // Whether the window has a sheet, and the sheet itself where the app says which element it is. It is told by what
+    // it is, not by what it says, which is in the user's language: the window's child with a sheet's role, or else a
+    // smaller window of the app's that came over it since the press. Nil when the app didn't answer.
+    func sheet(on touch: Touch) -> (open: Bool, element: AXUIElement?)? {
+        var value: CFTypeRef?
+        let answer = AXUIElementCopyAttributeValue(touch.window, kAXChildrenAttribute as CFString, &value)
+        guard answer == .success else { return answer == .invalidUIElement ? (false, nil) : nil }
+        let children = value as? [AXUIElement] ?? []
+        if let sheet = children.first(where: { (attribute($0, kAXRoleAttribute) as String?) == kAXSheetRole }) {
+            return (true, sheet)
+        }
+        guard let frame = Self.frame(of: touch.window) else { return (false, nil) }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let over = list.first { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int) == Int(touch.app.processIdentifier),
+                  (window[kCGWindowLayer as String] as? Int) == 0,
+                  let number = window[kCGWindowNumber as String] as? Int, number != touch.number,
+                  !touch.known.contains(number) else { return false }
+            let box = bounds(of: window)
+            return frame.insetBy(dx: -2, dy: -2).contains(box) && (box.width < frame.width || box.height < frame.height)
+        }
+        touch.sheetNumber = over?[kCGWindowNumber as String] as? Int
+        return (over != nil, nil)
+    }
+
+    func beginTouch(_ query: String, number: Int, wait: Double, id: Any) {
+        endTouch("replaced")
+        if let lent { return emit(["id": id, "state": "lent", "front": lent.app.localizedName ?? "?"]) }
+        guard let app = running(query), let window = window(of: app, numbered: number) else {
+            return emit(["id": id, "state": "unknown"])
+        }
+        // Only where the user can't see it: on their screen the window would come over their app.
+        guard !app.isHidden, Self.isOnAgentDesktop(window) else { return emit(["id": id, "state": "inSight"]) }
+        AXUIElementSetMessagingTimeout(window, 0.3)  // an app that is busy mustn't hold up giving the front back
+        let touch = Touch(app: app, window: window, number: number)
+        touch.known = Self.windowNumbers(of: app.processIdentifier)
+        self.touch = touch
+        touch.timer = Timer.scheduledTimer(withTimeInterval: Self.touchTick, repeats: true) { [self] _ in touchTick() }
+        if sheet(on: touch)?.open == true {  // an earlier call's, which nobody touched: no press is needed
+            touch.sheet = true
+            touch.pressBy = Date() + Self.touchPress
+            return emit(["id": id, "state": "sheet"])
+        }
+        touch.asked = (id, Date() + wait)
+        touchTick()
+    }
+
+    func watchTouch(open: Double, limit: Double, id: Any) {
+        guard let touch else { return emit(["id": id, "state": "none"]) }
+        if let asked = touch.asked { emit(["id": asked.id, "state": "replaced"]) }
+        (touch.asked, touch.pressBy) = (nil, nil)
+        touch.watch = (id, Date() + open, Date() + limit)
+        if touch.sheet { emit(["event": "touch", "sheet": true, "armed": touch.cameForward, "text": sheetText(touch)]) }
+    }
+
+    func sheetText(_ touch: Touch) -> String {
+        guard let element = sheet(on: touch)?.element else { return "" }
+        return contents(of: element).text
+    }
+
+    func isPause(for touch: Touch) -> Bool {
+        let quiet = touch.mistaken > 0 ? Self.touchBackOff : Self.touchQuiet
+        return Self.secondsSince(.keyDown) >= quiet && !Self.touchInput.contains { Self.secondsSince($0) < Self.touchIdle }
+    }
+
+    func raise(_ touch: Touch) {
+        AXUIElementSetAttributeValue(touch.window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(touch.window, kAXRaiseAction as CFString)
+    }
+
+    func arm(_ touch: Touch) {
+        let pid = touch.app.processIdentifier, current = NSWorkspace.shared.frontmostApplication
+        if current?.processIdentifier == pid {  // the user is in another window of the same app
+            let theirs: AXUIElement? = attribute(appElement(pid), kAXFocusedWindowAttribute)
+            touch.userWindow = theirs.flatMap { CFEqual($0, touch.window) ? nil : $0 }
+        } else {
+            (touch.previous, touch.userWindow) = (current, nil)
+        }
+        (touch.armedAt, touch.cameForward) = (Date(), false)
+        allowed = pid
+        allowedUntil = .distantFuture  // until it is given back
+        oursUntil[pid] = Date() + Self.oursGrace  // it comes forward by this, not by the click the user just made
+        raise(touch)
+        // Activating brings the app's main window forward and leaves its others behind the user's app. Asking the app
+        // itself to be frontmost would bring them all over it, so that isn't done here: it fails instead.
+        touch.app.activate()
+    }
+
+    // Their app has the front again, or the window of that app they were in. If they went elsewhere themselves
+    // meanwhile, nothing is done: they are where they want to be.
+    func disarm(_ touch: Touch, why: String, telling: Bool = true) {
+        guard let armed = touch.armedAt else { return }
+        let pid = touch.app.processIdentifier, name = touch.app.localizedName ?? "?"
+        let held = -armed.timeIntervalSinceNow
+        touch.armedAt = nil
+        touch.held += touch.cameForward ? held : 0
+        allowedUntil = .distantPast
+        oursUntil[pid] = nil
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            if let theirs = touch.userWindow {
+                AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
+            } else if let previous = touch.previous, !previous.isTerminated {
+                front = previous
+                previous.activate()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {  // an app macOS doesn't activate is asked itself
+                    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                    AXUIElementSetAttributeValue(appElement(previous.processIdentifier), kAXFrontmostAttribute as CFString,
+                                                 kCFBooleanTrue)
+                }
+            }
+        }
+        log("\(name) had the front for \(String(format: "%.2f", held)) s with its window out of sight, "
+            + "for the user's touch: \(why)")
+        if touch.cameForward, telling { emit(["event": "touch", "armed": false]) }
+    }
+
+    func touchTick() {
+        guard let touch else { return }
+        let pid = touch.app.processIdentifier
+        if touch.app.isTerminated { return endTouch("gone") }
+        touch.ticks += 1
+        if touch.ticks % Self.touchSheetTicks == 0, let found = sheet(on: touch) {
+            if found.open, !touch.sheet {
+                touch.sheet = true
+                let text = found.element.map { contents(of: $0).text } ?? ""
+                emit(["event": "touch", "sheet": true, "armed": touch.cameForward && touch.armedAt != nil, "text": text])
+            } else if !found.open, touch.sheet {
+                return endTouch("closed")
+            }
+        }
+        if let armed = touch.armedAt {
+            let held = -armed.timeIntervalSinceNow
+            let isFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            if !touch.cameForward {
+                if isFront {
+                    touch.cameForward = true
+                    raise(touch)  // the app came forward with the window that was its main one, which may be another
+                    if let asked = touch.asked {
+                        (touch.asked, touch.pressBy) = (nil, Date() + Self.touchPress)
+                        emit(["id": asked.id, "state": "armed"])
+                    }
+                    emit(["event": "touch", "armed": true])
+                } else if held > Self.touchSettle {
+                    touch.failed += 1
+                    disarm(touch, why: "macOS didn't bring it forward")
+                    if touch.failed >= Self.touchTries { return endTouch("failed") }
+                }
+            } else if Self.touchInput.contains(where: { Self.secondsSince($0) < held - 0.05 }) {
+                touch.mistaken += 1
+                disarm(touch, why: "the user did something, and has their app back")
+            } else if !isFront {
+                disarm(touch, why: "another app came forward")
+            }
+        } else if touch.asked != nil || (touch.watch != nil && touch.sheet), lent == nil, isPause(for: touch) {
+            arm(touch)
+        }
+        if let asked = touch.asked, Date() >= asked.until, !(touch.armedAt != nil && !touch.cameForward) {
+            return endTouch("busy")
+        }
+        if touch.watch == nil, let by = touch.pressBy, Date() >= by { return endTouch("abandoned") }
+        if let watch = touch.watch {
+            if !touch.sheet, Date() >= watch.opensBy { return endTouch("none") }
+            if Date() >= watch.until { return endTouch("timeout") }
+        }
+    }
+
+    // Every way out gives the front back. A sheet nobody is coming for is cancelled by its own Cancel button, which
+    // the app names whatever its language, so that it isn't left waiting where nobody sees it.
+    func endTouch(_ state: String) {
+        guard let touch else { return }
+        self.touch = nil
+        touch.timer?.invalidate()
+        var cancelled = false
+        if touch.sheet, !["closed", "replaced", "gone"].contains(state), let element = sheet(on: touch)?.element,
+           let cancel: AXUIElement = attribute(element, kAXCancelButtonAttribute) {
+            cancelled = AXUIElementPerformAction(cancel, kAXPressAction as CFString) == .success
+        }
+        disarm(touch, why: "it ended: \(state)", telling: false)  // the notch goes dark, with nothing more to say
+        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
+        var said: [String: Any] = ["state": state, "sheet": touch.sheet, "cancelled": cancelled, "front": front,
+                                   "interrupted": touch.mistaken, "held": (touch.held * 100).rounded() / 100,
+                                   "waited": (-touch.since.timeIntervalSinceNow * 100).rounded() / 100]
+        if let asked = touch.asked {
+            said["id"] = asked.id
+            emit(said)
+        }
+        if let watch = touch.watch {
+            said["id"] = watch.id
+            emit(said)
+        }
+        emit(["event": "touch", "sheet": false, "state": state])
     }
 
     func running(_ query: String) -> NSRunningApplication? {
@@ -1890,17 +2123,6 @@ final class Watcher {
             activeAuthDialogs.formIntersection(visibleAuth)
             if activeAuthDialogs.isEmpty {
                 emit(["event": "auth_prompt", "active": false])
-                if let back = returnAfterAuthApp, Date() < returnAfterAuthUntil {
-                    returnAfterAuthApp = nil
-                    returnAfterAuthUntil = Date.distantPast
-                    allowed = nil
-                    allowedUntil = Date.distantPast
-                    if !back.isTerminated {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                            back.activate()
-                        }
-                    }
-                }
             }
         }
     }
@@ -2146,8 +2368,9 @@ final class Watcher {
     // window on its desktop when it shows or opens a popup, and their typing would go there. So their window gets it
     // back. Behind another app there is no keyboard to take, and the user's window gets it as they come to the app.
     func guardWindow() {
+        // The app that waits for the user's touch has the keyboard in a window out of sight on purpose.
         for app in driven where app.isActive && !app.isTerminated && !app.isHidden
-            && parked[app.processIdentifier] == nil {
+            && parked[app.processIdentifier] == nil && !(touch?.armedAt != nil && touch?.app == app) {
             giveKeyboardBack(in: app)
         }
     }
